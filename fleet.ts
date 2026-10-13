@@ -921,24 +921,60 @@ function usageRow(W: number, now: number): string {
 
 // ───────────────────────── rendering ─────────────────────────
 
-export function buckets(lists: number[][], now: number, n: number): number[] {
-  const span = opt.windowMin * 60_000;
-  const start = now - span;
-  const out = new Array(n).fill(0);
+/**
+ * The stretch of wall-clock time a strip of `n` bars shows. The bars sit on fixed clock edges: with a
+ * bar length of window / n, bar k covers [k·bar, (k+1)·bar), and the strip ends with the bar still
+ * filling. So a bar changes only when a tool call lands in it, and the strip steps left one cell when
+ * a bar closes. Cutting the window at "now minus span" instead moved every edge each second, which is
+ * what made the sparklines shimmer.
+ */
+export interface Win {
+  bar: number; // milliseconds per bar
+  n: number; // bars in the strip
+  first: number; // index of the leftmost bar, counted from the epoch
+  start: number; // first * bar: the oldest moment shown
+  end: number; // (first + n) * bar: when the bar still filling will close
+}
+export function timeWindow(now: number, windowMs: number, n: number): Win {
+  const bar = windowMs / n;
+  const first = Math.floor(now / bar) - n + 1;
+  return { bar, n, first, start: first * bar, end: (first + n) * bar };
+}
+/** Which bar of `win` the moment `t` falls in; negative before the window, `win.n` or more after it. */
+export const barOf = (t: number, win: Win) => Math.floor(t / win.bar) - win.first;
+
+/** Count the timestamps of each list (oldest first) into the bars of `win`. */
+export function bucketsIn(lists: number[][], win: Win): number[] {
+  const out = new Array(win.n).fill(0);
   for (const list of lists)
     for (let i = list.length - 1; i >= 0; i--) {
-      const t = list[i];
-      if (t < start) break;
-      out[Math.min(n - 1, Math.floor(((t - start) / span) * n))]++;
+      const k = barOf(list[i], win);
+      if (k < 0) break;
+      if (k < win.n) out[k]++;
     }
   return out;
 }
+/** The same, for the window the person chose (opt.windowMin). */
+export const buckets = (lists: number[][], now: number, n: number): number[] => bucketsIn(lists, timeWindow(now, opt.windowMin * 60_000, n));
 export const sum = (a: number[]) => a.reduce((x, y) => x + y, 0);
 
-export function tokensIn(tailsIn: Tail[], since: number): number {
+/** Output tokens written inside `win`: the same edges as the sparkline it is printed beside. */
+export function tokensIn(tailsIn: Tail[], win: Win): number {
   let n = 0;
-  for (const t of tailsIn) for (const [ts, out] of t.tokens.values()) if (ts >= since) n += out;
+  for (const t of tailsIn)
+    for (const [ts, out] of t.tokens.values()) {
+      const k = barOf(ts, win);
+      if (k >= 0 && k < win.n) n += out;
+    }
   return n;
+}
+
+/** How long one bar is, for the header: "10s", "90s", "1m", "6m". */
+export function barLabel(win: Win): string {
+  const sec = win.bar / 1000;
+  if (sec % 60 === 0) return `${sec / 60}m`;
+  if (sec < 100) return `${Math.round(sec)}s`;
+  return `${(sec / 60).toFixed(1)}m`;
 }
 
 /** The 5-family models run a 1M window here; anything already past 200k must be on one. (Assumed, not read from the session.) */
@@ -1028,8 +1064,7 @@ export interface View {
   lastT: number;
 }
 
-export function buildViews(sessions: Session[], now: number, sayWidth: number): View[] {
-  const since = now - opt.windowMin * 60_000;
+export function buildViews(sessions: Session[], now: number, sayWidth: number, since = now - opt.windowMin * 60_000): View[] {
   const recent = (a: Agent) => Math.max(a.tail.lastT, a.tail.mtime) >= since;
   const order: Record<AgentState, number> = { active: 0, tool: 1, quiet: 2, done: 3 };
   const pick = (list: Agent[]) =>
@@ -1138,14 +1173,16 @@ export function fitViews(views: View[], avail: number): { views: View[]; gaps: b
 export function render(sessions: Session[], cols: number, rows: number, now: number): string[] {
   const W = Math.max(60, cols);
   const S = Math.min(32, Math.max(12, Math.floor(W / 6))); // sparkline columns
-  const since = now - opt.windowMin * 60_000;
+  // Every strip of S bars on the screen shares these clock-aligned edges; so do the totals beside them.
+  const win = timeWindow(now, opt.windowMin * 60_000, S);
+  const since = win.start;
   const spin = fg(C.green, SPIN[frame % SPIN.length]);
   const out: string[] = [];
 
   hits.length = 0;
 
   const sayW = Math.max(20, W - 6 - 9 - 8);
-  const all = buildViews(sessions, now, sayW);
+  const all = buildViews(sessions, now, sayW, since);
   if (focusSid && !all.some((v) => v.s.sid === focusSid)) focusSid = null;
   const shown = all.filter((v) => (focusSid ? v.s.sid === focusSid : opt.showAll || !isHidden(v)));
   const hidden = all.filter((v) => !shown.includes(v));
@@ -1200,7 +1237,9 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
     const H = Math.max(4, Math.min(11, Math.floor(avail / Math.max(1, shown.length))));
     const fitCount = Math.max(1, Math.floor(avail / H));
     const cards = shown.slice(0, fitCount);
-    const farMax = Math.max(1, ...cards.map((v) => Math.max(...buckets(sessionTails(v.s).map((t) => t.tools), now, Math.max(10, W - 40)))));
+    const CW = Math.max(10, W - 40);
+    const farBuckets = new Map(cards.map((v) => [v.s.sid, buckets(sessionTails(v.s).map((t) => t.tools), now, CW)]));
+    const farMax = Math.max(1, ...[...farBuckets.values()].map((b) => Math.max(...b)));
     for (const v of cards) {
       const s = v.s;
       const f = v.facts;
@@ -1220,8 +1259,8 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
       const lineText = f.needs || f.now || (v.msgs[0]?.lines[0] ?? "");
       out.push(tint(band + fg(f.needs ? C.white : C.text, fit(lineText, W - 5)), 0));
       const chartH = Math.max(1, H - 3);
-      const CW = Math.max(10, W - 40);
-      const chart = tallSpark(buckets(sessionTails(s).map((t) => t.tools), now, CW), farMax, chartH, [52, 84, 150], [150, 200, 255]);
+      const cardBuckets = farBuckets.get(s.sid)!;
+      const chart = tallSpark(cardBuckets, farMax, chartH, [52, 84, 150], [150, 200, 255]);
       const agentsLive = [...s.agents, ...s.workflows.flatMap((w) => w.agents)].filter((a) => !a.done && Math.max(a.tail.lastT, a.tail.mtime) >= since).length;
       const wfLive = s.workflows.filter((w) => w.status === "running" && w.lastT >= since).length;
       const ctx = f.main?.ctx;
@@ -1231,7 +1270,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
         fg(agentsLive ? C.cyan : C.dim, bold(fit(`${agentsLive} AGENT${agentsLive === 1 ? "" : "S"}`, 12))) + fg(wfLive ? C.purple : C.dim, fit(wfLive ? `${wfLive} WORKFLOW${wfLive === 1 ? "" : "S"}` : "", 18)),
         ctxPct >= 0 ? fg(C.dim, "CTX ") + gauge(ctxPct, 16, toneFor(ctxPct)) + " " + fg(toneFor(ctxPct), fit(`${Math.round(ctxPct)}%`, 5)) : "",
         fg(C.dim, fit(`CPU ${Math.round(use.cpu)}%  ·  ${gb(use.rss * 1024)}`, 28)),
-        fg(C.dim, fit(`${human(sum(buckets(sessionTails(s).map((t) => t.tools), now, 1)))} tool calls / ${opt.windowMin}m`, 28)),
+        fg(C.dim, fit(`${human(sum(cardBuckets))} tool calls / ${opt.windowMin}m`, 28)),
       ].filter(Boolean);
       for (let r = 0; r < chartH; r++) out.push(tint(band + chart[r] + "   " + (side[r] ?? ""), 0));
       if (H > 4) out.push("");
@@ -1282,7 +1321,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
     const right =
       fg(C.text, fit(human(sum(b)) + " tools", 10, "r")) +
       "  " +
-      fg(C.text, fit(human(tokensIn(tailsHere, since)) + " out", 8, "r")) +
+      fg(C.text, fit(human(tokensIn(tailsHere, win)) + " out", 8, "r")) +
       (wide ? "  " + fg(ctxPct >= 0 ? toneFor(ctxPct) : C.dim, fit(ctxPct >= 0 ? `ctx ${Math.round(ctxPct)}%` : "", 8, "r")) + "  " + fg(use.cpu >= 100 ? C.yellow : C.dim, fit(use.cpu >= 1 ? `cpu ${Math.round(use.cpu)}%` : "", 9, "r")) : "");
     const rightW = 10 + 2 + 8 + (wide ? 2 + 8 + 2 + 9 : 0);
     const quiet = now - Math.max(f.main?.lastT ?? 0, f.main?.mtime ?? 0);

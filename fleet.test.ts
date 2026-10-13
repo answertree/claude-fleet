@@ -88,3 +88,126 @@ describe("text helpers", () => {
     expect(strip(F.spark([0, 1, 4], 4, [0, 0, 0], [255, 255, 255]))).toBe("▁▄█");
   });
 });
+
+/** A session as scan() would build it, without touching the disk. */
+function sessionOf(o: Partial<F.Session> & { sid: string }): F.Session {
+  return { pid: 0, name: o.sid, kind: "bg", status: "busy", cwd: "/work/shop", startedAt: NOW - 64 * MIN - 30_000, mains: [], agents: [], workflows: [], ...o };
+}
+const agentOf = (id: string, tail: F.Tail, o: Partial<F.Agent> = {}): F.Agent => ({ id, label: id, type: "Explore", model: "haiku", tail, done: false, ...o });
+/** `count` tool-call times spread over the `spanMin` minutes before `end`, the same every run. */
+function callTimes(count: number, end: number, spanMin = 30, seed = 7): number[] {
+  let x = seed;
+  const rnd = () => ((x = (x * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  return Array.from({ length: count }, () => Math.round(end - rnd() * spanMin * MIN)).sort((a, b) => a - b);
+}
+
+describe("graphs hold still", () => {
+  const WINDOW = 30 * MIN;
+
+  test("bars sit on clock edges and the window ends with the bar still filling", () => {
+    for (const n of [20, 25, 30, 58, 110]) {
+      const bar = WINDOW / n;
+      const win = F.timeWindow(NOW, WINDOW, n);
+      expect(win.bar).toBe(bar);
+      expect(win.end).toBeCloseTo(Math.ceil(NOW / bar) * bar, 3);
+      expect(win.end - win.start).toBeCloseTo(WINDOW, 3);
+      expect(win.start).toBeCloseTo(win.first * bar, 6);
+      expect(win.end).toBeGreaterThan(NOW);
+      expect(win.end - NOW).toBeLessThanOrEqual(bar);
+      expect(F.barOf(NOW, win)).toBe(n - 1); // "now" is always in the rightmost bar
+    }
+    // Exactly on an edge, the bar that has just opened is the one still filling.
+    const edge = Math.ceil(NOW / MIN) * MIN;
+    const win = F.timeWindow(edge, WINDOW, 30);
+    expect(win.end).toBe(edge + MIN);
+    expect(F.bucketsIn([[edge - 1, edge]], win).slice(-2)).toEqual([1, 1]);
+  });
+
+  test("with fixed data, every second inside one bar gives identical buckets and totals", () => {
+    const calls = callTimes(400, NOW);
+    for (const n of [20, 25, 30, 58, 110]) {
+      const first = F.timeWindow(NOW, WINDOW, n);
+      const base = F.bucketsIn([calls], first);
+      expect(F.sum(base)).toBeGreaterThan(300);
+      // Walk second by second from the start of the bar that holds NOW to its last whole second.
+      const barStart = Math.ceil((first.end - first.bar) / 1000) * 1000;
+      let checked = 0;
+      for (let now = barStart; now < first.end; now += 1000) {
+        const b = F.bucketsIn([calls], F.timeWindow(now, WINDOW, n));
+        expect(b).toEqual(base);
+        checked++;
+      }
+      expect(checked).toBeGreaterThanOrEqual(Math.floor(first.bar / 1000));
+    }
+  });
+
+  test("when a bar closes the strip shifts left by exactly one cell", () => {
+    const calls = callTimes(400, NOW);
+    for (const n of [20, 25, 30, 58]) {
+      const before = F.timeWindow(NOW, WINDOW, n);
+      const after = F.timeWindow(before.end, WINDOW, n); // the first moment of the next bar
+      expect(after.first).toBe(before.first + 1);
+      const a = F.bucketsIn([calls], before);
+      const b = F.bucketsIn([calls], after);
+      expect(b.slice(0, n - 1)).toEqual(a.slice(1));
+      expect(b[n - 1]).toBe(0); // the new bar is empty until a call lands in it
+      // and one second earlier nothing had moved
+      expect(F.bucketsIn([calls], F.timeWindow(before.end - 1000, WINDOW, n))).toEqual(a);
+    }
+  });
+
+  test("a call that lands changes only its own bar", () => {
+    const calls = callTimes(120, NOW - 2 * MIN);
+    const win = F.timeWindow(NOW, WINDOW, 30);
+    const a = F.bucketsIn([calls], win);
+    const b = F.bucketsIn([[...calls, NOW - 5_000]], win);
+    expect(b.slice(0, 29)).toEqual(a.slice(0, 29));
+    expect(b[29]).toBe(a[29] + 1);
+  });
+
+  test("output-token totals read the same edges as the sparkline", () => {
+    const t = F.newTail("m");
+    const win = F.timeWindow(NOW, WINDOW, 30);
+    t.tokens.set("before", [win.start - 1, 1000]);
+    t.tokens.set("first", [win.start, 200]);
+    t.tokens.set("last", [NOW - 1, 30]);
+    expect(F.tokensIn([t], win)).toBe(230);
+    expect(F.tokensIn([t], F.timeWindow(NOW + 1000, WINDOW, 30))).toBe(230);
+  });
+
+  test("bar lengths are named as the header prints them", () => {
+    const label = (min: number, n: number) => F.barLabel(F.timeWindow(NOW, min * MIN, n));
+    expect([5, 15, 30, 60, 180].map((m) => label(m, 30))).toEqual(["10s", "30s", "1m", "2m", "6m"]);
+    expect([5, 15, 30, 60, 180].map((m) => label(m, 20))).toEqual(["15s", "45s", "90s", "3m", "9m"]);
+  });
+
+  test("a whole frame at now and at now + 1s differs only in its clock, in every mode", () => {
+    // Pick a second in which no strip on the screen closes a bar (today's layout uses 25, 58 and 110 bars at 150 columns).
+    let now = NOW;
+    const sameBars = (t: number) => [25, 58, 110].every((n) => F.timeWindow(t, WINDOW, n).first === F.timeWindow(t + 1000, WINDOW, n).first);
+    while (!sameBars(now)) now += 1000;
+
+    const half = 30_000; // every age on screen sits half a minute from its next tick
+    const main1 = tailOf([prompt(now - 29 * MIN - half, "move coupons to the new table"), ...callTimes(46, now - 6 * MIN - half).map((t) => toolCall(t)), reply(now - 6 * MIN - half, "The migration is written.")]);
+    const main2 = tailOf([prompt(now - 29 * MIN - half, "why are the tests flaky?"), ...callTimes(60, now - 20_000, 30, 11).map((t) => toolCall(t)), reply(now - 2 * MIN - half, "Two of the three share a cause.")]);
+    const sub = tailOf(callTimes(30, now - 20_000, 30, 3).map((t) => toolCall(t)));
+    const sessions = [
+      sessionOf({ sid: "aaaaaaaa-1", name: "checkout flow redesign", status: "idle", mains: [main1], job: { state: "blocked", detail: "migration drafted", needs: "Approve dropping the column?" } }),
+      sessionOf({ sid: "bbbbbbbb-2", name: "flaky test hunt", mains: [main2], agents: [agentOf("s1", sub)] }),
+    ];
+    const frameAt = (t: number) => F.render(sessions, 150, 44, t).map(strip).join("\n").replace(/\d\d:\d\d:\d\d/, "HH:MM:SS");
+    const before = { ...F.opt };
+    try {
+      for (const mode of ["detail", "compact", "far"] as F.Mode[]) {
+        F.opt.mode = mode;
+        const a = frameAt(now);
+        expect(a).toContain(mode === "far" ? "F L A K Y" : "flaky test hunt");
+        expect(frameAt(now + 1000)).toBe(a);
+        // Sanity: the test can see movement. Half an hour later every bar has emptied.
+        expect(frameAt(now + 31 * MIN)).not.toBe(a);
+      }
+    } finally {
+      Object.assign(F.opt, before);
+    }
+  });
+});
