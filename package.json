@@ -1,0 +1,13 @@
+{
+  "name": "claude-fleet",
+  "version": "0.1.0",
+  "description": "Every live Claude Code session on one terminal screen: agents, workflows, tasks, context and what needs you.",
+  "license": "MIT",
+  "type": "module",
+  "bin": { "fleet": "./fleet.ts" },
+  "scripts": {
+    "start": "bun fleet.ts",
+    "demo": "bun demo.ts",
+    "screenshots": "COLUMNS=150 LINES=44 bun demo.ts --once | python3 tools/ansi2svg.py > docs/screenshot.svg && COLUMNS=150 LINES=30 bun demo.ts --once --mode far | python3 tools/ansi2svg.py > docs/screenshot-far.svg"
+  }
+}
