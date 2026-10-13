@@ -8,6 +8,8 @@
   "scripts": {
     "start": "bun fleet.ts",
     "demo": "bun demo.ts",
+    "test": "bun test",
+    "check": "bun test && tools/check-frames",
     "screenshots": "COLUMNS=150 LINES=44 bun demo.ts --once | python3 tools/ansi2svg.py > docs/screenshot.svg && COLUMNS=150 LINES=30 bun demo.ts --once --mode far | python3 tools/ansi2svg.py > docs/screenshot-far.svg"
   }
 }

@@ -18,14 +18,14 @@ import { spawnSync } from "node:child_process";
 const CLAUDE = process.env.FLEET_HOME || process.env.AGENT_FLEET_HOME || path.join(os.homedir(), ".claude");
 const HIDE_TOP = process.env.FLEET_HIDE_PROCESSES === "1"; // leave other programs' names off the machine row
 const PROJECTS = path.join(CLAUDE, "projects");
-const WINDOWS = [5, 15, 30, 60, 180];
+export const WINDOWS = [5, 15, 30, 60, 180];
 const TAIL_BYTES = 2 * 1024 * 1024;
 const ACTIVE_MS = 60_000;
 const FINAL_TOOLS = new Set(["SubagentHandback", "StructuredOutput"]);
 
-const argv = process.argv.slice(2);
-if (argv.includes("--help") || argv.includes("-h")) {
-  process.stdout.write(`Claude Fleet: every live Claude Code session on one screen.
+// ───────────────────────── options ─────────────────────────
+
+const HELP = `Claude Fleet: every live Claude Code session on one screen.
 
 Usage: bun fleet.ts [minutes] [options]
 
@@ -40,20 +40,39 @@ Usage: bun fleet.ts [minutes] [options]
 
 Keys: 1 2 3 view mode · + - window · a all sessions · d finished agents
       tab focus next session · b bell · esc leave focus · q quit
-`);
-  process.exit(0);
-}
-const once = argv.includes("--once");
-type Mode = "detail" | "compact" | "far";
+`;
+
+export type Mode = "detail" | "compact" | "far";
 const MODES: Mode[] = ["detail", "compact", "far"];
-const modeArg = argv[argv.indexOf("--mode") + 1];
-let mode: Mode = argv.includes("--mode") && MODES.includes(modeArg as Mode) ? (modeArg as Mode) : "detail";
-let windowMin = Number(argv.find((a, i) => /^\d+$/.test(a) && argv[i - 1] !== "--mode") ?? 30);
-let showDone = false;
-let showAll = argv.includes("--all");
-let bell = argv.includes("--bell");
-const wantUsage = argv.includes("--usage") || process.env.FLEET_USAGE === "1";
-const mouseOn = !argv.includes("--no-mouse");
+/** Everything the command line and the keys can change. These are the defaults; parseArgs() fills them in when fleet.ts is run as a program. */
+export const opt = {
+  mode: "detail" as Mode,
+  windowMin: 30,
+  showDone: false,
+  showAll: false,
+  bell: false,
+  usage: false,
+  mouse: true,
+  once: false,
+};
+
+/** Read the command line into `opt`. Returns the one-shot command it asked for, if any. */
+export function parseArgs(argv: string[]): "help" | undefined {
+  if (argv.includes("--help") || argv.includes("-h")) return "help";
+  const TAKES_VALUE = ["--mode"];
+  const valueOf = (flag: string) => (argv.includes(flag) ? argv[argv.indexOf(flag) + 1] : undefined);
+  const modeArg = valueOf("--mode");
+  if (MODES.includes(modeArg as Mode)) opt.mode = modeArg as Mode;
+  const minutes = argv.find((a, i) => /^\d+$/.test(a) && !TAKES_VALUE.includes(argv[i - 1]));
+  if (minutes && Number(minutes) > 0) opt.windowMin = Number(minutes);
+  opt.once = argv.includes("--once");
+  opt.showAll = argv.includes("--all");
+  opt.bell = argv.includes("--bell");
+  opt.usage = argv.includes("--usage") || process.env.FLEET_USAGE === "1";
+  opt.mouse = !argv.includes("--no-mouse");
+  return undefined;
+}
+
 let focusSid: string | null = null;
 let frame = 0;
 /** Clickable regions of the last frame, in 1-based terminal cells. */
@@ -61,8 +80,8 @@ const hits: { row: number; x0: number; x1: number; act: string }[] = [];
 
 // ───────────────────────── colour and text helpers ─────────────────────────
 
-type RGB = [number, number, number];
-const C = {
+export type RGB = [number, number, number];
+export const C = {
   dim: [92, 99, 112] as RGB,
   faint: [58, 64, 74] as RGB,
   text: [198, 205, 215] as RGB,
@@ -74,11 +93,11 @@ const C = {
   purple: [190, 148, 255] as RGB,
   cyan: [86, 205, 214] as RGB,
 };
-const fg = (c: RGB, s: string) => `\x1b[38;2;${c[0]};${c[1]};${c[2]}m${s}\x1b[39m`;
-const bold = (s: string) => `\x1b[1m${s}\x1b[22m`;
-const mix = (a: RGB, b: RGB, t: number): RGB => [0, 1, 2].map((i) => Math.round(a[i] + (b[i] - a[i]) * t)) as RGB;
+export const fg = (c: RGB, s: string) => `\x1b[38;2;${c[0]};${c[1]};${c[2]}m${s}\x1b[39m`;
+export const bold = (s: string) => `\x1b[1m${s}\x1b[22m`;
+export const mix = (a: RGB, b: RGB, t: number): RGB => [0, 1, 2].map((i) => Math.round(a[i] + (b[i] - a[i]) * t)) as RGB;
 
-function charWidth(cp: number): number {
+export function charWidth(cp: number): number {
   if (cp < 0x1100) return 1;
   if (
     (cp >= 0x1100 && cp <= 0x115f) ||
@@ -92,10 +111,10 @@ function charWidth(cp: number): number {
     return 2;
   return 1;
 }
-const width = (s: string) => [...s].reduce((n, ch) => n + charWidth(ch.codePointAt(0)!), 0);
+export const width = (s: string) => [...s].reduce((n, ch) => n + charWidth(ch.codePointAt(0)!), 0);
 
 /** Truncate or pad plain text to exactly `w` display columns. */
-function fit(s: string, w: number, align: "l" | "r" = "l", keepSpacing = false): string {
+export function fit(s: string, w: number, align: "l" | "r" = "l", keepSpacing = false): string {
   if (w <= 0) return "";
   if (!keepSpacing) s = s.replace(/\s+/g, " ").trim();
   if (width(s) > w) {
@@ -113,7 +132,7 @@ function fit(s: string, w: number, align: "l" | "r" = "l", keepSpacing = false):
   return align === "l" ? s + gap : gap + s;
 }
 
-function ago(ms: number): string {
+export function ago(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
   if (s < 5) return "now";
   if (s < 60) return `${s}s`;
@@ -124,16 +143,16 @@ function ago(ms: number): string {
   return `${Math.floor(h / 24)}d${h % 24}h`;
 }
 
-function human(n: number): string {
+export function human(n: number): string {
   if (n < 1000) return String(n);
   if (n < 10_000) return (n / 1000).toFixed(1) + "k";
   if (n < 1_000_000) return Math.round(n / 1000) + "k";
   return (n / 1_000_000).toFixed(1) + "M";
 }
 
-const BARS = "▁▂▃▄▅▆▇█";
+export const BARS = "▁▂▃▄▅▆▇█";
 /** Sparkline of `counts`, scaled against `max` (square root, so quiet rows stay visible). */
-function spark(counts: number[], max: number, lo: RGB, hi: RGB): string {
+export function spark(counts: number[], max: number, lo: RGB, hi: RGB): string {
   return counts
     .map((v) => {
       if (v <= 0) return fg(C.faint, "▁");
@@ -143,13 +162,13 @@ function spark(counts: number[], max: number, lo: RGB, hi: RGB): string {
     .join("");
 }
 
-function bar(done: number, total: number, w: number, c: RGB): string {
+export function bar(done: number, total: number, w: number, c: RGB): string {
   const filled = total > 0 ? Math.round((done / total) * w) : 0;
   return fg(c, "█".repeat(filled)) + fg(C.faint, "░".repeat(w - filled));
 }
 
 /** Progress as one glyph per step: ● done, ◐ in progress, ○ not started. Scaled down past `w` steps. */
-function pips(done: number, doing: number, total: number, w: number, c: RGB): string {
+export function pips(done: number, doing: number, total: number, w: number, c: RGB): string {
   let n = total;
   let d = done;
   let r = doing;
@@ -163,7 +182,7 @@ function pips(done: number, doing: number, total: number, w: number, c: RGB): st
 }
 
 /** A bar of `w` cells split into coloured segments at half-cell resolution; the rest is free space. */
-function stacked(segments: { tokens: number; color: RGB }[], max: number, w: number): string {
+export function stacked(segments: { tokens: number; color: RGB }[], max: number, w: number): string {
   const halves = w * 2;
   const live = segments.filter((x) => x.tokens > 0);
   const usedHalves = Math.min(halves, Math.max(live.length, Math.round((live.reduce((n, x) => n + x.tokens, 0) / max) * halves)));
@@ -196,7 +215,7 @@ function stacked(segments: { tokens: number; color: RGB }[], max: number, w: num
 }
 
 /** Word-wrap plain text to `w` display columns. */
-function wrap(text: string, w: number): string[] {
+export function wrap(text: string, w: number): string[] {
   const lines: string[] = [];
   let cur = "";
   for (let word of text.split(" ")) {
@@ -219,7 +238,7 @@ function wrap(text: string, w: number): string[] {
 }
 
 /** A message as readable lines: markdown marks dropped, bullets kept, code fences and blanks skipped. */
-function messageLines(text: string, w: number): string[] {
+export function messageLines(text: string, w: number): string[] {
   const out: string[] = [];
   for (const raw of text.split("\n")) {
     let line = raw.trim();
@@ -234,15 +253,15 @@ function messageLines(text: string, w: number): string[] {
   return out;
 }
 
-const toneFor = (pct: number): RGB => (pct >= 80 ? C.red : pct >= 50 ? C.yellow : C.green);
+export const toneFor = (pct: number): RGB => (pct >= 80 ? C.red : pct >= 50 ? C.yellow : C.green);
 /** A thin horizontal gauge. */
-function gauge(pct: number, w: number, c: RGB): string {
+export function gauge(pct: number, w: number, c: RGB): string {
   const n = Math.max(pct > 0 ? 1 : 0, Math.min(w, Math.round((pct / 100) * w)));
   return fg(c, "━".repeat(n)) + fg(C.faint, "─".repeat(w - n));
 }
 
 /** A bar chart `h` rows tall, returned top row first. */
-function tallSpark(counts: number[], max: number, h: number, lo: RGB, hi: RGB): string[] {
+export function tallSpark(counts: number[], max: number, h: number, lo: RGB, hi: RGB): string[] {
   const rows: string[] = [];
   for (let r = h - 1; r >= 0; r--) {
     rows.push(
@@ -259,11 +278,11 @@ function tallSpark(counts: number[], max: number, h: number, lo: RGB, hi: RGB): 
   return rows;
 }
 
-const SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
+export const SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
 
 // ───────────────────────── transcript tailing ─────────────────────────
 
-interface Tail {
+export interface Tail {
   path: string;
   offset: number;
   carry: string;
@@ -285,12 +304,12 @@ interface Tail {
   ctx?: { used: number; model: string; req: string };
   parts?: Partial<Record<PartKey, number>>; // characters per context category, from the transcript's own attachments
 }
-type PartKey = "system" | "tools" | "mcp" | "agents" | "memory" | "skills";
+export type PartKey = "system" | "tools" | "mcp" | "agents" | "memory" | "skills";
 const ATTACHMENT = /"attachment":\{"type":"(prompt_snapshot|instructions|skill_listing|agent_listing_delta)"/;
 const len = (v: unknown) => (typeof v === "string" ? v.length : v == null ? 0 : JSON.stringify(v).length);
 
 /** Record the size of what the session loaded into its window: prompt, tools, memory files, skills, agents. */
-function absorb(t: Tail, line: string) {
+export function absorb(t: Tail, line: string) {
   if (line.length > 4_000_000) return;
   let a: any;
   try {
@@ -316,7 +335,7 @@ function absorb(t: Tail, line: string) {
 }
 const tails = new Map<string, Tail>();
 
-function hintFor(name: string, input: any): string {
+export function hintFor(name: string, input: any): string {
   if (!input || typeof input !== "object") return "";
   if (typeof input.questions?.[0]?.question === "string") return input.questions[0].question;
   if (typeof input.description === "string") return input.description;
@@ -326,7 +345,7 @@ function hintFor(name: string, input: any): string {
   return "";
 }
 
-function ingest(t: Tail, line: string) {
+export function ingest(t: Tail, line: string) {
   if (ATTACHMENT.test(line.slice(0, 2000)) || (line.length < 400_000 && ATTACHMENT.test(line))) return absorb(t, line);
   if (line.length < 2 || !line.includes('"timestamp"')) {
     if (line.length < 20_000 && (line.includes('"ai-title"') || line.includes('"last-prompt"'))) {
@@ -422,6 +441,23 @@ function scanHead(t: Tail, upTo: number) {
   }
 }
 
+/** An empty tail that will start reading `file` at byte `start`. */
+export function newTail(file: string, start = 0, birth = 0): Tail {
+  return {
+    path: file,
+    offset: start,
+    carry: start > 0 ? "\u0000" : "", // marker: drop the first, partial line
+    decoder: new StringDecoder("utf8"),
+    tools: [],
+    says: [],
+    tokens: new Map(),
+    lastResultT: 0,
+    lastT: 0,
+    mtime: 0,
+    birth,
+  };
+}
+
 const chunk = Buffer.allocUnsafe(1 << 20);
 function pump(file: string, isMain = false): Tail | undefined {
   let st: fs.Stats;
@@ -434,19 +470,7 @@ function pump(file: string, isMain = false): Tail | undefined {
   let t = tails.get(file);
   if (!t || st.size < t.offset) {
     const start = Math.max(0, st.size - TAIL_BYTES);
-    t = {
-      path: file,
-      offset: start,
-      carry: start > 0 ? "\u0000" : "", // marker: drop the first, partial line
-      decoder: new StringDecoder("utf8"),
-      tools: [],
-      says: [],
-      tokens: new Map(),
-      lastResultT: 0,
-      lastT: 0,
-      mtime: 0,
-      birth: st.birthtimeMs,
-    };
+    t = newTail(file, start, st.birthtimeMs);
     tails.set(file, t);
     if (isMain && start > 0) scanHead(t, start);
   }
@@ -487,7 +511,7 @@ function prune(now: number) {
 
 // ───────────────────────── discovery ─────────────────────────
 
-interface Agent {
+export interface Agent {
   id: string;
   label: string;
   type: string;
@@ -496,7 +520,7 @@ interface Agent {
   done: boolean;
   wf?: string;
 }
-interface Workflow {
+export interface Workflow {
   id: string;
   name: string;
   status: string;
@@ -508,7 +532,7 @@ interface Workflow {
   lastT: number;
   tokens?: number;
 }
-interface Session {
+export interface Session {
   sid: string;
   pid: number;
   name: string;
@@ -605,7 +629,7 @@ function locate(sid: string, now: number) {
 const TYPE_SHORT: Record<string, string> = { "general-purpose": "general", "workflow-subagent": "workflow", "claude-code-guide": "guide" };
 const shortType = (t: string) => TYPE_SHORT[t] ?? t;
 
-function shortModel(m: unknown): string {
+export function shortModel(m: unknown): string {
   return String(m ?? "")
     .replace(/^claude-/, "")
     .replace(/-\d{8}$/, "");
@@ -627,7 +651,7 @@ function loadAgent(file: string, wf?: string, started?: any, done = false): Agen
   };
 }
 
-function scan(now: number): Session[] {
+export function scan(now: number): Session[] {
   const sessions: Session[] = [];
   for (const f of ls(path.join(CLAUDE, "sessions"))) {
     if (!f.endsWith(".json")) continue;
@@ -721,14 +745,14 @@ function scan(now: number): Session[] {
 
 // ───────────────────────── machine and account ─────────────────────────
 
-interface Proc {
+export interface Proc {
   pid: number;
   ppid: number;
   cpu: number;
   rss: number; // kilobytes
   name: string;
 }
-const machine = {
+export const machine = {
   cores: [] as number[],
   cpu: 0,
   hist: [] as number[],
@@ -740,7 +764,7 @@ const machine = {
   prev: [] as { idle: number; total: number }[],
 };
 
-function sampleMachine() {
+export function sampleMachine() {
   const cpus = os.cpus();
   const snap = cpus.map((c) => {
     const total = c.times.user + c.times.nice + c.times.sys + c.times.idle + c.times.irq;
@@ -791,7 +815,7 @@ function sampleMachine() {
 }
 
 /** CPU and memory of a process and everything it started. */
-function treeUsage(pid: number): { cpu: number; rss: number } {
+export function treeUsage(pid: number): { cpu: number; rss: number } {
   const root = machine.procs.find((p) => p.pid === pid);
   let cpu = root?.cpu ?? 0;
   let rss = root?.rss ?? 0;
@@ -808,7 +832,7 @@ function treeUsage(pid: number): { cpu: number; rss: number } {
   return { cpu, rss };
 }
 
-const gb = (bytes: number) => (bytes / 1024 ** 3 >= 10 ? Math.round(bytes / 1024 ** 3) : (bytes / 1024 ** 3).toFixed(1)) + "G";
+export const gb = (bytes: number) => (bytes / 1024 ** 3 >= 10 ? Math.round(bytes / 1024 ** 3) : (bytes / 1024 ** 3).toFixed(1)) + "G";
 
 function machineRow(W: number): string {
   const cpuTone = toneFor(machine.cpu);
@@ -829,7 +853,7 @@ function machineRow(W: number): string {
   return line;
 }
 
-const usage = { at: 0, busy: false, data: undefined as any, err: "" };
+export const usage = { at: 0, busy: false, data: undefined as any, err: "" };
 function readLogin(): { token: string; expiresAt: number } | undefined {
   const pick = (raw: string) => {
     const o = JSON.parse(raw)?.claudeAiOauth;
@@ -897,8 +921,8 @@ function usageRow(W: number, now: number): string {
 
 // ───────────────────────── rendering ─────────────────────────
 
-function buckets(lists: number[][], now: number, n: number): number[] {
-  const span = windowMin * 60_000;
+export function buckets(lists: number[][], now: number, n: number): number[] {
+  const span = opt.windowMin * 60_000;
   const start = now - span;
   const out = new Array(n).fill(0);
   for (const list of lists)
@@ -909,16 +933,16 @@ function buckets(lists: number[][], now: number, n: number): number[] {
     }
   return out;
 }
-const sum = (a: number[]) => a.reduce((x, y) => x + y, 0);
+export const sum = (a: number[]) => a.reduce((x, y) => x + y, 0);
 
-function tokensIn(tailsIn: Tail[], since: number): number {
+export function tokensIn(tailsIn: Tail[], since: number): number {
   let n = 0;
   for (const t of tailsIn) for (const [ts, out] of t.tokens.values()) if (ts >= since) n += out;
   return n;
 }
 
 /** The 5-family models run a 1M window here; anything already past 200k must be on one. (Assumed, not read from the session.) */
-function ctxMax(c: NonNullable<Tail["ctx"]>): number {
+export function ctxMax(c: NonNullable<Tail["ctx"]>): number {
   return c.req.includes("[1m]") || c.used > 200_000 || /(opus|sonnet|fable)-5/.test(c.model) ? 1_000_000 : 200_000;
 }
 
@@ -935,7 +959,7 @@ const PARTS: { key: PartKey | "messages"; name: string; color: RGB }[] = [
 ];
 const CHARS_PER_TOKEN = 3.8;
 /** Split the window's fill by category. Everything but Messages is sized from text length, so it is approximate. */
-function contextSplit(t: Tail): { name: string; tokens: number; color: RGB }[] {
+export function contextSplit(t: Tail): { name: string; tokens: number; color: RGB }[] {
   if (!t.ctx) return [];
   if (!t.parts) return [{ name: "Used", tokens: t.ctx.used, color: PARTS[6].color }];
   let fixed = 0;
@@ -953,15 +977,15 @@ function contextSplit(t: Tail): { name: string; tokens: number; color: RGB }[] {
   return out;
 }
 
-const clean = (s: string) => s.replace(/[*`#>]+/g, "").replace(/\s+/g, " ").trim();
+export const clean = (s: string) => s.replace(/[*`#>]+/g, "").replace(/\s+/g, " ").trim();
 
-interface Facts {
+export interface Facts {
   main?: Tail;
   needs: string; // non-empty when the session is waiting on the person
   yourTurn: boolean; // finished its turn and is idle
   now: string; // one-line summary of what it is doing
 }
-function factsOf(s: Session): Facts {
+export function factsOf(s: Session): Facts {
   const main = [...s.mains].sort((x, y) => y.mtime - x.mtime)[0];
   const pendingAsk = !!main?.lastTool && main.lastTool.name === "AskUserQuestion" && main.lastTool.t > main.lastResultT;
   const needs = pendingAsk
@@ -975,20 +999,20 @@ function factsOf(s: Session): Facts {
   return { main, needs: clean(needs), yourTurn, now: clean(s.job?.detail || main?.summary || "") };
 }
 
-type AgentState = "active" | "tool" | "quiet" | "done";
-function stateOf(a: Agent, now: number): AgentState {
+export type AgentState = "active" | "tool" | "quiet" | "done";
+export function stateOf(a: Agent, now: number): AgentState {
   if (a.done) return "done";
   if (now - Math.max(a.tail.lastT, a.tail.mtime) < ACTIVE_MS) return "active";
   if (a.tail.lastTool && a.tail.lastTool.t > a.tail.lastResultT) return "tool";
   return "quiet";
 }
 
-interface Group {
+export interface Group {
   wf?: Workflow;
   rows: Agent[];
   hidden: number;
 }
-interface View {
+export interface View {
   s: Session;
   groups: Group[]; // workflows first, then one group of standalone agents
   doneCount: number;
@@ -1004,13 +1028,13 @@ interface View {
   lastT: number;
 }
 
-function buildViews(sessions: Session[], now: number, sayWidth: number): View[] {
-  const since = now - windowMin * 60_000;
+export function buildViews(sessions: Session[], now: number, sayWidth: number): View[] {
+  const since = now - opt.windowMin * 60_000;
   const recent = (a: Agent) => Math.max(a.tail.lastT, a.tail.mtime) >= since;
   const order: Record<AgentState, number> = { active: 0, tool: 1, quiet: 2, done: 3 };
   const pick = (list: Agent[]) =>
     list
-      .filter((a) => recent(a) && (showDone || !a.done))
+      .filter((a) => recent(a) && (opt.showDone || !a.done))
       .sort((a, b) => order[stateOf(a, now)] - order[stateOf(b, now)] || a.tail.birth - b.tail.birth);
 
   return sessions
@@ -1024,7 +1048,7 @@ function buildViews(sessions: Session[], now: number, sayWidth: number): View[] 
       groups.sort((a, b) => a.wf!.started - b.wf!.started);
       const solo = pick(s.agents);
       if (solo.length) groups.push({ rows: solo, hidden: 0 });
-      const doneCount = showDone ? 0 : s.agents.filter((a) => a.done && recent(a)).length;
+      const doneCount = opt.showDone ? 0 : s.agents.filter((a) => a.done && recent(a)).length;
       const lastT = Math.max(0, ...s.mains.map((m) => m.mtime), ...s.agents.map((a) => a.tail.mtime));
       const facts = factsOf(s);
       const m = facts.main;
@@ -1048,14 +1072,14 @@ function buildViews(sessions: Session[], now: number, sayWidth: number): View[] 
 }
 
 /** Sessions nobody needs to look at: finished background jobs, and idle sessions with nothing running under them. */
-function isHidden(v: View): boolean {
+export function isHidden(v: View): boolean {
   if (v.facts.needs) return false;
   if (v.s.job) return v.s.job.state === "done";
   const liveChildren = v.groups.some((g) => (g.wf && g.wf.status === "running") || g.rows.some((a) => !a.done));
   return v.s.status !== "busy" && !liveChildren;
 }
 
-const rowsOf = (v: View) =>
+export const rowsOf = (v: View) =>
   1 +
   (v.showNeeds ? 1 : 0) +
   (v.showCtx ? 1 : 0) +
@@ -1068,7 +1092,7 @@ const rowsOf = (v: View) =>
   (v.doneCount ? 1 : 0);
 
 /** Shrink the views until they fit in `avail` rows; returns [views, blank separators?, sessions cut]. */
-function fitViews(views: View[], avail: number): { views: View[]; gaps: boolean; cut: number } {
+export function fitViews(views: View[], avail: number): { views: View[]; gaps: boolean; cut: number } {
   const total = (gaps: boolean) => views.reduce((n, v) => n + rowsOf(v), 0) + (gaps ? Math.max(0, views.length - 1) : 0);
   let gaps = true;
   if (total(gaps) > avail) gaps = false;
@@ -1111,10 +1135,10 @@ function fitViews(views: View[], avail: number): { views: View[]; gaps: boolean;
   return { views, gaps, cut };
 }
 
-function render(sessions: Session[], cols: number, rows: number, now: number): string[] {
+export function render(sessions: Session[], cols: number, rows: number, now: number): string[] {
   const W = Math.max(60, cols);
   const S = Math.min(32, Math.max(12, Math.floor(W / 6))); // sparkline columns
-  const since = now - windowMin * 60_000;
+  const since = now - opt.windowMin * 60_000;
   const spin = fg(C.green, SPIN[frame % SPIN.length]);
   const out: string[] = [];
 
@@ -1123,9 +1147,9 @@ function render(sessions: Session[], cols: number, rows: number, now: number): s
   const sayW = Math.max(20, W - 6 - 9 - 8);
   const all = buildViews(sessions, now, sayW);
   if (focusSid && !all.some((v) => v.s.sid === focusSid)) focusSid = null;
-  const shown = all.filter((v) => (focusSid ? v.s.sid === focusSid : showAll || !isHidden(v)));
+  const shown = all.filter((v) => (focusSid ? v.s.sid === focusSid : opt.showAll || !isHidden(v)));
   const hidden = all.filter((v) => !shown.includes(v));
-  if (mode === "compact")
+  if (opt.mode === "compact")
     for (const v of shown) {
       v.showCtx = v.showNow = v.showTasks = v.showMain = false;
       v.showTalk = 0;
@@ -1145,14 +1169,14 @@ function render(sessions: Session[], cols: number, rows: number, now: number): s
   const stats =
     (waiting ? `⚠ ${waiting} need${waiting === 1 ? "s" : ""} you  ·  ` : "") +
     `${active} active session${active === 1 ? "" : "s"}  ·  ${running.length} agent${running.length === 1 ? "" : "s"} running  ·  ` +
-    `${liveWf} workflow${liveWf === 1 ? "" : "s"}  ·  ${human(sum(headBuckets))} tool calls / ${windowMin}m`;
+    `${liveWf} workflow${liveWf === 1 ? "" : "s"}  ·  ${human(sum(headBuckets))} tool calls / ${opt.windowMin}m`;
   const left = ` ◆ CLAUDE FLEET   `;
   const room = W - width(left) - HS - 2 - clock.length - 2;
   out.push(
     fg(C.cyan, bold(left)) + fg(waiting ? C.yellow : C.text, fit(stats, Math.max(0, room))) + " " + spark(headBuckets, Math.max(...headBuckets), [40, 110, 90], [120, 240, 170]) + "  " + fg(C.dim, clock) + " ",
   );
   out.push(machineRow(W));
-  if (wantUsage) out.push(usageRow(W, now));
+  if (opt.usage) out.push(usageRow(W, now));
   out.push(fg(C.faint, " " + "─".repeat(W - 2)));
 
   if (!shown.length) {
@@ -1160,7 +1184,7 @@ function render(sessions: Session[], cols: number, rows: number, now: number): s
   }
 
   const avail = rows - out.length - 2 - (hidden.length ? 1 : 0);
-  const { views, gaps, cut } = mode === "far" ? { views: [] as View[], gaps: false, cut: 0 } : fitViews(shown, avail);
+  const { views, gaps, cut } = opt.mode === "far" ? { views: [] as View[], gaps: false, cut: 0 } : fitViews(shown, avail);
 
   // Shared scales so rows are comparable with each other.
   const agentMax = Math.max(1, ...views.flatMap((v) => v.groups.flatMap((g) => g.rows.map((a) => Math.max(...buckets([a.tail.tools], now, S))))));
@@ -1171,7 +1195,7 @@ function render(sessions: Session[], cols: number, rows: number, now: number): s
   const META = W >= 110 ? 18 : 0;
   const PW = W >= 130 ? 20 : 12; // progress glyph column // agent type / model column
 
-  if (mode === "far") {
+  if (opt.mode === "far") {
     // Big cards, readable from across the room: colour and shape carry the state.
     const H = Math.max(4, Math.min(11, Math.floor(avail / Math.max(1, shown.length))));
     const fitCount = Math.max(1, Math.floor(avail / H));
@@ -1207,7 +1231,7 @@ function render(sessions: Session[], cols: number, rows: number, now: number): s
         fg(agentsLive ? C.cyan : C.dim, bold(fit(`${agentsLive} AGENT${agentsLive === 1 ? "" : "S"}`, 12))) + fg(wfLive ? C.purple : C.dim, fit(wfLive ? `${wfLive} WORKFLOW${wfLive === 1 ? "" : "S"}` : "", 18)),
         ctxPct >= 0 ? fg(C.dim, "CTX ") + gauge(ctxPct, 16, toneFor(ctxPct)) + " " + fg(toneFor(ctxPct), fit(`${Math.round(ctxPct)}%`, 5)) : "",
         fg(C.dim, fit(`CPU ${Math.round(use.cpu)}%  ·  ${gb(use.rss * 1024)}`, 28)),
-        fg(C.dim, fit(`${human(sum(buckets(sessionTails(s).map((t) => t.tools), now, 1)))} tool calls / ${windowMin}m`, 28)),
+        fg(C.dim, fit(`${human(sum(buckets(sessionTails(s).map((t) => t.tools), now, 1)))} tool calls / ${opt.windowMin}m`, 28)),
       ].filter(Boolean);
       for (let r = 0; r < chartH; r++) out.push(tint(band + chart[r] + "   " + (side[r] ?? ""), 0));
       if (H > 4) out.push("");
@@ -1366,7 +1390,7 @@ function render(sessions: Session[], cols: number, rows: number, now: number): s
       } else if (c.kind === "more") {
         out.push(fg(C.faint, elbow) + fg(C.dim, `… ${c.n} more agent${c.n === 1 ? "" : "s"} (screen full)`));
       } else if (c.kind === "done") {
-        out.push(fg(C.faint, elbow) + fg(C.dim, `✓ ${c.n} agent${c.n === 1 ? "" : "s"} finished in the last ${windowMin}m  (d to list)`));
+        out.push(fg(C.faint, elbow) + fg(C.dim, `✓ ${c.n} agent${c.n === 1 ? "" : "s"} finished in the last ${opt.windowMin}m  (d to list)`));
       } else {
         const wf = c.g.wf!;
         const total = wf.agents.length;
@@ -1378,13 +1402,16 @@ function render(sessions: Session[], cols: number, rows: number, now: number): s
         const statusC = live ? C.green : wf.status === "completed" ? C.dim : C.red;
         const tail =
           `${fit(live ? "up " + ago(now - wf.started) : wf.status, 10, "r")}` + (wf.tokens !== undefined ? `  ${fit(human(wf.tokens) + " tok", 9, "r")}` : " ".repeat(11));
-        const nameW2 = Math.max(10, W - width(elbow) - 2 - 28 - PW - 8 - S - 2 - width(tail) - 5);
+        // On a narrow screen the phase column gives way before the name does.
+        const slack = W - width(elbow) - PW - S - width(tail) - 17;
+        const phaseW = slack - 10 < 6 ? 0 : Math.min(28, slack - 10);
+        const nameW2 = Math.max(10, slack - phaseW);
         out.push(
           fg(C.faint, elbow) +
             fg(C.purple, "⚙ ") +
             fg(live ? C.white : C.text, fit(wf.name, nameW2)) +
             "  " +
-            fg(C.dim, fit(phase, 28)) +
+            fg(C.dim, fit(phase, phaseW)) +
             " " +
             pips(finished, live ? total - finished : 0, total, PW, C.purple) +
             " " +
@@ -1421,7 +1448,7 @@ function render(sessions: Session[], cols: number, rows: number, now: number): s
 }
 
 /** The bottom row: every control, clickable, with its key. */
-function buttonBar(W: number, row: number): string {
+export function buttonBar(W: number, row: number): string {
   const build = (short: boolean) => {
     const found: typeof hits = [];
     let x = 2;
@@ -1437,17 +1464,17 @@ function buttonBar(W: number, row: number): string {
       line += fg(C.dim, text);
       x += width(text);
     };
-    add(short ? "1" : "1 Detail", "mode:detail", mode === "detail");
-    add(short ? "2" : "2 Compact", "mode:compact", mode === "compact");
-    add(short ? "3" : "3 Far", "mode:far", mode === "far");
+    add(short ? "1" : "1 Detail", "mode:detail", opt.mode === "detail");
+    add(short ? "2" : "2 Compact", "mode:compact", opt.mode === "compact");
+    add(short ? "3" : "3 Far", "mode:far", opt.mode === "far");
     plain(" ");
     add("−", "win-");
-    plain(`${windowMin}m `);
+    plain(`${opt.windowMin}m `);
     add("+", "win+");
     plain(" ");
-    add(short ? "a" : "a All sessions", "all", showAll);
-    add(short ? "d" : "d Finished agents", "done", showDone);
-    add(short ? "b" : "b Bell", "bell", bell);
+    add(short ? "a" : "a All sessions", "all", opt.showAll);
+    add(short ? "d" : "d Finished agents", "done", opt.showDone);
+    add(short ? "b" : "b Bell", "bell", opt.bell);
     plain(" ");
     add(short ? "q" : "q Quit", "quit");
     return { line, used: x, found };
@@ -1468,95 +1495,102 @@ function refresh() {
   sessions = scan(now);
   prune(now);
   sampleMachine();
-  if (wantUsage && now - usage.at > 5 * 60_000) void fetchUsage();
+  if (opt.usage && now - usage.at > 5 * 60_000) void fetchUsage();
   // Ring once when a session starts waiting on the person.
   const nowNeeding = new Set(sessions.filter((s) => factsOf(s).needs).map((s) => s.sid));
-  if (bell && !once) for (const sid of nowNeeding) if (!needing.has(sid)) process.stdout.write("\x07");
+  if (opt.bell && !opt.once) for (const sid of nowNeeding) if (!needing.has(sid)) process.stdout.write("\x07");
   needing.clear();
   for (const sid of nowNeeding) needing.add(sid);
 }
 
-if (once) {
-  sampleMachine();
-  if (wantUsage) await fetchUsage();
-  await new Promise((r) => setTimeout(r, 300)); // a second CPU sample, so the gauge is a rate
-  refresh();
-  const cols = Number(process.env.COLUMNS) || process.stdout.columns || 140;
-  const rows = Number(process.env.LINES) || process.stdout.rows || 45;
-  process.stdout.write(render(sessions, cols, rows, Date.now()).join("\n") + "\n");
-  process.exit(0);
-}
-
-const out = process.stdout;
-const draw = () => {
-  const lines = render(sessions, out.columns || 140, out.rows || 45, Date.now());
-  out.write("\x1b[H" + lines.map((l) => l + "\x1b[K").join("\n"));
-};
-const restore = () => {
-  out.write((mouseOn ? "\x1b[?1000l\x1b[?1006l" : "") + "\x1b[?25h\x1b[?1049l");
-  if (process.stdin.isTTY) process.stdin.setRawMode(false);
-};
-const quit = () => {
-  restore();
-  process.exit(0);
-};
-
-/** Every control, whether it came from a key or a click. */
-function act(name: string) {
-  const i = WINDOWS.indexOf(windowMin);
-  if (name === "quit") return quit();
-  if (name.startsWith("mode:")) mode = name.slice(5) as Mode;
-  else if (name === "win+") windowMin = WINDOWS[Math.min(WINDOWS.length - 1, (i < 0 ? 2 : i) + 1)];
-  else if (name === "win-") windowMin = WINDOWS[Math.max(0, (i < 0 ? 2 : i) - 1)];
-  else if (name === "done") showDone = !showDone;
-  else if (name === "all") showAll = !showAll;
-  else if (name === "bell") bell = !bell;
-  else if (name.startsWith("focus:")) focusSid = focusSid === name.slice(6) ? null : name.slice(6);
-  else if (name === "next") {
-    const ids = sessions.map((s) => s.sid);
-    const at = focusSid ? ids.indexOf(focusSid) : -1;
-    focusSid = at + 1 < ids.length ? ids[at + 1] : null;
-  } else if (name === "back") {
-    if (!focusSid) return quit();
-    focusSid = null;
+if (import.meta.main) {
+  if (parseArgs(process.argv.slice(2)) === "help") {
+    process.stdout.write(HELP);
+    process.exit(0);
   }
-  out.write("\x1b[2J");
-  draw();
-}
 
-out.write("\x1b[?1049h\x1b[?25l\x1b[2J" + (mouseOn ? "\x1b[?1000h\x1b[?1006h" : ""));
-refresh();
-draw();
-setInterval(() => {
-  frame++;
-  if (frame % 2 === 0) refresh();
-  draw();
-}, 1000);
-out.on("resize", () => {
-  out.write("\x1b[2J");
-  draw();
-});
-process.on("SIGINT", quit);
-process.on("SIGTERM", quit);
-process.on("SIGHUP", quit);
+  if (opt.once) {
+    sampleMachine();
+    if (opt.usage) await fetchUsage();
+    await new Promise((r) => setTimeout(r, 300)); // a second CPU sample, so the gauge is a rate
+    refresh();
+    const cols = Number(process.env.COLUMNS) || process.stdout.columns || 140;
+    const rows = Number(process.env.LINES) || process.stdout.rows || 45;
+    process.stdout.write(render(sessions, cols, rows, Date.now()).join("\n") + "\n");
+    process.exit(0);
+  }
 
-const KEYS: Record<string, string> = {
-  q: "quit", "\x03": "quit", "\x1b": "back", "\t": "next",
-  "1": "mode:detail", "2": "mode:compact", "3": "mode:far",
-  "+": "win+", "=": "win+", "-": "win-", _: "win-",
-  d: "done", a: "all", b: "bell",
-};
-if (process.stdin.isTTY) {
-  process.stdin.setRawMode(true);
-  process.stdin.resume();
-  process.stdin.on("data", (d: Buffer) => {
-    const k = d.toString();
-    // A left click, as the terminal reports it: ESC [ < button ; column ; row M
-    for (const m of k.matchAll(/\x1b\[<(\d+);(\d+);(\d+)M/g)) {
-      if (m[1] !== "0") continue;
-      const hit = hits.find((h) => h.row === +m[3] && +m[2] >= h.x0 && +m[2] <= h.x1);
-      if (hit) return act(hit.act);
+  const out = process.stdout;
+  const draw = () => {
+    const lines = render(sessions, out.columns || 140, out.rows || 45, Date.now());
+    out.write("\x1b[H" + lines.map((l) => l + "\x1b[K").join("\n"));
+  };
+  const restore = () => {
+    out.write((opt.mouse ? "\x1b[?1000l\x1b[?1006l" : "") + "\x1b[?25h\x1b[?1049l");
+    if (process.stdin.isTTY) process.stdin.setRawMode(false);
+  };
+  const quit = () => {
+    restore();
+    process.exit(0);
+  };
+
+  /** Every control, whether it came from a key or a click. */
+  const act = (name: string) => {
+    const i = WINDOWS.indexOf(opt.windowMin);
+    if (name === "quit") return quit();
+    if (name.startsWith("mode:")) opt.mode = name.slice(5) as Mode;
+    else if (name === "win+") opt.windowMin = WINDOWS[Math.min(WINDOWS.length - 1, (i < 0 ? 2 : i) + 1)];
+    else if (name === "win-") opt.windowMin = WINDOWS[Math.max(0, (i < 0 ? 2 : i) - 1)];
+    else if (name === "done") opt.showDone = !opt.showDone;
+    else if (name === "all") opt.showAll = !opt.showAll;
+    else if (name === "bell") opt.bell = !opt.bell;
+    else if (name.startsWith("focus:")) focusSid = focusSid === name.slice(6) ? null : name.slice(6);
+    else if (name === "next") {
+      const ids = sessions.map((s) => s.sid);
+      const at = focusSid ? ids.indexOf(focusSid) : -1;
+      focusSid = at + 1 < ids.length ? ids[at + 1] : null;
+    } else if (name === "back") {
+      if (!focusSid) return quit();
+      focusSid = null;
     }
-    if (KEYS[k]) act(KEYS[k]);
+    out.write("\x1b[2J");
+    draw();
+  };
+
+  out.write("\x1b[?1049h\x1b[?25l\x1b[2J" + (opt.mouse ? "\x1b[?1000h\x1b[?1006h" : ""));
+  refresh();
+  draw();
+  setInterval(() => {
+    frame++;
+    if (frame % 2 === 0) refresh();
+    draw();
+  }, 1000);
+  out.on("resize", () => {
+    out.write("\x1b[2J");
+    draw();
   });
+  process.on("SIGINT", quit);
+  process.on("SIGTERM", quit);
+  process.on("SIGHUP", quit);
+
+  const KEYS: Record<string, string> = {
+    q: "quit", "\x03": "quit", "\x1b": "back", "\t": "next",
+    "1": "mode:detail", "2": "mode:compact", "3": "mode:far",
+    "+": "win+", "=": "win+", "-": "win-", _: "win-",
+    d: "done", a: "all", b: "bell",
+  };
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.on("data", (d: Buffer) => {
+      const k = d.toString();
+      // A left click, as the terminal reports it: ESC [ < button ; column ; row M
+      for (const m of k.matchAll(/\x1b\[<(\d+);(\d+);(\d+)M/g)) {
+        if (m[1] !== "0") continue;
+        const hit = hits.find((h) => h.row === +m[3] && +m[2] >= h.x0 && +m[2] <= h.x1);
+        if (hit) return act(hit.act);
+      }
+      if (KEYS[k]) act(KEYS[k]);
+    });
+  }
 }
