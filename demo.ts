@@ -58,7 +58,7 @@ const jsonl = (rows: unknown[]) => rows.map((r) => JSON.stringify(r)).join("\n")
 
 /** What a session loaded at start, sized so the context bar has something to split. */
 const loaded = (toolChars: number, mcpChars: number) => [
-  { type: "attachment", attachment: { type: "prompt_snapshot", systemPrompt: ["x".repeat(18_000)], tools: [{ name: "Bash", description: "x".repeat(toolChars), schema: {} }, { name: "mcp__db__query", description: "x".repeat(mcpChars), schema: {} }] } },
+  { type: "attachment", attachment: { type: "prompt_snapshot", systemPrompt: ["x".repeat(18_000)], tools: [{ name: "Bash", description: "x".repeat(toolChars), schema: {} }, ...(mcpChars ? [{ name: "mcp__db__query", description: "x".repeat(mcpChars), schema: {} }] : [])] } },
   { type: "attachment", attachment: { type: "instructions", files: [{ path: "CLAUDE.md", content: "x".repeat(21_000) }] } },
   { type: "attachment", attachment: { type: "skill_listing", isInitial: true, content: "x".repeat(12_000) } },
   { type: "attachment", attachment: { type: "agent_listing_delta", isInitial: true, addedLines: ["x".repeat(2_500)] } },

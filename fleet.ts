@@ -2420,6 +2420,1061 @@ export function buildViews(sessions: Session[], now: number, sayWidth: number, s
 /** Kept off the screen unless --all: see isQuiet(). */
 export const isHidden = (v: View): boolean => v.quiet;
 
+// ───────────────────────── the detail view ─────────────────────────
+//
+// Detail mode's sessions. Each is a small card (a title row and a subheading row, as far mode draws
+// them) and, under it, what was said, the tasks and every thread at work. There are no tree lines and
+// no word labels: a thick rail marks the head rows and a thin one the body, an icon names each speaker,
+// and every sparkline sits in the one lane. When the screen is short the blocks give rows up in a fixed
+// order (the ladder, below) rather than losing whatever happens to be at the bottom.
+
+/** One piece of a drawn row: text, colour, bold. The shape Row.segs() takes. */
+export type Seg = [text: string, color?: RGB, bold?: boolean];
+const segsWidth = (segs: Seg[]) => segs.reduce((n, s) => n + width(s[0]), 0);
+const segsText = (segs: Seg[]) => segs.map((s) => s[0]).join("");
+/** Plain text cut to at most `w` cells, ending in … when something was lost. Not padded; its spacing is kept. */
+export const cutTo = (s: string, w: number): string => (w <= 0 ? "" : width(s) <= w ? s : fit(s, w, "l", true).trimEnd());
+/** Plain text shortened to at most `w` cells at a word boundary, with no ellipsis of its own. */
+export function clipWords(s: string, w: number): string {
+  if (width(s) <= w) return s;
+  const chars = [...s];
+  let n = 0;
+  let k = 0;
+  while (k < chars.length && n + charWidth(chars[k].codePointAt(0)!) <= w) n += charWidth(chars[k++].codePointAt(0)!);
+  const space = chars[k] === " " ? k : chars.lastIndexOf(" ", k - 1);
+  return chars.slice(0, space > 0 ? space : k).join("").trimEnd();
+}
+/** The first `n` characters of styled pieces, styles kept. */
+function takeSegs(segs: Seg[], n: number): Seg[] {
+  const out: Seg[] = [];
+  for (const [text, color, isBold] of segs) {
+    if (n <= 0) break;
+    out.push([text.slice(0, n), color, isBold]);
+    n -= text.length;
+  }
+  return out;
+}
+/** Styled pieces cut to at most `w` cells, ending in a dim … when something was lost. */
+const fitSegs = (segs: Seg[], w: number): Seg[] => (w <= 0 ? [] : segsWidth(segs) <= w ? segs : [...takeSegs(segs, cutTo(segsText(segs), w).length - 1), [ICON.cut, C.dim]]);
+
+// ── a reply, formatted ──
+
+/** The colours a reply is drawn in: the newest one bright, an earlier one (seen in full only in focus) receded. */
+interface ReplyTone {
+  text: RGB;
+  strong: RGB;
+  code: RGB;
+  bullet: RGB;
+}
+const BRIGHT: ReplyTone = { text: C.text, strong: C.white, code: C.code, bullet: C.cyan };
+const RECEDED: ReplyTone = { text: C.dim, strong: C.dim, code: C.dim, bullet: C.dim };
+const wordChar = (ch: string | undefined) => !!ch && /[\p{L}\p{N}]/u.test(ch);
+const SPAN_MAX = 600; // how far ahead a mark's partner is looked for: emphasis and link text are short, and a reply full of stray marks must not be slow to read
+
+/** A bare address cut down to host/…/last part. */
+export function shortUrl(url: string): string {
+  const [host, ...parts] = url.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "").replace(/[?#].*$/, "").split("/").filter(Boolean);
+  if (!host) return url;
+  return parts.length === 0 ? host : parts.length === 1 ? `${host}/${parts[0]}` : `${host}/…/${parts[parts.length - 1]}`;
+}
+
+/**
+ * One line of markdown as styled pieces with the marks gone: **bold** in bold white, `code` in code
+ * colour, a link as its text, a bare address shortened, italic and strike marks dropped. It is a small
+ * tokeniser rather than a set of replacements, so a mark only counts when it has a partner and sits
+ * where emphasis can (snake_case, 5*3 and *.ts are left alone). Anything it is unsure of stays as typed.
+ */
+export function inlineSegs(src: string, tone: ReplyTone = BRIGHT): Seg[] {
+  const out: Seg[] = [];
+  let plain = "";
+  const flush = () => {
+    if (plain) out.push([plain, tone.text]);
+    plain = "";
+  };
+  /** Where the mark that closes the one at `i` starts, or -1 when the one at `i` does not open anything. */
+  const closeOf = (mark: string, i: number): number => {
+    const ch = mark[0];
+    const single = mark.length === 1;
+    const after = src[i + mark.length];
+    if (!after || after === " " || after === ch) return -1;
+    if ((ch === "_" || single) && wordChar(src[i - 1])) return -1; // inside a word: snake_case, 5*3
+    if (single && !/[\p{L}\p{N}`\["'(]/u.test(after)) return -1; // "*.ts" is a pattern, not emphasis
+    for (let j = src.indexOf(mark, i + mark.length + 1); j >= 0 && j - i <= SPAN_MAX; j = src.indexOf(mark, j + 1)) {
+      const before = src[j - 1];
+      const next = src[j + mark.length];
+      if (before === " " || before === "\\") continue;
+      if (single && (before === ch || next === ch)) continue; // half of a ** or __
+      if ((ch === "_" || single) && wordChar(next)) continue;
+      if (single && !/[\p{L}\p{N}`\]"').!?,;:%]/u.test(before)) continue;
+      return j;
+    }
+    return -1;
+  };
+  for (let i = 0; i < src.length; ) {
+    const ch = src[i];
+    if (ch === "\\" && /[\\`*_{}\[\]()#+\-.!|>~]/.test(src[i + 1] ?? "")) {
+      plain += src[i + 1];
+      i += 2;
+      continue;
+    }
+    if (ch === "`") {
+      let n = 1;
+      while (src[i + n] === "`") n++;
+      const end = src.indexOf("`".repeat(n), i + n);
+      if (end > i) {
+        flush();
+        const code = src.slice(i + n, end).replace(/^ (.+) $/, "$1");
+        if (code) out.push([code, tone.code]);
+        i = end + n;
+      } else {
+        plain += src.slice(i, i + n);
+        i += n;
+      }
+      continue;
+    }
+    if (ch === "*" || ch === "_" || ch === "~") {
+      const mark = ["***", "**", "__", "~~", "*", "_"].find((m) => src.startsWith(m, i));
+      const end = mark ? closeOf(mark, i) : -1;
+      if (mark && end > 0) {
+        flush();
+        const strong = mark.length >= 2 && mark !== "~~";
+        for (const [text, color, isBold] of inlineSegs(src.slice(i + mark.length, end), tone)) out.push(strong ? [text, color === tone.text ? tone.strong : color, true] : [text, color, isBold]);
+        i = end + mark.length;
+        continue;
+      }
+      if (mark && mark.length > 1) {
+        plain += mark; // no partner: it stays as typed, and its second half is not read as a mark of its own
+        i += mark.length;
+        continue;
+      }
+    }
+    if (ch === "[" || (ch === "!" && src[i + 1] === "[")) {
+      const open = ch === "!" ? i + 1 : i;
+      const near = src.slice(open, open + SPAN_MAX);
+      const close = near.indexOf("](") < 0 ? -1 : open + near.indexOf("](");
+      const end = close > 0 ? src.indexOf(")", close + 2) : -1;
+      if (end > 0 && end - close <= 2100 && !src.slice(open + 1, close).includes("[")) {
+        flush();
+        const label = src.slice(open + 1, close);
+        if (label.trim()) out.push(...inlineSegs(label, tone));
+        else out.push([shortUrl(src.slice(close + 2, end).trim()), tone.text]);
+        i = end + 1;
+        continue;
+      }
+    }
+    if ((src.startsWith("http", i) || src.startsWith("<http", i)) && !wordChar(src[i - 1])) {
+      const m = /^<?(https?:\/\/[^\s<>`]+)/.exec(src.slice(i, i + 2100));
+      if (m) {
+        const url = m[1].replace(/[.,;:!?'")\]]+$/, "");
+        plain += shortUrl(url);
+        i += m[0].length - (m[1].length - url.length);
+        if (ch === "<" && src[i] === ">") i++;
+        continue;
+      }
+    }
+    plain += ch;
+    i++;
+  }
+  flush();
+  return out;
+}
+
+/**
+ * Word-wrap styled pieces to `w` cells. Wrapping happens after the marks are gone, so a mark never
+ * counts towards the width and a bold or code span may run across a line break. Runs of white space
+ * become one space; a word longer than the line is broken.
+ */
+export function wrapSegs(segs: Seg[], w: number): Seg[][] {
+  w = Math.max(1, w);
+  type Ch = { ch: string; w: number; color?: RGB; bold?: boolean };
+  const chars: Ch[] = [];
+  for (const [text, color, isBold] of segs)
+    for (const ch of text) {
+      if (!/\s/.test(ch)) chars.push({ ch, w: charWidth(ch.codePointAt(0)!), color, bold: isBold });
+      else if (chars.length && chars[chars.length - 1].ch !== " ") chars.push({ ch: " ", w: 1, color, bold: isBold });
+    }
+  while (chars.length && chars[chars.length - 1].ch === " ") chars.pop();
+  const lines: Ch[][] = [];
+  let line: Ch[] = [];
+  let used = 0;
+  const close = () => {
+    lines.push(line);
+    line = [];
+    used = 0;
+  };
+  for (let i = 0; i < chars.length; ) {
+    let j = i;
+    let wordW = 0;
+    while (j < chars.length && chars[j].ch !== " ") wordW += chars[j++].w;
+    if (line.length && used + 1 + wordW > w) close();
+    if (line.length) {
+      line.push(chars[i - 1]); // the space before this word
+      used++;
+    }
+    for (let k = i; k < j; k++) {
+      if (used + chars[k].w > w && line.length) close(); // only a word longer than the line gets here
+      line.push(chars[k]);
+      used += chars[k].w;
+    }
+    i = j + 1;
+  }
+  if (line.length) close();
+  return lines.map((cs) => {
+    const row: Seg[] = [];
+    for (const c of cs) {
+      const last = row[row.length - 1];
+      if (last && last[1] === c.color && !!last[2] === !!c.bold) last[0] += c.ch;
+      else row.push([c.ch, c.color, c.bold]);
+    }
+    return row;
+  });
+}
+
+/** Rows that carry on the paragraph, bullet or quote the row above began. clipReply() uses it to find where a reply's last paragraph starts. */
+const runsOn = new WeakSet<Seg[]>();
+const wrapped = (rows: Seg[][]): Seg[][] => {
+  for (const row of rows.slice(1)) runsOn.add(row);
+  return rows;
+};
+const FENCE = /^(```|~~~)/;
+const RULE = /^([-*_])(\s*\1){2,}$/;
+const TABLE_RULE = /^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?$/;
+const NO_COMMENTS = /<!--[\s\S]*?(-->|$)/g;
+
+/**
+ * A reply as the rows the conversation draws, each a list of styled pieces starting at the text column
+ * and at most `w` cells wide. Markdown is rendered, not stripped:
+ * - a paragraph starts a new row; blank lines are kept only in focus (as one empty row);
+ * - a bullet is a cyan • with its text two cells in and its wrapped lines under the text; a nested one is a
+ *   dim – two cells further in (deeper levels the same); a numbered item keeps its number, in dim;
+ * - a heading is one bold white line; a quote has a faint │ in front; rules and comments are dropped;
+ * - a code fence loses its fences: each line gets a faint │, keeps its indentation and is cut, not
+ *   wrapped; at most 3 lines (12 in focus), then "│ … +N lines";
+ * - a table loses its rule row; the header is bold, cells are padded and split by a faint │, at most 2
+ *   body rows (12 in focus) then "… +N rows"; one wider than `w` becomes "table · 5 columns x 12 rows".
+ * If anything goes wrong the reply is drawn as plain wrapped text.
+ */
+export function replyRows(text: string, w: number, o: { focus?: boolean; receded?: boolean } = {}): Seg[][] {
+  const tone = o.receded ? RECEDED : BRIGHT;
+  try {
+    return formatReply(text, Math.max(8, w), tone, !!o.focus);
+  } catch {
+    return wrap(clean(text), Math.max(8, w)).map((line): Seg[] => [[line, tone.text]]);
+  }
+}
+function formatReply(text: string, w: number, tone: ReplyTone, focus: boolean): Seg[][] {
+  const rows: Seg[][] = [];
+  const codeMax = focus ? 12 : 3;
+  const tableMax = focus ? 12 : 2;
+  const gutter: Seg = [ICON.gutter + " ", C.faint];
+  let blank = false; // a blank line has passed since the last row
+  const add = (...more: Seg[][]) => {
+    if (!more.length) return;
+    if (blank && focus && rows.length) rows.push([]);
+    blank = false;
+    rows.push(...more);
+  };
+  const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
+  const cellsOf = (line: string) => line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => segsText(inlineSegs(c.trim(), tone)));
+  const src = text.replace(NO_COMMENTS, "").split("\n");
+  for (let i = 0; i < src.length; i++) {
+    const raw = src[i];
+    const line = raw.trim();
+    const fence = FENCE.exec(line);
+    if (fence) {
+      const code: string[] = [];
+      for (i++; i < src.length && !src[i].trim().startsWith(fence[1]); i++) code.push(src[i].replace(/\s+$/, ""));
+      while (code.length && !code[0].trim()) code.shift();
+      while (code.length && !code[code.length - 1].trim()) code.pop();
+      const shown = code.slice(0, codeMax).map((c): Seg[] => [gutter, [cutTo(c, w - 2), tone.code]]);
+      if (code.length > codeMax) shown.push([gutter, [`${ICON.cut} +${plural(code.length - codeMax, "line")}`, C.dim]]);
+      add(...shown);
+      continue;
+    }
+    if (!line) {
+      blank = true;
+      continue;
+    }
+    if (RULE.test(line)) continue;
+    if (line.includes("|") && TABLE_RULE.test((src[i + 1] ?? "").trim()) && src[i + 1].includes("|")) {
+      const head = cellsOf(line);
+      const body: string[][] = [];
+      for (i += 2; i < src.length && src[i].trim() && src[i].includes("|"); i++) body.push(cellsOf(src[i]));
+      i--;
+      const n = Math.max(head.length, ...body.map((r) => r.length));
+      const widths = Array.from({ length: n }, (_, c) => Math.max(width(head[c] ?? ""), ...body.map((r) => width(r[c] ?? ""))));
+      if (sum(widths) + 3 * (n - 1) > w) {
+        add([[`table ${ICON.sep} ${plural(n, "column")} x ${plural(body.length, "row")}`, C.dim]]);
+        continue;
+      }
+      const draw = (cells: string[], color: RGB, isBold: boolean): Seg[] =>
+        widths.flatMap((cw, c): Seg[] => [...(c ? [[` ${ICON.gutter} `, C.faint] as Seg] : []), [c === n - 1 ? (cells[c] ?? "") : fit(cells[c] ?? "", cw, "l", true), color, isBold]]);
+      add(draw(head, tone.strong, true), ...body.slice(0, tableMax).map((r) => draw(r, tone.text, false)));
+      if (body.length > tableMax) add([[`${ICON.cut} +${plural(body.length - tableMax, "row")}`, C.dim]]);
+      continue;
+    }
+    const heading = /^#{1,6}\s+(.*?)\s*#*$/.exec(line);
+    if (heading) {
+      add([[cutTo(segsText(inlineSegs(heading[1], tone)), w), tone.strong, true]]);
+      continue;
+    }
+    const quote = /^>+\s?(.*)$/.exec(line);
+    if (quote) {
+      add(...wrapped(wrapSegs(inlineSegs(quote[1], tone), w - 2).map((l): Seg[] => [gutter, ...l])));
+      continue;
+    }
+    const bullet = /^(\s*)[-*+]\s+(.*)$/.exec(raw);
+    const numbered = bullet ? null : /^(\s*)(\d{1,3}[.)])\s+(.*)$/.exec(raw);
+    if (bullet || numbered) {
+      const inset = " ".repeat((bullet ?? numbered)![1].length >= 2 ? 2 : 0);
+      let said = bullet ? bullet[2] : numbered![3];
+      let lead: Seg = bullet ? (inset ? [`${inset}${ICON.nested} `, C.dim] : [`${ICON.bullet} `, tone.bullet]) : [`${inset}${numbered![2]} `, C.dim];
+      const box = bullet ? /^\[([ xX])\]\s+(.*)$/.exec(said) : null; // a task-list item: its box becomes the glyph
+      if (box) {
+        said = box[2];
+        lead = box[1] === " " ? [`${inset}${ICON.idle} `, C.dim] : [`${inset}${ICON.done} `, tone === BRIGHT ? C.done : C.dim];
+      }
+      const hang = width(lead[0]);
+      add(...wrapped(wrapSegs(inlineSegs(said, tone), w - hang).map((l, k): Seg[] => [k ? [" ".repeat(hang)] : lead, ...l])));
+      continue;
+    }
+    add(...wrapped(wrapSegs(inlineSegs(line, tone), w)));
+  }
+  return rows;
+}
+/** A reply is formatted once for each width it is drawn at, not once a second: what was made is remembered against the reply itself. */
+const made = new WeakMap<object, { text: string; at: Map<string, unknown> }>();
+function once<T>(say: { text: string }, key: string, make: () => T): T {
+  let entry = made.get(say);
+  if (!entry || entry.text !== say.text) made.set(say, (entry = { text: say.text, at: new Map() }));
+  if (!entry.at.has(key)) entry.at.set(key, make());
+  return entry.at.get(key) as T;
+}
+
+/** A reply as one plain line, for an earlier reply: marks, fences, rules and table rules gone, bullets kept as •. */
+export function flatReply(text: string): string {
+  const out: string[] = [];
+  let code = false;
+  for (const raw of text.replace(NO_COMMENTS, "").split("\n")) {
+    const line = raw.trim();
+    if (FENCE.test(line)) code = !code;
+    else if (code) out.push(line);
+    else if (line && !RULE.test(line) && !(line.includes("|") && TABLE_RULE.test(line)))
+      out.push(segsText(inlineSegs((line.startsWith("|") ? line.replace(/^\|\s*|\s*\|$/g, "").replace(/\s*\|\s*/g, ` ${ICON.sep} `) : line).replace(/^#{1,6}\s+/, "").replace(/^>+\s?/, "").replace(/^[-*+]\s+/, ICON.bullet + " "))));
+  }
+  return out.join(" ").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * The rows of a reply that fit in `cap`, kept from the top. When rows are hidden, a dim "… +N lines" is
+ * right-aligned at the end of the measure on the last row before the cut, and that row's text is
+ * shortened at a word boundary to make room. With 3 rows or more the last row is always the reply's
+ * final line, because that is its conclusion or its question; the mark then sits on the row above it.
+ * A final paragraph that wraps is shown by its first row, ending in …, not by its last few words.
+ */
+export function clipReply(rows: Seg[][], cap: number, w: number): { segs: Seg[]; mark?: string }[] {
+  if (cap <= 0) return [];
+  if (rows.length <= cap) return rows.map((segs) => ({ segs }));
+  const shorten = (segs: Seg[], room: number): Seg[] => (segsWidth(segs) <= room ? segs : takeSegs(segs, clipWords(segsText(segs), room).length));
+  const hidden = rows.length - cap;
+  let last = rows.length - 1; // where the final paragraph starts
+  while (last > 0 && runsOn.has(rows[last])) last--;
+  const closing = cap >= 3 && last >= cap - 1; // not when the final paragraph is already on show from its start
+  const final: Seg[] = last === rows.length - 1 ? rows[last] : [...shorten(rows[last], w - 2), [` ${ICON.cut}`, C.dim]];
+  const shown = closing ? [...rows.slice(0, cap - 1), final] : rows.slice(0, cap);
+  const markAt = shown.length - (closing ? 2 : 1);
+  const mark = `${ICON.cut} +${hidden} line${hidden === 1 ? "" : "s"}`;
+  return shown.map((segs, i) => (i === markAt ? { segs: shorten(segs, w - width(mark) - 3), mark } : { segs }));
+}
+
+/** One glyph per step: ✓ done (green), ◐ under way (white), ○ not started (faint). Spaced out up to 10 steps, packed up to 20, scaled to 20 cells beyond that. */
+export function stepStrip(done: number, doing: number, total: number): Seg[] {
+  let n = Math.max(0, total);
+  let d = Math.max(0, Math.min(done, n));
+  let r = Math.max(0, Math.min(doing, n - d));
+  if (n > 20) {
+    d = Math.min(20, Math.round((d / n) * 20));
+    r = r > 0 ? Math.min(20 - d, Math.max(1, Math.round((r / n) * 20))) : 0;
+    n = 20;
+  }
+  const gap = total <= 10 ? " " : "";
+  const glyphs: Seg[] = [];
+  for (let i = 0; i < n; i++) glyphs.push(i < d ? [ICON.done, C.green] : i < d + r ? [ICON.progress, C.white] : [ICON.idle, C.faint]);
+  return glyphs.map(([glyph, color], i): Seg => [glyph + (i < n - 1 ? gap : ""), color]);
+}
+
+// ── a session's block ──
+
+/** What a block is still showing. The ladder turns these down one at a time; nothing else decides a block's height. */
+export interface Keep {
+  now: boolean; // the dim now-line under a question
+  prompt: number; // lines of your prompt: 0, 1 or 2
+  earlier: number[]; // lines of each earlier reply, oldest first; 0 removes it
+  reply: number; // lines of the newest reply
+  tasks: boolean;
+  ctx: boolean; // the context row, where it has a row to itself
+  main: boolean; // the main-thread row
+  done: boolean; // the "n agents finished" line
+  agents: number; // how many agents an agent group shows before "… n more agents"
+  fold: boolean; // agents are folded into their workflow's row, or into one line
+  roster: boolean; // workflow rows and the folded agents line
+  question: number; // rows of the question
+}
+/** One session as the detail view draws it: what there is to show, and how much of it is still shown. */
+export interface Block {
+  v: View;
+  body: boolean; // false: the two head rows only (an idle, finished or your-turn session shown with a)
+  focus: boolean; // it has the screen to itself: every stored reply in full
+  sub: Subheading;
+  question: string[]; // the question, wrapped, when it needs you
+  nowLine: string; // the now-line, when it says something the question does not
+  prompt?: { text: string; lines: string[]; t?: number }; // your prompt, unless it is the subheading
+  earlier: { flat: string[]; rich?: Seg[][]; t: number }[]; // earlier replies, oldest first
+  newest?: { rows: Seg[][]; t: number };
+  groups: { wf?: Workflow; rows: Agent[] }[];
+  buckets: number[]; // its tool calls, all threads, one count per lane cell
+  keep: Keep;
+  folded: boolean; // gone into the "… n more" line
+}
+const AGENT_ORDER: Record<AgentState, number> = { active: 0, tool: 1, quiet: 2, done: 3 };
+const EARLIER_TONE = mix(C.cyan, C.faint, 0.5);
+
+export function blockOf(v: View, g: Grid, now: number, win: Win, focus = false): Block {
+  const { s, facts: f, state } = v;
+  const m = f.main;
+  const body = focus || !v.quiet;
+  const subW = g.textEnd - g.icon + 1;
+  const typed = clean(m?.ask?.text || m?.lastPrompt || "");
+  const typedAt = m?.ask?.text ? m.ask.t : undefined;
+  let sub = subheading(s, f, state);
+  if (sub.source === "none" && typed) sub = { source: "prompt", text: typed, t: typedAt }; // a quiet session with no reply and no now-line: better its last prompt than an empty row
+  const question = state === "needs" ? wrap(f.needs, subW) : [];
+  if (question.length > 3) question.splice(2, question.length, cutTo(question.slice(2).join(" "), subW));
+  const nowLine = state === "needs" && f.now && f.now !== f.needs ? f.now : "";
+  const prompt = body && typed && sub.source !== "prompt" ? { text: typed, lines: wrap(typed, g.measure), t: typedAt } : undefined;
+  const says = body && m ? m.says : [];
+  const last = says[says.length - 1];
+  const formatted = (say: { text: string }, receded: boolean) => once(say, `rows ${g.measure} ${focus} ${receded} ${opt.plainGlyphs}`, () => replyRows(say.text, g.measure, { focus, receded }));
+  const lastRows = last ? formatted(last, false) : [];
+  // A one-line reply that is already the subheading, whole, is not said twice.
+  const inHead = sub.source === "reply" && lastRows.length === 1 && width(sub.text) <= subW - 9;
+  const newest = last && lastRows.length && !inHead ? { rows: lastRows, t: last.t } : undefined;
+  const earlier = (focus ? says.slice(0, -1) : says.slice(0, -1).slice(-2))
+    .map((x) => ({ flat: once(x, `flat ${g.measure} ${opt.plainGlyphs}`, () => wrap(flatReply(x.text), g.measure)), rich: focus ? formatted(x, true) : undefined, t: x.t }))
+    .filter((x) => x.flat.length);
+  // Threads keep a steady order (live, in a tool, quiet, finished; then by age) so a row does not jump when it stalls.
+  const groups = body ? v.groups.map((x) => ({ wf: x.wf, rows: [...x.rows].sort((a, b) => AGENT_ORDER[stateOf(a, now)] - AGENT_ORDER[stateOf(b, now)] || a.tail.birth - b.tail.birth) })) : [];
+  return {
+    v,
+    body,
+    focus,
+    sub,
+    question,
+    nowLine,
+    prompt,
+    earlier,
+    newest,
+    groups,
+    buckets: bucketsIn(tailsOf(s).map((t) => t.tools), win),
+    keep: {
+      now: body && !!nowLine,
+      prompt: prompt ? (focus ? Math.min(2, prompt.lines.length) : 1) : 0,
+      earlier: earlier.map(() => (focus ? Infinity : 2)),
+      reply: focus ? Infinity : 10,
+      tasks: body && v.showTasks,
+      ctx: body,
+      main: body && v.showMain && !!m,
+      done: body && v.doneCount > 0,
+      agents: Infinity,
+      fold: false,
+      roster: body,
+      question: 3,
+    },
+    folded: false,
+  };
+}
+
+/** A row of the left stack: who spoke, what was said, how long ago. */
+interface StackRow {
+  icon?: Seg;
+  at?: number; // the column its text starts at, when that is not the text column
+  segs: Seg[];
+  age?: Seg;
+  mark?: string; // "… +N lines", right-aligned at the end of the measure
+}
+/**
+ * The left stack, top to bottom: the now-line (a waiting session only), then the conversation as it
+ * happened (your prompt, earlier replies, the newest reply; a prompt typed after the last reply comes
+ * after it), then the tasks.
+ */
+function stackOf(b: Block, g: Grid, now: number): StackRow[] {
+  if (!b.body) return [];
+  const k = b.keep;
+  const rows: StackRow[] = [];
+  if (k.now && b.nowLine) rows.push({ at: g.icon, segs: [[cutTo(b.nowLine, g.textEnd - g.icon + 1), C.dim]] });
+  const said: { t: number; rows: StackRow[] }[] = [];
+  if (k.prompt > 0 && b.prompt) {
+    const p = b.prompt;
+    const lines = k.prompt < 2 || p.lines.length < 2 ? [cutTo(p.text, g.measure)] : [p.lines[0], cutTo(p.lines.slice(1).join(" "), g.measure)];
+    said.push({ t: p.t ?? 0, rows: lines.map((line, i) => ({ icon: i ? undefined : [ICON.you, C.blue, true], segs: [[line, C.pale]], age: !i && p.t ? [ago(now - p.t), C.dim] : undefined })) });
+  }
+  b.earlier.forEach((e, n) => {
+    const cap = k.earlier[n];
+    if (cap <= 0) return;
+    let lines: Seg[][];
+    if (cap === Infinity && e.rich) lines = e.rich;
+    else {
+      const shown = e.flat.slice(0, cap);
+      if (e.flat.length > shown.length) shown[shown.length - 1] = `${clipWords(shown[shown.length - 1], g.measure - 2)} ${ICON.cut}`;
+      lines = shown.map((line): Seg[] => [[line, C.dim]]);
+    }
+    said.push({ t: e.t, rows: lines.map((segs, i) => ({ icon: i ? undefined : [ICON.earlier, EARLIER_TONE], segs, age: i ? undefined : [ago(now - e.t), C.dim] })) });
+  });
+  if (k.reply > 0 && b.newest) {
+    const { rows: all, t } = b.newest;
+    // New since you last looked: a bold white ◆, and the word "new" where its age would be.
+    const fresh = isNew(t);
+    said.push({ t, rows: clipReply(all, k.reply, g.measure).map((row, i) => ({ icon: i ? undefined : [ICON.claude, fresh ? C.white : C.cyan, fresh], segs: row.segs, mark: row.mark, age: i ? undefined : fresh ? ["new", C.white, true] : [ago(now - t), C.dim] })) });
+  }
+  for (const item of said.sort((x, y) => x.t - y.t)) rows.push(...item.rows);
+  const tasks = b.v.s.tasks;
+  if (k.tasks && tasks) {
+    const count = `${tasks.done}/${tasks.total}`;
+    const segs: Seg[] =
+      tasks.done >= tasks.total
+        ? [[ICON.done + " ", C.done], [`${count} tasks done`, C.dim]]
+        : [...stepStrip(tasks.done, tasks.doing, tasks.total), [`  ${count}`, C.text], ...(tasks.active ? [[`  ${tasks.active}`, C.dim] as Seg] : [])];
+    rows.push({ at: g.icon, segs: fitSegs(segs, (g.wide ? g.textEnd : g.figEnd) - g.icon + 1) });
+  }
+  return rows;
+}
+
+type Instrument = "ctx" | "key" | "figs";
+/**
+ * The instruments in the lane beside the left stack, from its first row: the context bar, its colour
+ * key, and the figures. They never add a row: with a shorter stack the list is cut from the bottom.
+ * With no stack at all the first one keeps a row to itself (the context row), until the ladder takes it.
+ */
+function instrumentsOf(b: Block, g: Grid, stackRows: number): Instrument[] {
+  if (!b.body || !g.wide) return [];
+  const all: Instrument[] = b.v.facts.main?.ctx ? ["ctx", "key", "figs"] : ["figs"];
+  return stackRows ? all.slice(0, stackRows) : b.keep.ctx ? all.slice(0, 1) : [];
+}
+
+/** A row of the roster: the main thread or an agent, a workflow, or a line that stands for several agents. */
+type Thread = { kind: "agent"; a: Agent; child: boolean } | { kind: "wf"; wf: Workflow } | { kind: "more"; n: number; child: boolean } | { kind: "folded"; rows: Agent[] } | { kind: "done"; n: number };
+/** The roster: the main thread, each workflow and its agents, standalone agents, and the finished tally. */
+function rosterOf(b: Block, now: number): Thread[] {
+  const k = b.keep;
+  if (!b.body || !k.roster) return [];
+  const out: Thread[] = [];
+  const main = b.v.facts.main;
+  if (k.main && main) out.push({ kind: "agent", a: { id: "main", label: "main thread", type: "", model: "", tail: main, done: false }, child: false });
+  const rank = (a: Agent) => (b.v.stall.threads.includes(a.id) ? -1 : AGENT_ORDER[stateOf(a, now)]); // a stalled agent is the last to be folded away
+  for (const grp of b.groups) {
+    let rows = grp.rows;
+    if (rows.length > k.agents) {
+      const kept = new Set([...rows].sort((x, y) => rank(x) - rank(y)).slice(0, k.agents)); // the most active, in the order they were in
+      rows = rows.filter((a) => kept.has(a));
+    }
+    const more = grp.rows.length - rows.length;
+    if (grp.wf) out.push({ kind: "wf", wf: grp.wf });
+    if (k.fold && (grp.wf || grp.rows.length > 1)) {
+      if (!grp.wf) out.push({ kind: "folded", rows: grp.rows }); // a workflow's own strip already counts its agents
+      continue;
+    }
+    for (const a of rows) out.push({ kind: "agent", a, child: !!grp.wf });
+    if (more) out.push({ kind: "more", n: more, child: !!grp.wf });
+  }
+  if (k.done && b.v.doneCount) out.push({ kind: "done", n: b.v.doneCount });
+  return out;
+}
+
+/** A block laid out: how many head rows, whether the vitals row is there, the left stack, the instruments beside it, the roster. */
+interface Parts {
+  head: number;
+  vitals: boolean; // narrow screens: the instruments as one row under the head
+  stack: StackRow[];
+  inst: Instrument[];
+  roster: Thread[];
+}
+function partsOf(b: Block, g: Grid, now: number): Parts {
+  const stack = stackOf(b, g, now);
+  return { head: 1 + Math.max(1, Math.min(b.keep.question, b.question.length)), vitals: b.body && !g.wide && b.keep.ctx, stack, inst: instrumentsOf(b, g, stack.length), roster: rosterOf(b, now) };
+}
+const rowsOfParts = (p: Parts) => p.head + (p.vitals ? 1 : 0) + Math.max(p.stack.length, p.inst.length) + p.roster.length;
+/** How many rows a block takes as it stands. */
+export const blockRows = (b: Block, g: Grid, now: number): number => rowsOfParts(partsOf(b, g, now));
+
+// ── the ladder ──
+
+/** A cut made to one block: how to take it back, and whether it is still the last word on what it cut. */
+interface Change {
+  undo: () => void;
+  stands: () => boolean; // false once a later cut has gone further; that one has to come back first
+  /** For a cut that can come back in part (lines of a reply, agents of a group): restore as much as still fits, fullest first. False when nothing does. */
+  ease?: (fits: () => boolean, spare: number) => boolean;
+  fold?: boolean; // the whole session went into the "… n more" line
+}
+const change = (make: () => void, undo: () => void, stands: () => boolean, extra: Partial<Change> = {}): Change => (make(), { undo, stands, ...extra });
+const needsYou = (b: Block) => b.v.state === "needs";
+const turnOff = (b: Block, key: "now" | "tasks" | "ctx" | "main" | "done" | "roster") => (b.keep[key] ? change(() => (b.keep[key] = false), () => (b.keep[key] = true), () => !b.keep[key]) : undefined);
+const foldAgents = (b: Block) => (b.keep.fold ? undefined : change(() => (b.keep.fold = true), () => (b.keep.fold = false), () => b.keep.fold));
+/** Cap the newest reply at `lines`, when it is showing more. It comes back a line at a time. */
+function replyTo(b: Block, lines: number): Change | undefined {
+  const from = b.keep.reply;
+  const whole = Math.min(from, b.newest?.rows.length ?? 0);
+  if (whole <= lines) return undefined;
+  return change(() => (b.keep.reply = lines), () => (b.keep.reply = from), () => b.keep.reply === lines, {
+    ease: (fits, spare) => {
+      for (let n = Math.min(whole, lines + spare + 1); n > lines; n--) {
+        b.keep.reply = n === whole ? from : n;
+        if (fits()) return true;
+      }
+      return false;
+    },
+  });
+}
+/** Cap every agent group at its `most` most active, when one is showing more. They come back an agent at a time. */
+function agentsTo(b: Block, most: number): Change | undefined {
+  const from = b.keep.agents;
+  const longest = Math.max(0, ...b.groups.map((x) => x.rows.length));
+  if (Math.min(from, longest) <= most) return undefined;
+  return change(() => (b.keep.agents = most), () => (b.keep.agents = from), () => b.keep.agents === most, {
+    ease: (fits, spare) => {
+      for (let n = Math.min(longest, most + spare + 1); n > most; n--) {
+        b.keep.agents = n === longest ? from : n;
+        if (fits()) return true;
+      }
+      return false;
+    },
+  });
+}
+/** Cap one earlier reply at `lines`: the oldest that is showing more. `upTo` limits it to the first so many. */
+function earlierTo(b: Block, lines: number, upTo = b.earlier.length): Change | undefined {
+  const shown = (n: number) => (b.keep.earlier[n] === Infinity && b.earlier[n].rich ? b.earlier[n].rich!.length : Math.min(b.keep.earlier[n], b.earlier[n].flat.length));
+  const n = b.earlier.findIndex((_, i) => i < upTo && shown(i) > lines);
+  if (n < 0) return undefined;
+  const from = b.keep.earlier[n];
+  return change(() => (b.keep.earlier[n] = lines), () => (b.keep.earlier[n] = from), () => b.keep.earlier[n] === lines);
+}
+function promptOff(b: Block): Change | undefined {
+  const from = b.keep.prompt;
+  return from > 0 ? change(() => (b.keep.prompt = 0), () => (b.keep.prompt = from), () => b.keep.prompt === 0) : undefined;
+}
+const foldAway = (b: Block) => (b.folded ? undefined : change(() => (b.folded = true), () => (b.folded = false), () => b.folded, { fold: true }));
+function questionToOneRow(b: Block): Change | undefined {
+  const from = b.keep.question;
+  return Math.min(from, b.question.length) > 1 ? change(() => (b.keep.question = 1), () => (b.keep.question = from), () => b.keep.question === 1) : undefined;
+}
+
+/**
+ * The ladder: what the blocks give up, in this order, when they do not all fit. Each rung is taken from
+ * the bottom session upward, one block at a time, and the climb stops the moment everything fits. The
+ * numbers are the design's. A session that needs you skips the second half of 4 and all of 8, 9 and 13:
+ * its title, its whole question and two lines of the reply always stay. "gaps" is the one rung that is
+ * not a block's own.
+ */
+const LADDER: { step: number; cut: "gaps" | ((b: Block) => Change | undefined) }[] = [
+  // In focus every stored reply starts out in full. These two bring the earlier ones back to what the dashboard shows.
+  { step: 0, cut: (b) => (b.focus ? earlierTo(b, 0, b.earlier.length - 2) : undefined) },
+  { step: 0, cut: (b) => (b.focus ? earlierTo(b, 2) : undefined) },
+  { step: 1, cut: (b) => earlierTo(b, 1) }, // earlier replies shrink to one line each
+  { step: 2, cut: (b) => earlierTo(b, 0) }, // …and are removed, oldest first
+  { step: 3, cut: (b) => turnOff(b, "done") }, // the "n agents finished" line
+  { step: 4, cut: (b) => (b.focus ? replyTo(b, 10) : undefined) },
+  { step: 4, cut: (b) => replyTo(b, 4) }, // the newest reply is capped at 4 lines,
+  { step: 4, cut: (b) => (needsYou(b) ? undefined : replyTo(b, 2)) }, // then 2
+  { step: 5, cut: (b) => agentsTo(b, 3) }, // agent groups longer than 3: the 3 most active and "… n more agents"
+  { step: 6, cut: (b) => turnOff(b, "now") }, // the dim now-line under a question
+  { step: 7, cut: "gaps" }, // the blank rows between sessions
+  { step: 8, cut: (b) => (needsYou(b) ? undefined : promptOff(b)) }, // your prompt
+  { step: 9, cut: (b) => (needsYou(b) ? undefined : replyTo(b, 1)) }, // the newest reply shrinks to one line
+  { step: 10, cut: (b) => turnOff(b, "main") }, // the main-thread row
+  { step: 11, cut: (b) => (b.groups.some((x) => (x.wf ? x.rows.length > 0 : x.rows.length > 1)) ? foldAgents(b) : undefined) }, // agents fold: a workflow's into its own row, standalone ones into one line
+  { step: 12, cut: (b) => (needsYou(b) ? promptOff(b) : undefined) }, // sessions that need you: the prompt,
+  { step: 12, cut: (b) => (needsYou(b) ? replyTo(b, 2) : undefined) }, // then the reply down to 2 lines, and no further
+  { step: 13, cut: (b) => (needsYou(b) ? undefined : replyTo(b, 0)) }, // the newest reply is removed
+  { step: 14, cut: (b) => turnOff(b, "tasks") }, // the tasks row,
+  { step: 14, cut: (b) => turnOff(b, "ctx") }, // then the context row
+  { step: 15, cut: (b) => turnOff(b, "roster") }, // workflow rows and the folded agents line: now a small far card
+  { step: 16, cut: (b) => (needsYou(b) ? undefined : foldAway(b)) }, // whole sessions, never one that needs you
+  // Past the design's ladder, for a screen too small even for that: a waiting session's reply, then all but one row of its question, then the session.
+  { step: 18, cut: (b) => (needsYou(b) ? replyTo(b, 0) : undefined) },
+  { step: 18, cut: (b) => (needsYou(b) ? questionToOneRow(b) : undefined) },
+  { step: 18, cut: (b) => (needsYou(b) ? foldAway(b) : undefined) },
+];
+
+/**
+ * Fit the blocks into `avail` rows by climbing the ladder, then hand back what is left over (the
+ * design's step 17): the cuts are undone in reverse order, top session first, each one only if it
+ * still fits; a cut to the newest reply comes back a line at a time, and a cut to an agent group an
+ * agent at a time. Last, a spare row goes to a second line of a long prompt. Returns whether the blank
+ * rows between sessions survived, and the rows used.
+ */
+export function fitBlocks(blocks: Block[], g: Grid, avail: number, now: number): { gaps: boolean; rows: number } {
+  const height = new Map<Block, number>();
+  const rowsIn = (b: Block) => {
+    let n = height.get(b);
+    if (n === undefined) height.set(b, (n = blockRows(b, g, now)));
+    return n;
+  };
+  let gaps = true;
+  const total = () => {
+    const open = blocks.filter((b) => !b.folded);
+    return open.reduce((n, b) => n + rowsIn(b), 0) + (gaps ? Math.max(0, open.length - 1) : 0) + (open.length < blocks.length ? 1 : 0);
+  };
+  const over = () => total() > avail;
+  const made: (Change & { step: number; at: number; seq: number })[] = [];
+  for (const rung of LADDER) {
+    if (!over()) break;
+    if (rung.cut === "gaps") {
+      made.push({ step: rung.step, at: -1, seq: made.length, ...change(() => (gaps = false), () => (gaps = true), () => !gaps) });
+      continue;
+    }
+    for (let at = blocks.length - 1; at >= 0 && over(); at--) {
+      const b = blocks[at];
+      if (b.folded) continue;
+      // A rung that takes one reply at a time is asked again until the block has no more of them.
+      for (let c = rung.cut(b); c; c = over() ? rung.cut(b) : undefined) {
+        height.delete(b);
+        made.push({ step: rung.step, at, seq: made.length, ...c });
+      }
+    }
+  }
+  let unfolding = true; // sessions come back out of the "… n more" line top first, and stop at the first that does not fit
+  for (const c of [...made].sort((x, y) => y.step - x.step || x.at - y.at || y.seq - x.seq)) {
+    const b: Block | undefined = blocks[c.at];
+    if (!c.stands() || (c.fold ? !unfolding : b?.folded)) continue;
+    const before = b && { keep: { ...b.keep, earlier: [...b.keep.earlier] }, folded: b.folded };
+    const back = () => {
+      if (b && before) (b.keep = before.keep), (b.folded = before.folded), height.delete(b);
+      else gaps = false;
+    };
+    if (b && c.ease) {
+      if (!c.ease(() => (height.delete(b), !over()), Math.max(0, avail - total()))) back();
+      continue;
+    }
+    c.undo();
+    if (b) height.delete(b);
+    if (!over()) continue;
+    back();
+    if (c.fold) unfolding = false;
+  }
+  for (const b of blocks) {
+    if (b.folded || !b.prompt || b.keep.prompt !== 1 || b.prompt.lines.length < 2) continue;
+    b.keep.prompt = 2;
+    height.delete(b);
+    if (!over()) continue;
+    b.keep.prompt = 1;
+    height.delete(b);
+  }
+  return { gaps, rows: total() };
+}
+
+// ── drawing ──
+
+/** What every row of the view shares: the grid, the time, the lane's window and the two scales sparklines are drawn against. */
+interface Paint {
+  g: Grid;
+  now: number;
+  win: Win;
+  sessionMax: number; // session and workflow sparklines
+  agentMax: number; // agents and main threads
+}
+
+/** A session's context window: how full, split by category (largest first), and when it will be full if that is within the hour. */
+function contextOf(b: Block, now: number) {
+  const m = b.v.facts.main;
+  if (!m?.ctx) return undefined;
+  const max = ctxMax(m.ctx);
+  const split = contextSplit(m);
+  const runway = sessionRunway(m, now);
+  return {
+    max,
+    split,
+    pct: Math.round(Math.min(1, m.ctx.used / max) * 100),
+    key: split.filter((x) => x.tokens > 0).sort((x, y) => y.tokens - x.tokens).map((x): Seg[] => [[ICON.swatch + " ", x.color], [`${x.short} ${human(x.tokens)}`, C.dim]]),
+    runway: runway === undefined ? undefined : ([fullInText(runway), runwayTone(runway), true] as Seg),
+  };
+}
+/** "34k out · cpu 3% · 0.4G": output tokens in the window, then the CPU and memory of the session's process tree. Fullest first, for whichever fits. */
+function figuresOf(b: Block, p: Paint): Seg[][] {
+  const use = treeUsage(b.v.s.pid);
+  const out: Seg[] = [[human(tokensIn(tailsOf(b.v.s), p.win)), C.text], [" out", C.dim]];
+  if (!use.known) return [out];
+  const cpu: Seg[] = [...out, [` ${ICON.sep} `, C.faint], [`cpu ${Math.round(use.cpu)}%`, C.dim]];
+  return [[...cpu, [` ${ICON.sep} `, C.faint], [gb(use.rss * 1024), C.dim]], cpu, out];
+}
+
+/** The head rows: title, place and state; then the subheading (or the question, wrapped) with the session's sparkline and tool count. */
+function headRows(b: Block, p: Paint): Row[] {
+  const { g, now } = p;
+  const { s, facts: f, state } = b.v;
+  const needs = state === "needs";
+  const receded = state === "yourTurn" || state === "idle" || state === "finished";
+  const tone = STATE[state].color;
+  const dim = needs ? C.warmDim : C.dim;
+  const start = () => {
+    const r = new Row(g.W, needs ? C.tint : undefined);
+    r.put(g.rail, ICON.railThick, railTone(state, true, frame));
+    return r;
+  };
+  // Title row. The state never shrinks; the place gives way first, then the title's letter-spacing, then the title is cut.
+  const r1 = start();
+  const time = stateTime(s, f, state, now, b.v.stall.since);
+  const stateSegs: Seg[] = [[STATE[state].glyph + " ", tone, true], [[...STATE[state].word].join(" "), tone, true], ...(time ? ([["  ·  ", dim], [time, tone]] as Seg[]) : [])];
+  const stateAt = g.figEnd - segsWidth(stateSegs) + 1;
+  const limit = Math.min(g.textEnd, stateAt - 3);
+  const upper = s.name.toUpperCase();
+  const spaced = [...upper].join(" ");
+  const title = cutTo(g.icon + width(spaced) - 1 <= limit ? spaced : upper, limit - g.icon + 1);
+  r1.put(g.icon, title, receded ? C.text : C.white, true);
+  const folders = s.cwd.replace(os.homedir(), "~").split("/").filter(Boolean);
+  const branch = s.mains.map((m) => m.branch).find(Boolean);
+  const at = branch && branch !== "HEAD" ? ` ${ICON.at} ${branch}` : "";
+  const where = folders.slice(-2).join("/") + at;
+  const kind = `${s.kind || "cli"} ${s.sid.slice(0, 8)}`;
+  // 'folder/folder @ branch · kind id' loses the kind and id first, then the parent folder, then goes. Under 100 columns it is not drawn.
+  const places: Seg[][] = where ? [[[where, dim], [` ${ICON.sep} `, needs ? C.warmDim : C.faint], [kind, dim]], [[where, dim]], [[folders.slice(-1).join("") + at, dim]]] : [[[kind, dim]]];
+  const place = g.small ? undefined : places.find((x) => g.icon + width(title) + 3 + segsWidth(x) - 1 <= limit);
+  if (place) r1.segsr(limit, place);
+  r1.segs(stateAt, stateSegs);
+
+  const subW = g.textEnd - g.icon + 1;
+  const out = [r1];
+  const shown = b.question.slice(0, Math.max(1, b.keep.question));
+  if (b.question.length > shown.length) shown[shown.length - 1] = cutTo(b.question.slice(shown.length - 1).join(" "), subW);
+  (needs && shown.length ? shown : [""]).forEach((q, i) => {
+    const r = start();
+    if (needs) r.put(g.icon, q, C.white, true);
+    else if (b.sub.source === "prompt" || b.sub.source === "reply") {
+      // Your prompt, promoted (and then not repeated below), or the first line of Claude's newest reply.
+      const mine = b.sub.source === "prompt";
+      const fresh = !mine && !!b.sub.t && isNew(b.sub.t);
+      const age: Seg | undefined = !b.sub.t ? undefined : fresh ? ["new", C.white, true] : mine || state !== "yourTurn" ? [ago(now - b.sub.t), C.dim] : undefined; // a your-turn session's state already says how long ago
+      r.put(g.icon, mine ? ICON.you : ICON.claude, mine ? C.blue : fresh ? C.white : C.cyan, mine || fresh);
+      r.put(g.text, cutTo(b.sub.text, subW - 2 - (age ? 7 : 0)), receded ? C.dim : C.white);
+      if (age) r.segsr(g.textEnd, [age]);
+    } else r.put(g.icon, cutTo(b.sub.text, subW), receded ? C.dim : C.white);
+    if (i === 0) {
+      r.paste(g.lane, spark(b.buckets, p.sessionMax, ...RAMP.session), g.laneW);
+      const tools = human(sum(b.buckets));
+      const unit = width(tools) + 6 <= g.figW ? " tools" : "";
+      r.putr(r.putr(g.figEnd, unit, dim), tools, C.text);
+    }
+    out.push(r);
+  });
+  return out;
+}
+
+/** One row of the roster. */
+function threadRow(b: Block, t: Thread, r: Row, p: Paint) {
+  const { g, now, win } = p;
+  if (t.kind === "done") {
+    r.segs(g.icon, [[ICON.done + " ", C.done], [`${t.n} agent${t.n === 1 ? "" : "s"} finished in the last ${opt.windowMin}m`, C.dim], [`  ${ICON.sep}  d lists them`, C.faint]]);
+    return;
+  }
+  if (t.kind === "more") {
+    r.put(t.child ? g.childIcon : g.icon, `${ICON.cut} ${t.n} more agent${t.n === 1 ? "" : "s"}`, C.dim);
+    return;
+  }
+  if (t.kind === "folded") {
+    // Standalone agents folded into one line: "⠋ 2 live   ◐ 1 in a tool".
+    const n = { live: 0, tool: 0, stalled: 0, quiet: 0, done: 0 };
+    for (const a of t.rows) {
+      const st = stateOf(a, now);
+      n[b.v.stall.threads.includes(a.id) ? "stalled" : st === "active" ? "live" : st] += 1;
+    }
+    const parts: Seg[][] = [];
+    if (n.stalled) parts.push([[ICON.progress + " ", C.red], [`${n.stalled} stalled?`, C.red, true]]);
+    if (n.live) parts.push([[SPIN[frame % SPIN.length] + " ", C.green], [`${n.live} live`, C.text]]);
+    if (n.tool) parts.push([[ICON.progress + " ", C.white], [`${n.tool} in a tool`, C.text]]);
+    if (n.quiet) parts.push([[ICON.idle + " ", C.dim], [`${n.quiet} quiet`, C.dim]]);
+    if (n.done) parts.push([[ICON.done + " ", C.done], [`${n.done} finished`, C.dim]]);
+    r.segs(g.icon, parts.flatMap((x, i): Seg[] => (i ? [["   "], ...x] : x)));
+    return;
+  }
+  if (t.kind === "wf") {
+    const wf = t.wf;
+    const outcome = wfOutcome(wf);
+    const live = outcome === "running";
+    const total = wf.agents.length;
+    const finished = wf.agents.filter((a) => a.done).length;
+    const count = `${finished}/${total}`;
+    r.put(g.icon, live ? ICON.workflow : outcome === "completed" ? ICON.done : ICON.failed, live ? C.purple : outcome === "completed" ? C.done : C.red, live);
+    if (g.small) {
+      // Too narrow for the trail and the strip: the name and the count.
+      r.put(g.text, cutTo(wf.name, g.textEnd - width(count) - 2 - g.text + 1), live ? C.white : C.text, live);
+      r.putr(g.textEnd, count, C.text);
+    } else {
+      r.put(g.text, cutTo(wf.name, g.labelEnd - g.text + 1), live ? C.white : C.text, live);
+      // Right-aligned: one glyph per agent and done/total. When that would leave the trail no room, the count alone.
+      let right: Seg[] = [...stepStrip(finished, live ? total - finished : 0, total), [`  ${count}`, C.text]];
+      if (g.textEnd - segsWidth(right) - 2 - g.action + 1 < 10) right = [[count, C.text]];
+      const room = r.segsr(g.textEnd, right) - 2 - g.action + 1;
+      let trail: Seg[];
+      if (!live) trail = outcome === "completed" ? [[`completed${wf.tokens !== undefined ? ` ${ICON.sep} ${human(wf.tokens)} tok` : ""}`, C.dim]] : [[wf.status || "failed", C.red]];
+      else {
+        // The phase trail: ✓ passed, ◐ current, ○ later. Too long: passed phases go from the left. A narrow screen shows the current one only.
+        const steps = phaseTrail(wf).filter((x) => g.wide || x.state === "now");
+        const span = () => steps.reduce((n, x) => n + 2 + width(x.name), 0) + 2 * Math.max(0, steps.length - 1);
+        while (steps.length > 1 && span() > room && steps[0].state === "done") steps.shift();
+        while (steps.length > 1 && span() > room && steps[steps.length - 1].state === "next") steps.pop();
+        while (steps.length > 1 && span() > room) steps.shift();
+        trail = steps.flatMap((x, i): Seg[] => [
+          ...(i ? [["  "] as Seg] : []),
+          ...((x.state === "done" ? [[ICON.done + " ", C.done], [x.name, C.dim]] : x.state === "now" ? [[ICON.progress + " ", C.white], [x.name, C.white, true]] : [[ICON.idle + " ", C.faint], [x.name, C.dim]]) as Seg[]),
+        ]);
+      }
+      r.segs(g.action, fitSegs(trail, room));
+    }
+    r.paste(g.lane, spark(bucketsIn(wf.agents.map((a) => a.tail.tools), win), p.sessionMax, ...RAMP.workflow), g.laneW);
+    if (live) r.putr(g.figEnd, `up ${ago(now - wf.started)}`, C.green);
+    else r.putr(g.figEnd, ago(now - Math.max(wf.finished, wf.lastT)), C.dim);
+    return;
+  }
+  // The main thread or an agent: state glyph, label, what it is doing, type and model, sparkline, age.
+  const a = t.a;
+  const st = stateOf(a, now);
+  const stalled = b.v.stall.threads.includes(a.id);
+  const at = t.child ? g.childIcon : g.icon;
+  const quietFor = now - Math.max(a.tail.lastT, a.tail.mtime);
+  const receded = st === "quiet" || st === "done";
+  if (stalled) r.put(at, ICON.progress, C.red);
+  else if (st === "active") r.put(at, SPIN[frame % SPIN.length], C.green);
+  else if (st === "tool") r.put(at, ICON.progress, C.white);
+  else r.put(at, st === "done" ? ICON.done : ICON.idle, st === "done" ? C.done : C.dim);
+  r.put(at + 2, cutTo(a.label, (g.small ? g.textEnd : g.labelEnd) - (at + 2) + 1), receded ? C.dim : C.text);
+  if (!g.small) {
+    const meta = g.wide ? (t.child ? a.model : [shortType(a.type), a.model].filter(Boolean).join(` ${ICON.sep} `)) : "";
+    const room = (meta ? g.actionEnd : g.textEnd) - g.action + 1;
+    const pending = a.tail.lastTool && a.tail.lastTool.t > a.tail.lastResultT ? a.tail.lastTool : undefined;
+    if (st === "done") r.put(g.action, "finished", C.dim);
+    else if (pending) {
+      // The pending tool's name in cyan, its hint in text colour. A stalled thread says so first.
+      const pre: Seg[] = stalled ? [["stalled? ", C.red, true]] : [];
+      const name = cutTo(pending.name, room - segsWidth(pre));
+      const hintRoom = room - segsWidth(pre) - width(name) - 2;
+      r.segs(g.action, [...pre, [name, C.cyan], ...(pending.hint && hintRoom > 1 ? [["  " + cutTo(pending.hint, hintRoom), C.text] as Seg] : [])]);
+    } else r.put(g.action, st === "quiet" ? "no activity" : "thinking", C.dim);
+    if (meta) r.putr(g.typeEnd, cutTo(meta, g.typeEnd - g.type + 1), C.dim);
+  }
+  r.paste(g.lane, spark(bucketsIn([a.tail.tools], win), p.agentMax, ...RAMP.agent), g.laneW);
+  if (stalled) r.putr(g.figEnd, ago(quietFor), C.red, true);
+  else if (st === "active") r.putr(g.figEnd, "live", C.green);
+  else r.putr(g.figEnd, ago(quietFor), C.dim);
+}
+
+/** A block's rows, drawn. `head` says how many of them are head rows (the ones a click focuses). */
+function drawBlock(b: Block, p: Paint): { rows: string[]; head: number } {
+  const { g, now } = p;
+  const parts = partsOf(b, g, now);
+  const rows: Row[] = headRows(b, p);
+  const body = () => {
+    const r = new Row(g.W);
+    r.put(g.rail, ICON.railThin, railTone(b.v.state, false));
+    rows.push(r);
+    return r;
+  };
+  const ctx = contextOf(b, now);
+  const figures = figuresOf(b, p);
+  if (parts.vitals) {
+    // Narrow: the instruments are one row under the head. Context bar, "pct of max", the biggest category, the figures, whatever fits.
+    const r = body();
+    let c = g.icon;
+    if (ctx) {
+      const tone = figureTone(ctx.pct);
+      c = r.paste(c, stacked(ctx.split, ctx.max, 20), 20) + 2;
+      c = r.segs(c, [[`${ctx.pct}%`, tone.color, tone.bold], [` of ${human(ctx.max)}`, C.dim]]) + 3;
+    }
+    const fits = (segs: Seg[], then = 0) => c + segsWidth(segs) + then - 1 <= g.figEnd;
+    const fig = figures.find((x) => fits(x));
+    if (ctx?.key[0] && fig && fits(ctx.key[0], 3 + segsWidth(fig))) c = r.segs(c, ctx.key[0]) + 3;
+    if (fig) c = r.segs(c, fig) + 3;
+    if (ctx?.runway && fits([ctx.runway])) r.segs(c, [ctx.runway]);
+  }
+  for (let i = 0; i < Math.max(parts.stack.length, parts.inst.length); i++) {
+    const r = body();
+    const item = parts.stack[i];
+    if (item) {
+      if (item.icon) r.segs(g.icon, [item.icon]);
+      r.segs(item.at ?? g.text, item.segs);
+      if (item.mark) r.putr(g.text + g.measure - 1, item.mark, C.dim);
+      if (item.age) r.segsr(g.ageEnd, [item.age]);
+    }
+    const inst = parts.inst[i];
+    if (inst === "ctx" && ctx) {
+      const tone = figureTone(ctx.pct);
+      r.paste(g.lane, stacked(ctx.split, ctx.max, g.laneW), g.laneW);
+      r.putr(r.putr(g.figEnd, ` of ${human(ctx.max)}`, C.dim), `${ctx.pct}%`, tone.color, tone.bold);
+    } else if (inst === "key" && ctx) {
+      // The largest categories that fit, and at the right end the runway, when there is one to give.
+      const room = g.figEnd - g.lane + 1 - (ctx.runway ? width(ctx.runway[0]) + 2 : 0);
+      let c = g.lane;
+      for (const entry of ctx.key) {
+        if (c - g.lane + segsWidth(entry) > room) break;
+        c = r.segs(c, entry) + 2;
+      }
+      if (ctx.runway) r.segsr(g.figEnd, [ctx.runway]);
+    } else if (inst === "figs") r.segs(g.lane, figures[0]);
+    if (inst && !item) {
+      // No left stack: the context row still shows, with the key and the figures on its left side.
+      const room = g.textEnd - g.icon + 1;
+      const left: Seg[] = [];
+      for (const entry of inst === "ctx" && ctx ? ctx.key.slice(0, 3) : []) if (segsWidth(left) + segsWidth(entry) + 3 + segsWidth(figures[0]) <= room) left.push(...entry, ["  "]);
+      if (left.length) left.push([" "]);
+      left.push(...figures[0]);
+      if (ctx?.runway && segsWidth(left) + 3 + width(ctx.runway[0]) <= room) left.push(["   "], ctx.runway);
+      if (inst === "ctx") r.segs(g.icon, left);
+    }
+  }
+  for (const t of parts.roster) threadRow(b, t, body(), p);
+  return { rows: rows.map(String), head: parts.head };
+}
+
+/**
+ * Detail mode's sessions, drawn into at most `avail` rows; it returns exactly the rows it uses. `views`
+ * are the sessions to show, already in order (buildViews). `top` is how many rows of the frame are
+ * above, so the head rows can be registered as click targets. With one session in focus it gets the
+ * whole space: every stored reply in full, blank rows between paragraphs, every agent.
+ */
+export function detailView(views: View[], W: number, avail: number, now: number, top = 0, focus = focusSid !== null && views.length === 1 && views[0].s.sid === focusSid): string[] {
+  if (avail <= 0 || !views.length) return [];
+  const g = grid(W);
+  const win = laneWindow(now, W);
+  const blocks = views.map((v) => blockOf(v, g, now, win, focus));
+  const { gaps } = fitBlocks(blocks, g, avail, now);
+  const p: Paint = {
+    g,
+    now,
+    win,
+    sessionMax: Math.max(1, ...blocks.map((b) => Math.max(...b.buckets))),
+    agentMax: Math.max(1, ...blocks.flatMap((b) => [...(b.v.showMain && b.v.facts.main ? [b.v.facts.main] : []), ...b.groups.flatMap((x) => x.rows.map((a) => a.tail))]).map((t) => Math.max(...bucketsIn([t.tools], win)))),
+  };
+  const out: string[] = [];
+  for (const b of blocks.filter((x) => !x.folded)) {
+    if (out.length && gaps) out.push("");
+    const { rows, head } = drawBlock(b, p);
+    for (let i = 0; i < head && out.length + i < avail; i++) hits.push({ row: top + out.length + i + 1, x0: 1, x1: W, act: "focus:" + b.v.s.sid });
+    out.push(...rows);
+  }
+  const more = blocks.filter((x) => x.folded);
+  if (more.length) {
+    // Whole sessions that did not fit, in one line: "… 2 more: name, name". A waiting one is still marked.
+    const r = new Row(W);
+    const names = more.flatMap((b, i): Seg[] => [...(i ? [[", ", C.dim] as Seg] : []), ...(needsYou(b) ? [[`${ICON.needs} ${b.v.s.name}`, C.amber, true] as Seg] : [[b.v.s.name, C.dim] as Seg])]);
+    r.segs(g.rail, fitSegs([[`${ICON.cut} ${more.length} more: `, C.dim], ...names], g.figEnd - g.rail + 1));
+    out.push(String(r));
+  }
+  return out.slice(0, avail);
+}
+
+/** The click targets registered for the frame being drawn. render() starts each frame with none. */
+export const clickTargets = () => hits.map((h) => ({ ...h }));
+
+// ───────────────────────── the tree (compact mode), the far cards and the frame ─────────────────────────
+
 export const rowsOf = (v: View) =>
   1 +
   (v.showNeeds ? 1 : 0) +
@@ -2927,7 +3982,9 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
   const sessionMax = Math.max(1, ...shown.map((v) => Math.max(...buckets(sessionTails(v.s).map((t) => t.tools), now, S))));
 
   const avail = rows - out.length - 2 - (focusSid && hidden.length ? 1 : 0); // the button bar, a spare row above it, and the hint shown while one session is focused
-  const { views, gaps, cut } = opt.mode === "far" ? { views: [] as View[], gaps: false, cut: 0 } : fitViews(shown, avail);
+  const { views, gaps, cut } = opt.mode !== "compact" ? { views: [] as View[], gaps: false, cut: 0 } : fitViews(shown, avail);
+  // Detail mode draws its sessions with its own renderer (the detail view, above). The tree further down is compact mode's.
+  if (opt.mode === "detail") out.push(...detailView(shown, W, avail, now, out.length));
 
   const ACT = W >= 150 ? 40 : W >= 120 ? 28 : W >= 100 ? 18 : 0; // "what it is doing" column
   const META = W >= 110 ? 18 : 0;

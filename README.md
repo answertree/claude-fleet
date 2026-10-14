@@ -35,14 +35,15 @@ alias fleet='bun ~/path/to/claude-fleet/fleet.ts --usage'
 
 The header is five rows on a terminal of 40 rows or more and three rows below that. Compact mode, and any terminal under 100 columns, keeps a plainer three-line header.
 
-**For each session**
+**For each session** (detail mode)
 
-- **Header:** name, folder and branch, status, a sparkline of tool calls, output tokens, how full the context window is, and the CPU its processes are using.
-- **Needs you:** a highlighted row with the actual question when the session is blocked on you. These sort to the top.
-- **Context:** the window split by category (system prompt, tools, MCP tools, agents, memory files, skills, messages).
-- **Now:** a one-line summary of what it is doing.
-- **Conversation:** your last prompt and Claude's most recent messages, using whatever rows are spare.
-- **Tasks and workflows:** one glyph per step (`✓` done, `◐` in progress, `○` not started), the current phase, and each running agent with what it is doing right now.
+- **Two head rows:** a rail in the colour of the session's state, its name, its folder and branch, and the state with how long it has been so: `▲ NEEDS YOU`, `◐ STALLED?`, `● WORKING`, `▸ YOUR TURN`, `○ IDLE` or `✓ FINISHED`. Under that, one line saying what it is doing, a sparkline of its tool calls and their count. When the session needs you the line is the question itself, in full, on an amber band; those sessions sort to the top.
+- **Conversation:** `▸` your prompt, `◇` Claude's earlier replies (dimmed) and `◆` its newest reply with its bullets, code and tables kept, each with its age in a column of its own. A long reply is cut in the middle, never at the end: its last line stays and `… +5 lines` says how much is hidden. A reply that arrived since you last pressed `space` is marked `new`.
+- **Beside the conversation:** the context window split by category (system prompt, tools, MCP tools, agents, memory files, skills, messages), then output tokens and the CPU and memory of the session's processes. `full in ~40m` appears when the window is filling steadily and will be full within the hour. Below 130 columns these become one row under the head.
+- **Tasks:** one glyph per task (`✓` done, `◐` in progress, `○` not started) and the one in progress.
+- **Threads:** the main thread, each workflow (`≡`, the phases it has been through, one glyph per agent) and each agent: a spinner if it wrote in the last minute, `◐` with the tool and what it is for if it is waiting on one, `○` if it is quiet. A thread that looks stuck reads `stalled?` in red.
+
+When the screen is too short for all of that, sessions give rows up in a fixed order, from the bottom session upward: earlier replies, the finished-agents line, most of each newest reply, the blank rows between sessions, prompts, main-thread rows, then per-agent rows. A session that needs you always keeps its whole question and two lines of the reply. Sessions that still do not fit become one line, `… 2 more: name, name`.
 
 Only sessions that are working or waiting on you are shown. Idle and finished ones are counted on the top row and on the `a` button; press `a` to bring them back.
 
