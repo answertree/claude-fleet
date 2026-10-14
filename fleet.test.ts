@@ -12,6 +12,8 @@ const here = import.meta.dir;
 const SCRATCH = fs.mkdtempSync(path.join(os.tmpdir(), "claude-fleet-test-"));
 process.env.XDG_CACHE_HOME = path.join(SCRATCH, "cache");
 process.env.FLEET_HOME = path.join(SCRATCH, "home");
+// Nothing here may read a real login: a usage switch from the shell that runs the tests is taken out first.
+delete process.env.FLEET_USAGE;
 delete process.env.FLEET_USAGE_FIXTURE;
 delete process.env.FLEET_USAGE_FAIL;
 afterAll(() => fs.rmSync(SCRATCH, { recursive: true, force: true }));
@@ -2679,6 +2681,47 @@ describe("the login stays inside the process", () => {
       expect([r.security, r.fetches, r.ours]).toEqual([[], [], []]);
     }
   }, 60_000);
+});
+
+describe("the demo never reads the real login", () => {
+  // A made-up `security` alone on PATH (beside bun itself) records every call. Whatever usage switch is given, the demo,
+  // the frame checker and the screenshots must draw made-up figures and never ask it.
+  const dir = path.join(SCRATCH, "demo-login");
+  const bin = path.join(dir, "bin");
+  const log = path.join(dir, "calls.log");
+  const setUp = () => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.mkdirSync(bin, { recursive: true });
+    fs.writeFileSync(path.join(bin, "security"), `#!/bin/sh\necho "security $*" >> "$CALLS_LOG"\nexit 44\n`, { mode: 0o755 });
+    fs.symlinkSync(process.execPath, path.join(bin, "bun"));
+  };
+  const run = (cmd: string[], extra: Record<string, string> = {}) => {
+    fs.rmSync(log, { force: true });
+    const r = Bun.spawnSync(cmd, { env: { PATH: bin, HOME: path.join(dir, "nobody"), TZ: "UTC", FLEET_NOW: String(NOW), COLUMNS: "150", LINES: "44", CALLS_LOG: log, ...extra }, timeout: 60_000 });
+    return { code: r.exitCode, out: strip(r.stdout.toString()), err: r.stderr.toString(), calls: fs.existsSync(log) ? fs.readFileSync(log, "utf8").trim().split("\n") : [] };
+  };
+
+  test("bun demo.ts --usage, or FLEET_USAGE=1 in the environment, shows the made-up account and asks nothing", () => {
+    setUp();
+    for (const [args, extra] of [[["--usage"], {}], [[], { FLEET_USAGE: "1" }], [["--usage"], { FLEET_USAGE: "1", FLEET_USAGE_FIXTURE: "", FLEET_USAGE_FAIL: "" }]] as [string[], Record<string, string>][]) {
+      const r = run([path.join(bin, "bun"), path.join(here, "demo.ts"), "--once", ...args], extra);
+      expect(r.err).toBe("");
+      expect(r.code).toBe(0);
+      expect(r.calls).toEqual([]);
+      expect(r.out).toContain("£12 of £50"); // the made-up current account
+    }
+  }, 60_000);
+
+  test("the frame checker with FLEET_USAGE=1 asks nothing either", () => {
+    setUp();
+    const r = run([path.join(bin, "bun"), path.join(here, "tools", "check-frames"), "--only", "default-detail-150x44"], { FLEET_USAGE: "1" });
+    expect(r.out).toContain("1 frames fit");
+    expect(r.calls).toEqual([]);
+  }, 60_000);
+
+  test("this test file runs with the usage switch taken out of its environment", () => {
+    expect(process.env.FLEET_USAGE).toBeUndefined();
+  });
 });
 
 /**

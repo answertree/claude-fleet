@@ -34,6 +34,10 @@ const strip = (s: string) => s.replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, "").r
 /** Retired from the vocabulary: each has an emoji form or is missing from common fonts. None may be drawn in any mode. */
 const RETIRED = "⚠⚙⎇▪◈▤┆";
 
+/** The environment the demo runs in: never with a usage switch of the caller's (the demo draws made-up figures only). */
+const cleanEnv: Record<string, string | undefined> = { ...process.env };
+for (const name of ["FLEET_USAGE", "FLEET_USAGE_FIXTURE", "FLEET_USAGE_FAIL"]) delete cleanEnv[name];
+
 interface Job {
   name: string;
   cols: number;
@@ -55,7 +59,7 @@ if (saveDir) fs.mkdirSync(saveDir, { recursive: true });
 
 async function check(job: Job): Promise<string[]> {
   const proc = Bun.spawn(["bun", demo, ...job.args], {
-    env: { ...process.env, COLUMNS: String(job.cols), LINES: String(job.rows) },
+    env: { ...cleanEnv, COLUMNS: String(job.cols), LINES: String(job.rows) },
     stdout: "pipe",
     stderr: "pipe",
   });

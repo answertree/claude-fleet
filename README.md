@@ -189,7 +189,7 @@ A dashboard whose own read fails shows the figures from that file, or failing th
 
 ## Development
 
-`bun demo.ts` builds a throwaway set of fake sessions on a made-up machine and runs the dashboard against it; it accepts the same options. `bun run screenshots` regenerates the images above from that demo, with the clock pinned so they come out the same every time.
+`bun demo.ts` builds a throwaway set of fake sessions on a made-up machine and runs the dashboard against it; it accepts the same options. It never reads your login: `--usage` there (or `FLEET_USAGE=1` in the environment) shows a made-up account, as `--account current` does, and so do `tools/check-frames`, `tools/shot.sh` and the tests. `bun run screenshots` regenerates the images above from that demo, with the clock pinned so they come out the same every time.
 
 The demo has options of its own, so every state can be seen without waiting for it to happen:
 

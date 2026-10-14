@@ -9,13 +9,15 @@
 //   --stalled         one agent has sat on a tool call for 14 minutes with its session idle
 //   --runway          one session's context grows steadily, so "full in ~40m" shows
 //   --ended           adds a completed workflow and a failed one
-//   --account <name>  with --usage, a made-up account: current, extra-off, early (the 5-hour
-//                     limit runs out before it resets), stale, none, remote
+//   --account <name>  a made-up account (it turns usage on): current, extra-off, early (the
+//                     5-hour limit runs out before it resets), stale, none, remote. --usage alone,
+//                     or FLEET_USAGE=1, means --account current
 //   --seen <minutes>  as if you last looked that many minutes ago
 //   --surprise        --stalled --runway --account early --seen 18
 //   --real-machine    this machine's CPU, memory and load instead of made-up ones
 //
-// Nothing here touches your real sessions, login or usage figures. Set FLEET_NOW
+// Nothing here touches your real sessions, login or usage figures: every usage switch draws a
+// made-up account, and the usage switches in your environment are not passed on. Set FLEET_NOW
 // (milliseconds since 1970) to pin the clock and get the same frame every time.
 
 import * as fs from "node:fs";
@@ -40,7 +42,8 @@ const stalled = flag("--stalled") || surprise;
 const runway = flag("--runway") || surprise;
 const ended = flag("--ended");
 const realMachine = flag("--real-machine");
-const account = value("--account") ?? (surprise ? "early" : undefined);
+// --usage or FLEET_USAGE=1 on their own would have the dashboard read your real login: here they mean the made-up current account.
+const account = value("--account") ?? (surprise ? "early" : argv.includes("--usage") || process.env.FLEET_USAGE === "1" ? "current" : undefined);
 const seenMin = value("--seen") ?? (surprise ? "18" : undefined);
 const all = argv.includes("--all");
 
@@ -213,6 +216,8 @@ if (all) {
 }
 
 const env: Record<string, string | undefined> = { ...process.env, FLEET_HOME: home, XDG_CACHE_HOME: path.join(home, "cache") };
+// Usage is turned on below, and only ever with made-up figures; nothing inherited may turn it on or feed it.
+for (const name of ["FLEET_USAGE", "FLEET_USAGE_FIXTURE", "FLEET_USAGE_FAIL"]) delete env[name];
 // One frame is drawn at exactly the moment the sessions were made for. A running demo keeps real time, unless FLEET_NOW pins it.
 if (argv.includes("--once")) env.FLEET_NOW = String(now);
 
