@@ -2459,6 +2459,15 @@ export function buildViews(sessions: Session[], now: number, since = frameWindow
 
 /** Kept off the screen unless --all: see isQuiet(). */
 export const isHidden = (v: View): boolean => v.quiet;
+/**
+ * The session tab moves the focus to from `current` (null: none is focused): the next one down the
+ * screen, in the order the screen lists them, so the first press lands on whoever needs you. Sessions
+ * kept off the screen are passed over. After the last one the focus is given up.
+ */
+export function nextFocus(sessions: Session[], now: number, cols: number, current: string | null): string | null {
+  const ids = buildViews(sessions, now, frameWindow(now, Math.max(60, cols)).start).filter((v) => opt.showAll || !isHidden(v) || v.s.sid === current).map((v) => v.s.sid);
+  return ids[(current ? ids.indexOf(current) : -1) + 1] ?? null;
+}
 
 // ───────────────────────── the detail view ─────────────────────────
 //
@@ -4257,7 +4266,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
   if (focusSid && hidden.length) {
     while (out.length < rows - 2) out.push("");
     out.length = Math.max(0, rows - 2);
-    out.push(fg(C.dim, fit(`   focused on one session  ·  esc or click it again to return  ·  ${hidden.length} other${hidden.length === 1 ? "" : "s"} hidden`, W)));
+    out.push(fg(C.dim, "   " + fit(`focused on one session  ${ICON.sep}  esc or click it again to return  ${ICON.sep}  ${hidden.length} other${hidden.length === 1 ? "" : "s"} not shown`, W - 4, "l", true).trimEnd()));
   }
   while (out.length < rows - 1) out.push("");
   out.length = Math.max(0, rows - 1);
@@ -4475,11 +4484,8 @@ if (import.meta.main) {
     else if (name === "usage") {
       if (opt.usage) void fetchUsage().then(draw); // retry now, whatever the next try was set to
     } else if (name.startsWith("focus:")) focusSid = focusSid === name.slice(6) ? null : name.slice(6);
-    else if (name === "next") {
-      const ids = sessions.map((s) => s.sid);
-      const at = focusSid ? ids.indexOf(focusSid) : -1;
-      focusSid = at + 1 < ids.length ? ids[at + 1] : null;
-    } else if (name === "back") {
+    else if (name === "next") focusSid = nextFocus(sessions, clock(), out.columns || 140, focusSid);
+    else if (name === "back") {
       if (!focusSid) return quit();
       focusSid = null;
     }

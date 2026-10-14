@@ -2448,6 +2448,28 @@ describe("one program: the header, the sessions and the buttons agree", () => {
     expect([F.frameWindow(NOW, 150, "detail"), F.frameWindow(NOW, 150, "far"), F.frameWindow(NOW, 110, "detail").n, F.frameWindow(NOW, 150, "compact").n]).toEqual([F.laneWindow(NOW, 150), F.laneWindow(NOW, 150), 20, 25]);
   });
 
+  test("tab walks the sessions in the order the screen lists them, and passes over the ones it keeps off", () => {
+    const saved = { ...F.opt };
+    try {
+      // On disk the sessions come in no particular order: here the idle one first and the one that needs you last.
+      const sessions = [...fleet(NOW)].reverse();
+      const walk = (all: boolean) => {
+        Object.assign(F.opt, { mode: "detail", windowMin: 30, showAll: all });
+        const seen: (string | null)[] = [];
+        for (let at: string | null = null, i = 0; i < 6; i++) seen.push((at = F.nextFocus(sessions, NOW, 150, at)));
+        return seen;
+      };
+      expect(walk(false)).toEqual(["aaaaaaaa", "cccccccc", "bbbbbbbb", null, "aaaaaaaa", "cccccccc"]); // needs you, then the working ones, newest first; then back to the whole fleet
+      expect(walk(true).slice(0, 5)).toEqual(["aaaaaaaa", "cccccccc", "bbbbbbbb", "dddddddd", null]);
+      // A session focused by a click and since gone quiet still has a place to step on from.
+      Object.assign(F.opt, { showAll: false });
+      expect(F.nextFocus(sessions, NOW, 150, "dddddddd")).toBe(null);
+      expect(F.nextFocus([], NOW, 150, null)).toBe(null);
+    } finally {
+      Object.assign(F.opt, saved);
+    }
+  });
+
   test("detail mode's rows run down to the buttons; compact rows and far cards keep one row clear above them", () => {
     // Enough sessions to fill any screen: the row above the button bar is a session's in detail mode, blank in the other two.
     const crowd = (now: number) => [...fleet(now), ...fleet(now).map((s) => ({ ...s, sid: s.sid + "-2" })), ...fleet(now).map((s) => ({ ...s, sid: s.sid + "-3" }))];
