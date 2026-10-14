@@ -796,6 +796,58 @@ setTimeout(() => { throw new Error("boom in a scan"); }, 5);`;
   });
 });
 
+describe("the shared figures file is only ever ours", () => {
+  const root = path.join(SCRATCH, "shared-files");
+  const fresh = (name: string) => {
+    const dir = path.join(root, name);
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "victim.txt"), "untouched");
+    return { dir, file: path.join(dir, "claude-fleet", "usage.json"), victim: path.join(dir, "victim.txt") };
+  };
+  const figures = { five_hour: { utilization: 38, resets_at: iso(NOW + 130 * MIN) } };
+
+  test("written through an unguessable temporary file that is never followed through a link, and readable only by its owner", () => {
+    const fresh1 = fresh("planted-tmp");
+    fs.mkdirSync(path.dirname(fresh1.file), { recursive: true, mode: 0o700 });
+    fs.symlinkSync(fresh1.victim, `${fresh1.file}.${process.pid}.tmp`); // the old, predictable temporary name, planted
+    fs.writeFileSync(`${fresh1.file}.tmp`, "x", { mode: 0o644 });
+    expect(F.writeSharedUsage(figures, NOW, fresh1.file)).toBe(true);
+    expect(fs.readFileSync(fresh1.victim, "utf8")).toBe("untouched");
+    expect(fs.lstatSync(fresh1.file).isSymbolicLink()).toBe(false);
+    expect(fs.statSync(fresh1.file).mode & 0o777).toBe(0o600);
+    expect(F.readSharedUsage(fresh1.file)?.fetchedAt).toBe(NOW);
+  });
+
+  test("a folder that is a link, or that anyone may write to, is neither written nor read; nor is a file that is a link", () => {
+    const linked = fresh("linked-dir");
+    fs.mkdirSync(path.join(linked.dir, "elsewhere"));
+    fs.symlinkSync(path.join(linked.dir, "elsewhere"), path.dirname(linked.file));
+    expect(F.writeSharedUsage(figures, NOW, linked.file)).toBe(false);
+    expect(fs.readdirSync(path.join(linked.dir, "elsewhere"))).toEqual([]);
+    const open = fresh("open-dir");
+    fs.mkdirSync(path.dirname(open.file), { recursive: true });
+    fs.chmodSync(path.dirname(open.file), 0o777);
+    expect(F.writeSharedUsage(figures, NOW, open.file)).toBe(false);
+    fs.writeFileSync(open.file, F.sharedUsageContent(figures, NOW));
+    expect(F.readSharedUsage(open.file)).toBeUndefined();
+    const linkedFile = fresh("linked-file");
+    fs.mkdirSync(path.dirname(linkedFile.file), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(linkedFile.victim, F.sharedUsageContent(figures, NOW));
+    fs.symlinkSync(linkedFile.victim, linkedFile.file);
+    expect(F.readSharedUsage(linkedFile.file)).toBeUndefined();
+    // Writing replaces the link with a file of its own and leaves what it pointed at alone.
+    expect(F.writeSharedUsage(figures, NOW + 1, linkedFile.file)).toBe(true);
+    expect(F.readSharedUsage(linkedFile.victim)?.fetchedAt).toBe(NOW);
+    expect(fs.lstatSync(linkedFile.file).isSymbolicLink()).toBe(false);
+  });
+
+  test("--help says what --usage writes and reads, and that FLEET_USAGE=1 turns it on", () => {
+    const help = Bun.spawnSync([process.execPath, path.join(here, "fleet.ts"), "--help"]).stdout.toString();
+    for (const words of ["FLEET_USAGE=1", "claude-fleet/usage.json", "never the login", ".claude.json"]) expect([words, help.includes(words)]).toEqual([words, true]);
+  });
+});
+
 describe("new since you looked, on the conversation", () => {
   test("every reply newer than the mark is marked new, earlier ones (◇) too, so the digest's count can be found", () => {
     const saved = { ...F.seen, events: [...F.seen.events], known: new Map(F.seen.known) };
@@ -3122,7 +3174,7 @@ describe("the login stays inside the process", () => {
       `import * as fs from "node:fs";
 (globalThis as any).fetch = async (url: any, init: any = {}) => {
   const auth = String(init?.headers?.Authorization ?? "");
-  fs.appendFileSync(process.env.CALLS_LOG!, "fetch " + JSON.stringify({ url: String(url), auth: auth === "Bearer ${CANARY}" ? "the login" : auth ? "something else" : "none", verbose: init.verbose }) + "\\n");
+  fs.appendFileSync(process.env.CALLS_LOG!, "fetch " + JSON.stringify({ url: String(url), auth: auth === "Bearer ${CANARY}" ? "the login" : auth ? "something else" : "none", verbose: init.verbose, redirect: init.redirect }) + "\\n");
   const status = Number(process.env.FAKE_STATUS);
   // An answer that repeats the login back in places that are not figures: none of it may be kept.
   if (status === 200) return Response.json({ five_hour: { utilization: 38, resets_at: new Date(Date.now() + 130 * 60000).toISOString(), echo: "${CANARY}" }, seven_day: { utilization: 21, resets_at: new Date(Date.now() + 3 * 86400000).toISOString() }, access_token: "${CANARY}", account: { token: "${CANARY}" } });
@@ -3155,7 +3207,7 @@ describe("the login stays inside the process", () => {
     expect(r.code).toBe(0);
     expect(strip(r.out)).toContain("38%");
     if (process.platform === "darwin") expect(r.security).toEqual(["security find-generic-password -s Claude Code-credentials -w"]);
-    expect(r.fetches).toEqual([{ url: "https://api.anthropic.com/api/oauth/usage", auth: "the login", verbose: false }]);
+    expect(r.fetches).toEqual([{ url: "https://api.anthropic.com/api/oauth/usage", auth: "the login", verbose: false, redirect: "error" }]); // a redirect is an error: the request can only ever go to that address
     expect(r.everything).not.toContain(CANARY);
     expect(r.err).toBe("");
     expect(r.out).not.toContain("\x1b]"); // and no title either

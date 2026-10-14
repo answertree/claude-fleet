@@ -140,7 +140,7 @@ Each stays silent until it has something to say.
 
 ## Account usage and your login
 
-Usage figures are off unless you pass `--usage` (or set `FLEET_USAGE=1` in the environment, which means the same). With it, Claude Fleet reads the Claude Code login already stored on your machine (the macOS keychain item `Claude Code-credentials`, or `~/.claude/.credentials.json`) and asks `api.anthropic.com/api/oauth/usage` for your figures every five minutes. The token is sent only to that address and is held in memory for that one request. It is never written, logged or printed, and never refreshed or changed. That endpoint is the one Claude Code's own `/usage` screen relies on, and it is not a documented public interface.
+Usage figures are off unless you pass `--usage` (or set `FLEET_USAGE=1` in the environment, which means the same). With it, Claude Fleet reads the Claude Code login already stored on your machine (the macOS keychain item `Claude Code-credentials`, or `~/.claude/.credentials.json`) and asks `api.anthropic.com/api/oauth/usage` for your figures every five minutes. The token is sent only to that address (a redirect is refused, not followed) and is held in memory for that one request. It is never written, logged or printed, and never refreshed or changed. That endpoint is the one Claude Code's own `/usage` screen relies on, and it is not a documented public interface.
 
 Without `--usage` or `FLEET_USAGE=1`, Claude Fleet makes no network requests at all and does not ask the keychain for anything.
 
@@ -165,7 +165,7 @@ Claude Fleet does not work around the refusal. It has no helper process and no p
 
 ### Shared figures
 
-What a remote dashboard can do is show figures that another dashboard has already fetched. A dashboard that reads the figures successfully saves them to `${XDG_CACHE_HOME:-~/.cache}/claude-fleet/usage.json` (readable only by you, and replaced in one step so a reader never sees half a file). It holds Anthropic's figures and the time they were fetched, and never the login. **This is the one file Claude Fleet ever writes.** (Bun, which runs it, may keep a compiled copy of the script in its own cache; that is the runtime's file and holds nothing of yours.)
+What a remote dashboard can do is show figures that another dashboard has already fetched. A dashboard that reads the figures successfully saves them to `${XDG_CACHE_HOME:-~/.cache}/claude-fleet/usage.json`, in a folder it creates readable only by you. The file is readable only by you too, and is replaced in one step through a temporary file beside it, so a reader never sees half a file. If that folder already exists and is not yours alone (a link, another account's, or writable by everyone), nothing is written there or read from it. It holds Anthropic's figures and the time they were fetched, and never the login. **This is the one file Claude Fleet ever writes.** (Bun, which runs it, may keep a compiled copy of the script in its own cache; that is the runtime's file and holds nothing of yours.)
 
 A dashboard whose own read fails shows the figures from that file, or failing that the ones Claude Code itself last cached (the `cachedUsageUtilization` entry of `~/.claude.json`; no other key is read), whichever is newer. So one dashboard left running in a terminal on the Mac keeps a remote one supplied.
 

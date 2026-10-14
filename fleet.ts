@@ -43,7 +43,12 @@ Usage: bun fleet.ts [minutes] [options]
   --mode <m>     detail (default), compact, or far (big, readable from a distance)
   --all          also show idle and finished sessions
   --usage        show your Claude account usage limits (reads the stored Claude
-                 Code login and asks api.anthropic.com every five minutes)
+                 Code login and asks api.anthropic.com every five minutes).
+                 FLEET_USAGE=1 in the environment does the same. It saves the
+                 figures it gets, never the login, to
+                 \${XDG_CACHE_HOME:-~/.cache}/claude-fleet/usage.json (the one
+                 file it writes), and when its own read fails shows the
+                 figures in that file or in Claude Code's ~/.claude.json
   --bell         ring the terminal bell when a session starts waiting on you,
                  or when something stalls
   --stall <min>  mark a thread "stalled?" after this many minutes sitting on a
@@ -810,7 +815,7 @@ function absorbParts(t: Tail, a: any) {
 }
 const tails = new Map<string, Tail>();
 
-export function hintFor(name: string, input: any): string {
+export function hintFor(_name: string, input: any): string {
   if (!input || typeof input !== "object") return "";
   if (typeof input.questions?.[0]?.question === "string") return input.questions[0].question;
   if (typeof input.description === "string") return input.description;
@@ -1711,12 +1716,30 @@ export function figuresOnly(raw: any): UsageFigures {
 export const sharedUsagePath = () => path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache"), "claude-fleet", "usage.json");
 /** What goes in that file: Anthropic's figures and when they were fetched. */
 export const sharedUsageContent = (figures: unknown, fetchedAt: number): string => JSON.stringify({ fetchedAt, ...figuresOnly(figures) }) + "\n";
-/** Write it for other dashboards: mode 0600, and atomically, so a reader never sees half a file. */
+/**
+ * Whether a path is ours: not a link, owned by this user, and not writable by everyone. The shared file and its
+ * folder must be, or another account on the machine could plant figures, or have the write land somewhere else.
+ */
+function ours(p: string): boolean {
+  try {
+    const st = fs.lstatSync(p);
+    return !st.isSymbolicLink() && (process.getuid === undefined || st.uid === process.getuid()) && (st.mode & 0o002) === 0;
+  } catch {
+    return false;
+  }
+}
+/**
+ * Write it for other dashboards: mode 0600, and atomically, so a reader never sees half a file. The folder is
+ * made readable only by you; if it already exists and is not ours (a link, someone else's, open to everyone),
+ * nothing is written. The temporary file has an unguessable name and is created only if nothing is there, so a
+ * file or a link planted in its place cannot be written through.
+ */
 export function writeSharedUsage(figures: unknown, fetchedAt: number, file = sharedUsagePath()): boolean {
-  const tmp = `${file}.${process.pid}.tmp`;
+  const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(tmp, sharedUsageContent(figures, fetchedAt), { mode: 0o600 });
+    if (!ours(path.dirname(file))) return false;
+    fs.writeFileSync(tmp, sharedUsageContent(figures, fetchedAt), { mode: 0o600, flag: "wx" });
     fs.renameSync(tmp, file);
     return true;
   } catch {
@@ -1730,8 +1753,9 @@ export interface Reading {
   figures: UsageFigures;
   fetchedAt: number;
 }
-/** Read figures another dashboard shared. */
+/** Read figures another dashboard shared: only from a file, and a folder, that are ours. */
 export function readSharedUsage(file = sharedUsagePath()): Reading | undefined {
+  if (!ours(file) || !ours(path.dirname(file))) return undefined;
   const o = readJson(file);
   if (!o || typeof o.fetchedAt !== "number") return undefined;
   return { figures: figuresOnly(o), fetchedAt: o.fetchedAt };
@@ -1785,6 +1809,7 @@ async function readUsage(now: number): Promise<Reading | { reason: string }> {
     res = await fetch("https://api.anthropic.com/api/oauth/usage", {
       headers: { Authorization: `Bearer ${found.login.token}`, "anthropic-beta": "oauth-2025-04-20" },
       signal: AbortSignal.timeout(10_000),
+      redirect: "error", // the login goes to this address and nowhere else, whatever the runtime does with a redirect
       verbose: false, // with BUN_CONFIG_VERBOSE_FETCH=curl set, Bun would print this request, login and all, to the terminal
     });
   } catch (e: any) {
