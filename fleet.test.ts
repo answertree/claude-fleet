@@ -625,6 +625,25 @@ describe("workflow phase trail", () => {
   });
 });
 
+describe("new since you looked, on the conversation", () => {
+  test("every reply newer than the mark is marked new, earlier ones (◇) too, so the digest's count can be found", () => {
+    const saved = { ...F.seen, events: [...F.seen.events], known: new Map(F.seen.known) };
+    try {
+      Object.assign(F.seen, { at: NOW - 18 * MIN, events: [], known: new Map(), primed: true });
+      const main = tailOf([prompt(NOW - 29 * MIN, "go"), reply(NOW - 25 * MIN, "Old news."), reply(NOW - 7 * MIN, "Found it."), reply(NOW - MIN, "Shall I open the pull request?")]);
+      const s = sessionOf({ sid: "news", mains: [main] });
+      F.noteScan([s], NOW, () => undefined);
+      expect(F.digest().groups.find((g) => g.kind === "replies")?.count).toBe(2);
+      const rows = F.detailView(F.buildViews([s], NOW), 150, 30, NOW).map(strip);
+      const marked = rows.filter((l) => / new$/.test(l.slice(0, 104).trimEnd()));
+      expect(marked.map((l) => l.slice(4).trim().split(" ").slice(0, 2).join(" "))).toEqual(["◇ Found", "◆ Shall"]);
+      expect(rows.some((l) => l.includes("◇ Old news.") && l.slice(0, 104).trimEnd().endsWith("25m"))).toBe(true);
+    } finally {
+      Object.assign(F.seen, saved);
+    }
+  });
+});
+
 describe("a blocked job's wait", () => {
   const home = path.join(SCRATCH, "blocked");
   const sid = "blocked0-0000-4000-8000-000000000001";
@@ -2177,6 +2196,39 @@ describe("the detail view", () => {
     // One long paragraph is simply kept from the top.
     const single = F.replyRows("word ".repeat(60).trim(), 40);
     expect(F.clipReply(single, 3, 40).map((r) => r.mark)).toEqual([undefined, undefined, `… +${single.length - 3} lines`]);
+  });
+
+  test("a clipped reply keeps up to three rows of its closing paragraph, so a closing question longer than a row is not what goes missing", () => {
+    const text = (segs: F.Seg[]) => segs.map((s) => s[0]).join("");
+    const wrapsAtEnd = F.replyRows("one\n\ntwo\n\nthree\n\nI have not run it for real, because dropping a column cannot be undone.", 40);
+    expect(F.clipReply(wrapsAtEnd, 4, 40).map((r) => text(r.segs) + (r.mark ? ` [${r.mark}]` : ""))).toEqual(["one", "two [… +1 line]", "I have not run it for real, because", "dropping a column cannot be undone."]);
+    const paras = Array.from({ length: 7 }, (_, i) => `Paragraph ${i + 1} says a little about what was found, and it is long enough to wrap onto a second row here.`);
+    const ask = "So the closing question is a long one too: do you want me to carry on and fix the progress bar, or stop here and open the pull request?";
+    const rows = F.replyRows([...paras, ask].join("\n\n"), 92);
+    const kept = F.clipReply(rows, 10, 92).map((r) => text(r.segs));
+    expect(kept.slice(-2).join(" ")).toBe(ask); // the whole question, on its own rows
+    expect(kept.length).toBe(10);
+    // A closing paragraph longer than three rows shows its first three, the third ending in …
+    const longEnd = F.replyRows([...paras, "word ".repeat(100).trim()].join("\n\n"), 92);
+    const end = F.clipReply(longEnd, 10, 92).map((r) => text(r.segs));
+    expect(end.slice(-3).map((l) => l.startsWith("word"))).toEqual([true, true, true]);
+    expect(end.at(-1)!.endsWith(" …")).toBe(true);
+  });
+
+  test("in focus a question longer than three rows is shown whole; out of focus it is three rows at most", () => {
+    const question = "Two things before I go on. First, the nightly export is still timing out on the largest customer, and the only fix I can see is to split it per region, which is quick but means the next large customer needs the same treatment by hand. Second, the migration that drops coupon_code is ready, but the promotions table is locked for about four minutes while it runs. Shall I split the export per region now, and may I run the migration tonight at 02:00 when traffic is lowest?";
+    const s = sessionOf({ sid: "ask", status: "idle", job: { state: "blocked", detail: "", needs: question } });
+    const views = F.buildViews([s], NOW);
+    for (const W of [80, 110, 150]) {
+      const focused = F.detailView(views, W, 40, NOW, 0, true).map(strip);
+      const shown = focused.slice(1).filter((l) => l.startsWith(" ██ ")).map((l) => l.slice(4, F.grid(W).textEnd).trim()).join(" ");
+      expect([W, shown.includes(question)]).toEqual([W, true]);
+      const normal = F.detailView(views, W, 40, NOW, 0, false).map(strip);
+      expect([W, normal.filter((l) => l.startsWith(" ██ ")).length]).toEqual([W, W >= 150 ? 1 + 3 : 1 + 3]);
+      // In focus on a screen too short for the whole question, it takes every row it can and is cut there.
+      const short = F.detailView(views, W, 5, NOW, 0, true).map(strip);
+      expect([W, short.length <= 5, short.filter((l) => l.startsWith(" ██ ")).length]).toEqual([W, true, 5]);
+    }
   });
 
   test("one glyph per step: spaced out up to 10, packed up to 20, scaled to 20 cells beyond", () => {

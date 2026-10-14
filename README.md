@@ -37,13 +37,13 @@ The header is five rows on a terminal of 40 rows or more and three rows below th
 
 **For each session** (detail mode)
 
-- **Two head rows:** a rail in the colour of the session's state, its name, its folder and branch, and the state with how long it has been so: `▲ NEEDS YOU`, `◐ STALLED?`, `● WORKING`, `▸ YOUR TURN`, `○ IDLE` or `✓ FINISHED`. Under that, one line saying what it is doing, a sparkline of its tool calls and their count. When the session needs you the line is the question itself, in full, on an amber band; those sessions sort to the top.
-- **Conversation:** `▸` your prompt, `◇` Claude's earlier replies (dimmed) and `◆` its newest reply with its bullets, code and tables kept, each with its age in a column of its own. A long reply is cut in the middle, never at the end: its last line stays and `… +5 lines` says how much is hidden.
+- **Two head rows:** a rail in the colour of the session's state, its name, its folder and branch, and the state with how long it has been so: `▲ NEEDS YOU`, `◐ STALLED?`, `● WORKING`, `▸ YOUR TURN`, `○ IDLE` or `✓ FINISHED`. Under that, one line saying what it is doing, a sparkline of its tool calls and their count. When the session needs you the line is the question itself, on up to three rows of an amber band (all of it when you focus the session); those sessions sort to the top.
+- **Conversation:** `▸` your prompt, `◇` Claude's earlier replies (dimmed) and `◆` its newest reply with its bullets, code and tables kept, each with its age in a column of its own. A long reply is cut in the middle, never at the end: its closing paragraph stays (up to three rows of it) and `… +5 lines` says how much is hidden.
 - **Beside the conversation:** the context window split by category (system prompt, tools, MCP tools, agents, memory files, skills, messages), then output tokens and the CPU and memory of the session's processes. Below 130 columns these become one row under the head.
 - **Tasks:** one glyph per task (`✓` done, `◐` in progress, `○` not started) and the one in progress.
 - **Threads:** the main thread, each workflow (`≡`, the phases it has been through in order, a phase it comes back to listed again, with a `…` in front when the earliest do not fit; then one glyph per agent) and each agent: a spinner if it wrote in the last minute, `◐` with the tool and what it is for if it is waiting on one, `○` if it is quiet.
 
-When the screen is too short for all of that, sessions give rows up in a fixed order, from the bottom session upward: earlier replies, the finished-agents line, most of each newest reply, the blank rows between sessions, prompts, main-thread rows, then per-agent rows. A session that needs you always keeps its whole question and two lines of the reply. Sessions that still do not fit become one line, `… 2 more: name, name`. Rows left over are handed back in the reverse order, top session first.
+When the screen is too short for all of that, sessions give rows up in a fixed order, from the bottom session upward: earlier replies, the finished-agents line, most of each newest reply, the blank rows between sessions, prompts, main-thread rows, then per-agent rows. A session that needs you always keeps its question (up to three rows) and two lines of the reply. Sessions that still do not fit become one line, `… 2 more: name, name`. Rows left over are handed back in the reverse order, top session first.
 
 Only sessions that are working or waiting on you are shown. Idle and finished ones are counted on the top row and on the `a` button (`a All · 1 idle`); press `a` to bring them back (in detail mode, as two rows each).
 
@@ -85,7 +85,7 @@ One rule for colour: warm means you. Amber is spent only where you are needed an
 
 ![Far mode](docs/screenshot-far.svg)
 
-Click a session, or press `tab`, to focus on it alone; it then gets the whole screen, with every reply it still holds in full and every agent. `tab` again moves to the next session and `esc` goes back.
+Click a session, or press `tab`, to focus on it alone; it then gets the whole screen, with its whole question, every reply it still holds in full and every agent. `tab` again moves to the next session and `esc` goes back.
 
 ## Controls
 
@@ -136,7 +136,7 @@ Each stays silent until it has something to say.
 **Since you looked: unread marks for a screen you walk away from.**
 
 - *Away.* The terminal's title is set to the fleet's state in the screen's own glyphs (`▲1 ●2 ≡1 Claude Fleet`: one waiting on you, two working, one workflow), so a tab or window switcher shows whether anything needs you. It is cleared when you quit.
-- *Back.* `space` means "seen it". Until you press it again, a newest reply that arrived since then gets a bold white `◆` and the word `new` where its age would be; the left of the header's rule lists what has happened (`since 23:04 · ▲ 1 asked · ✓ 3 agents done · ◆ 4 new replies`); the `space` button carries the total; and a white `▼` on the time axis shows where your last look falls, so every sparkline below reads as before and after. It is a key of its own, so switching view to read something does not clear the marks.
+- *Back.* `space` means "seen it". Until you press it again, every reply that arrived since then gets a bold white `◆` (`◇` for an earlier one) and the word `new` where its age would be; the left of the header's rule lists what has happened (`since 23:04 · ▲ 1 asked · ✓ 3 agents done · ◆ 4 new replies`); the `space` button carries the total; and a white `▼` on the time axis shows where your last look falls, so every sparkline below reads as before and after. It is a key of its own, so switching view to read something does not clear the marks.
 
 ## Account usage and your login
 

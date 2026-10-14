@@ -2895,9 +2895,9 @@ export const flatReply = (text: string): string => flatLines(text).join(" ");
 /**
  * The rows of a reply that fit in `cap`, kept from the top. When rows are hidden, a dim "… +N lines" is
  * right-aligned at the end of the measure on the last row before the cut, and that row's text is
- * shortened at a word boundary to make room. With 3 rows or more the last row is always the reply's
- * final line, because that is its conclusion or its question; the mark then sits on the row above it.
- * A final paragraph that wraps is shown by its first row, ending in …, not by its last few words.
+ * shortened at a word boundary to make room. With 3 rows or more the reply ends with its closing
+ * paragraph, because that is its conclusion or its question: up to 3 rows of it (1 at a cap of 3, 2 at
+ * 4), from its start, the last ending in … when there is more; the mark then sits on the row above it.
  */
 export function clipReply(rows: Seg[][], cap: number, w: number): { segs: Seg[]; mark?: string }[] {
   if (cap <= 0) return [];
@@ -2906,10 +2906,12 @@ export function clipReply(rows: Seg[][], cap: number, w: number): { segs: Seg[];
   const hidden = rows.length - cap;
   let last = rows.length - 1; // where the final paragraph starts
   while (last > 0 && runsOn.has(rows[last])) last--;
-  const closing = cap >= 3 && last >= cap - 1; // not when the final paragraph is already on show from its start
-  const final: Seg[] = last === rows.length - 1 ? rows[last] : [...shorten(rows[last], w - 2), [` ${ICON.cut}`, C.dim]];
-  const shown = closing ? [...rows.slice(0, cap - 1), final] : rows.slice(0, cap);
-  const markAt = shown.length - (closing ? 2 : 1);
+  const keep = cap >= 3 ? Math.min(rows.length - last, 3, cap - 2) : 0; // rows of it to show
+  const closing = keep > 0 && last >= cap - keep; // not when the final paragraph is already on show from its start
+  const final = rows.slice(last, last + keep);
+  if (closing && last + keep < rows.length) final[keep - 1] = [...shorten(final[keep - 1], w - 2), [` ${ICON.cut}`, C.dim]];
+  const shown = closing ? [...rows.slice(0, cap - keep), ...final] : rows.slice(0, cap);
+  const markAt = closing ? cap - keep - 1 : shown.length - 1;
   const mark = `${ICON.cut} +${hidden} line${hidden === 1 ? "" : "s"}`;
   return shown.map((segs, i) => (i === markAt ? { segs: shorten(segs, w - width(mark) - 3), mark } : { segs }));
 }
@@ -2973,8 +2975,9 @@ export function blockOf(v: View, g: Grid, now: number, win: Win, focus = false):
   const typed = oneLine(m?.ask?.text || m?.lastPrompt || "");
   const typedAt = m?.ask?.text ? m.ask.t : undefined;
   const sub = subheading(s, f, state);
+  // The question wraps to three rows at most, the last cut with …; in focus it is shown whole, as everything else is.
   const question = state === "needs" ? wrap(f.needs, subW) : [];
-  if (question.length > 3) question.splice(2, question.length, cutTo(question.slice(2).join(" "), subW));
+  if (!focus && question.length > 3) question.splice(2, question.length, cutTo(question.slice(2).join(" "), subW));
   const nowLine = state === "needs" && f.now && f.now !== f.needs ? f.now : "";
   const prompt = body && typed && sub.source !== "prompt" ? { text: typed, lines: wrap(typed, g.measure), t: typedAt } : undefined;
   const says = body && m ? m.says : [];
@@ -3013,7 +3016,7 @@ export function blockOf(v: View, g: Grid, now: number, win: Win, focus = false):
       agents: Infinity,
       fold: false,
       roster: body,
-      question: 3,
+      question: focus ? Infinity : 3,
     },
     folded: false,
   };
@@ -3053,7 +3056,9 @@ function stackOf(b: Block, g: Grid, now: number): StackRow[] {
       if (e.flat.length > shown.length) shown[shown.length - 1] = `${clipWords(shown[shown.length - 1], g.measure - 2)} ${ICON.cut}`;
       lines = shown.map((line): Seg[] => [[line, C.dim]]);
     }
-    said.push({ t: e.t, rows: lines.map((segs, i) => ({ icon: i ? undefined : [ICON.earlier, EARLIER_TONE], segs, age: i ? undefined : [ago(now - e.t), C.dim] })) });
+    // New since you last looked: a bold white ◇ and "new" for its age, as the newest reply gets, so every reply the digest counts can be found.
+    const fresh = isNew(e.t);
+    said.push({ t: e.t, rows: lines.map((segs, i) => ({ icon: i ? undefined : fresh ? [ICON.earlier, C.white, true] : [ICON.earlier, EARLIER_TONE], segs, age: i ? undefined : fresh ? ["new", C.white, true] : [ago(now - e.t), C.dim] })) });
   });
   if (k.reply > 0 && b.newest) {
     const { rows: all, t } = b.newest;
@@ -3188,9 +3193,20 @@ function promptOff(b: Block): Change | undefined {
   return from > 0 ? change(() => (b.keep.prompt = 0), () => (b.keep.prompt = from), () => b.keep.prompt === 0) : undefined;
 }
 const foldAway = (b: Block) => (b.folded ? undefined : change(() => (b.folded = true), () => (b.folded = false), () => b.folded, { fold: true }));
-function questionToOneRow(b: Block): Change | undefined {
+/** Show the question on at most `rows` rows, the last cut with …. It comes back a row at a time. */
+function questionTo(b: Block, rows: number): Change | undefined {
   const from = b.keep.question;
-  return Math.min(from, b.question.length) > 1 ? change(() => (b.keep.question = 1), () => (b.keep.question = from), () => b.keep.question === 1) : undefined;
+  const whole = Math.min(from, b.question.length);
+  if (whole <= rows) return undefined;
+  return change(() => (b.keep.question = rows), () => (b.keep.question = from), () => b.keep.question === rows, {
+    ease: (fits, spare) => {
+      for (let n = Math.min(whole, rows + spare + 1); n > rows; n--) {
+        b.keep.question = n === whole ? from : n;
+        if (fits()) return true;
+      }
+      return false;
+    },
+  });
 }
 
 /**
@@ -3224,9 +3240,11 @@ const LADDER: { step: number; cut: "gaps" | ((b: Block) => Change | undefined) }
   { step: 14, cut: (b) => turnOff(b, "ctx") }, // then the context row
   { step: 15, cut: (b) => turnOff(b, "roster") }, // workflow rows and the folded agents line: now a small far card
   { step: 16, cut: (b) => (needsYou(b) ? undefined : foldAway(b)) }, // whole sessions, never one that needs you
-  // Past the design's ladder, for a screen too small even for that: a waiting session's reply, then all but one row of its question, then the session.
+  // Past the design's ladder, for a screen too small even for that. A question shown whole in focus goes back to three rows, and gets back what fits.
+  { step: 17, cut: (b) => (b.focus ? questionTo(b, 3) : undefined) },
+  // Then a waiting session's reply, then all but one row of its question, then the session.
   { step: 18, cut: (b) => (needsYou(b) ? replyTo(b, 0) : undefined) },
-  { step: 18, cut: (b) => (needsYou(b) ? questionToOneRow(b) : undefined) },
+  { step: 18, cut: (b) => (needsYou(b) ? questionTo(b, 1) : undefined) },
   { step: 18, cut: (b) => (needsYou(b) ? foldAway(b) : undefined) },
 ];
 
