@@ -144,6 +144,7 @@ export function charWidth(cp: number): number {
     (cp >= 0x20000 && cp <= 0x3fffd)
   )
     return 2;
+  if (cp >= 0x2190 && cp <= 0x2bff) return 1; // arrows, box drawing, blocks, shapes, braille: what the screen is built from
   return ZERO_WIDTH.test(String.fromCodePoint(cp)) ? 0 : 1;
 }
 export const width = (s: string) => [...s].reduce((n, ch) => n + charWidth(ch.codePointAt(0)!), 0);
@@ -399,13 +400,14 @@ export const GLYPHS = {
   failed: { g: "✗", is: "failed, stopped or unavailable" },
   workflow: { g: "≡", plain: "◇", is: "workflow" },
   railThick: { g: "██", is: "state rail on a session's head rows" },
-  railThin: { g: "▌", is: "state rail on body rows; half a cell of context" },
+  railThin: { g: "▌", is: "state rail on body rows" },
   gaugeFill: { g: "━", is: "gauge: filled" },
   gaugeTrack: { g: "─", is: "gauge: remaining; rules" },
   gaugeNone: { g: "╌", plain: "─", is: "gauge: no reading" },
   pace: { g: "┼", is: "pace tick on the empty track" },
   paceFilled: { g: "┿", plain: "┼", is: "pace tick inside the filled part" },
   ctxFull: { g: "█", is: "context window: a full cell" },
+  ctxHalf: { g: "▌", is: "context window: half a cell" },
   ctxFree: { g: "░", is: "context window: free space" },
   swatch: { g: "■", is: "colour key swatch" },
   bullet: { g: "•", is: "bullet in a reply" },
@@ -437,6 +439,12 @@ export const STATE: Record<SessionState, { glyph: string; word: string; color: R
   finished: { glyph: "✓", word: "FINISHED", color: C.done },
 };
 export const STATE_ORDER = Object.keys(STATE) as SessionState[];
+/**
+ * The state rail's colour: the state colour on a session's head rows (thick), mixed 45% toward faint on
+ * its body rows (thin). A waiting session's thick rail alternates amber and dimmed amber; pass the frame counter as `tick`.
+ */
+export const railTone = (state: SessionState, thick: boolean, tick = 0): RGB =>
+  thick ? (state === "needs" && tick % 2 ? mix(C.amber, C.faint, 0.6) : STATE[state].color) : mix(STATE[state].color, C.faint, 0.45);
 
 /** One rule for every limit gauge (memory, 5h, 7d, extra, context %): calm below 60%, bold white to 79%, red from 80%. */
 export const limitTone = (pct: number): RGB => (pct >= 80 ? C.red : pct >= 60 ? C.white : C.calm);
@@ -1271,6 +1279,9 @@ export function treeUsage(pid: number): { cpu: number; rss: number; known: boole
   return { cpu, rss, known: !!root };
 }
 
+/** The busiest processes, at 5% CPU or more, busiest first. Empty under FLEET_HIDE_PROCESSES=1, which keeps other programs' names off the screen. */
+export const topProcs = (n: number): Proc[] => (HIDE_TOP ? [] : [...machine.procs].sort((a, b) => b.cpu - a.cpu).slice(0, n).filter((p) => p.cpu >= 5));
+
 export const gb = (bytes: number) => (bytes / 1024 ** 3 >= 10 ? Math.round(bytes / 1024 ** 3) : (bytes / 1024 ** 3).toFixed(1)) + "G";
 
 function machineRow(W: number): string {
@@ -1286,9 +1297,8 @@ function machineRow(W: number): string {
     fg(C.dim, "   mem ") + gauge(memPct, 10, toneFor(memPct)) + fg(C.text, ` ${gb(machine.memUsed)} of ${gb(machine.memTotal)}`) +
     fg(C.dim, `   load ${machine.load.toFixed(1)}`);
   const usedW = 5 + 10 + 5 + 2 + HW + (W >= 110 ? 8 + machine.cores.length : 0) + 7 + 10 + width(` ${gb(machine.memUsed)} of ${gb(machine.memTotal)}`) + width(`   load ${machine.load.toFixed(1)}`);
-  const top = [...machine.procs].sort((a, b) => b.cpu - a.cpu).slice(0, 4).filter((p) => p.cpu >= 5);
-  const topText = top.map((p) => `${p.name.slice(0, 18)} ${Math.round(p.cpu)}%`).join(" · ");
-  if (!HIDE_TOP && topText && W - usedW - 9 > 16) line += fg(C.dim, "   top ") + fg(C.text, fit(topText, W - usedW - 8));
+  const topText = topProcs(4).map((p) => `${p.name.slice(0, 18)} ${Math.round(p.cpu)}%`).join(" · ");
+  if (topText && W - usedW - 9 > 16) line += fg(C.dim, "   top ") + fg(C.text, fit(topText, W - usedW - 8));
   return line;
 }
 
@@ -1318,7 +1328,7 @@ export const REASON = {
 };
 /** What can be done about a reason, for the one dim line under the account block. Standard remedies, not tested here. */
 export function usageRemedy(reason: string): string {
-  if (reason === REASON.keychainRemote) return "run: security unlock-keychain ~/Library/Keychains/login.keychain-db   (or start fleet in a tmux begun on the Mac itself)";
+  if (reason === REASON.keychainRemote) return "run: security unlock-keychain ~/Library/Keychains/login.keychain-db  ·  or start fleet in a tmux begun on the Mac itself";
   return "";
 }
 
@@ -1403,7 +1413,7 @@ function readLogin(): { login: Login } | { reason: string } {
     k = { status: 127, stderr: "", timedOut: false, parse: "empty" };
     try {
       const r = spawnSync("security", ["find-generic-password", "-s", "Claude Code-credentials", "-w"], { encoding: "utf8", timeout: 5000 });
-      const parsed = r.status === 0 ? parseLogin(r.stdout ?? "") : { parse: "empty" as LoginParse };
+      const parsed: { parse: LoginParse; login?: Login } = r.status === 0 ? parseLogin(r.stdout ?? "") : { parse: "empty" };
       const timedOut = (r.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT" || (r.status === null && r.signal === "SIGTERM");
       k = { status: r.error && !timedOut ? 127 : r.status, stderr: String(r.stderr ?? ""), timedOut, parse: parsed.parse };
       fromKeychain = parsed.login;
@@ -1521,7 +1531,8 @@ export function retryDelay(reason: string, failures: number): number {
   if (!reason) return USAGE_EVERY_MS;
   const doubling = 2 ** Math.max(0, Math.min(6, failures - 1));
   if (/^Anthropic answered 429/.test(reason)) return Math.min(30 * 60_000, USAGE_EVERY_MS * doubling); // asked to slow down: 5, 10, 20, 30 minutes
-  if (reason === REASON.keychainSilent) return USAGE_EVERY_MS; // each try freezes the screen for five seconds, so do not hurry
+  // A keychain call that hangs freezes the screen for five seconds, and a keychain closed to this session stays closed until you unlock it (then press u): do not hurry.
+  if (reason === REASON.keychainSilent || reason === REASON.keychainRemote) return USAGE_EVERY_MS;
   return Math.min(USAGE_EVERY_MS, 60_000 * doubling); // 1, 2, 4, then every 5 minutes
 }
 
@@ -1623,7 +1634,8 @@ export function resetText(resetsAt: number, now: number, form: "long" | "short" 
     const left = m < 60 ? `${m}m` : `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}`;
     return form === "long" ? `resets in ${left}` : form === "short" ? `${left} left` : left;
   }
-  const day = `${new Date(resetsAt).toLocaleDateString("en-GB", { weekday: "short" })} ${hhmm(resetsAt)}`;
+  const at = Math.round(resetsAt / 60_000) * 60_000; // Anthropic's reset times can be a fraction of a second short of the minute
+  const day = `${new Date(at).toLocaleDateString("en-GB", { weekday: "short" })} ${hhmm(at)}`;
   return form === "long" ? `resets ${day}` : day;
 }
 
@@ -1746,6 +1758,10 @@ export function bucketsIn(lists: number[][], win: Win): number[] {
     }
   return out;
 }
+/** Every transcript under a session: its main thread, its agents and its workflows' agents. */
+export const tailsOf = (s: Session): Tail[] => [...s.mains, ...s.agents.map((a) => a.tail), ...s.workflows.flatMap((w) => w.agents.map((a) => a.tail))];
+/** The window every sparkline in the lane shows at a terminal `W` cells wide: one bar per lane cell. */
+export const laneWindow = (now: number, W: number): Win => timeWindow(now, opt.windowMin * 60_000, grid(W).laneW);
 /** The same, for the window the person chose (opt.windowMin). */
 export const buckets = (lists: number[][], now: number, n: number): number[] => bucketsIn(lists, timeWindow(now, opt.windowMin * 60_000, n));
 export const sum = (a: number[]) => a.reduce((x, y) => x + y, 0);
@@ -1776,32 +1792,32 @@ export function ctxMax(c: NonNullable<Tail["ctx"]>): number {
 
 // Colours follow Claude Code's /context rows as the context-bar plugin draws them
 // (grey system rows, orange memory, lilac messages); the rest are picked to stay distinct.
-const PARTS: { key: PartKey | "messages"; name: string; color: RGB }[] = [
-  { key: "system", name: "System prompt", color: [120, 120, 120] },
-  { key: "tools", name: "System tools", color: [168, 168, 168] },
-  { key: "mcp", name: "MCP tools", color: [0, 204, 204] },
-  { key: "agents", name: "Agents", color: [78, 186, 101] },
-  { key: "memory", name: "Memory files", color: [215, 119, 87] },
-  { key: "skills", name: "Skills", color: [255, 193, 7] },
-  { key: "messages", name: "Messages", color: [177, 185, 249] },
+export const PARTS: { key: PartKey | "messages"; name: string; short: string; color: RGB }[] = [
+  { key: "system", name: "System prompt", short: "System", color: [120, 120, 120] },
+  { key: "tools", name: "System tools", short: "Tools", color: [168, 168, 168] },
+  { key: "mcp", name: "MCP tools", short: "MCP", color: [0, 204, 204] },
+  { key: "agents", name: "Agents", short: "Agents", color: [78, 186, 101] },
+  { key: "memory", name: "Memory files", short: "Memory", color: [215, 119, 87] },
+  { key: "skills", name: "Skills", short: "Skills", color: [255, 193, 7] },
+  { key: "messages", name: "Messages", short: "Messages", color: [177, 185, 249] },
 ];
 const CHARS_PER_TOKEN = 3.8;
-/** Split the window's fill by category. Everything but Messages is sized from text length, so it is approximate. */
-export function contextSplit(t: Tail): { name: string; tokens: number; color: RGB }[] {
+/** Split the window's fill by category. Everything but Messages is sized from text length, so it is approximate. `short` is the name the context key uses. */
+export function contextSplit(t: Tail): { name: string; short: string; tokens: number; color: RGB }[] {
   if (!t.ctx) return [];
-  if (!t.parts) return [{ name: "Used", tokens: t.ctx.used, color: PARTS[6].color }];
+  if (!t.parts) return [{ name: "Used", short: "Used", tokens: t.ctx.used, color: PARTS[6].color }];
   let fixed = 0;
   const out = PARTS.filter((p) => p.key !== "messages").map((p) => {
     const tokens = Math.round((t.parts![p.key as PartKey] ?? 0) / CHARS_PER_TOKEN);
     fixed += tokens;
-    return { name: p.name, tokens, color: p.color };
+    return { name: p.name, short: p.short, tokens, color: p.color };
   });
   if (fixed > t.ctx.used) {
     const k = t.ctx.used / fixed;
     for (const o of out) o.tokens = Math.round(o.tokens * k);
     fixed = t.ctx.used;
   }
-  out.push({ name: "Messages", tokens: t.ctx.used - fixed, color: PARTS[6].color });
+  out.push({ name: "Messages", short: "Messages", tokens: t.ctx.used - fixed, color: PARTS[6].color });
   return out;
 }
 
@@ -2013,8 +2029,7 @@ const pendingTool = (t: Tail) => !!t.lastTool && t.lastTool.t > t.lastResultT;
 export function stallOf(s: Session, f: Facts, now: number, treeCpu: number | undefined = treeCpuOf(s.pid), stallMs = opt.stallMin * 60_000): Stall {
   if (stallMs <= 0 || f.needs || !f.working) return NO_STALL;
   const agents = [...s.agents, ...s.workflows.filter((w) => w.status === "running").flatMap((w) => w.agents)];
-  const everyone = [...s.mains, ...s.agents.map((a) => a.tail), ...s.workflows.flatMap((w) => w.agents.map((a) => a.tail))];
-  const lastWrite = Math.max(0, ...everyone.map(lastWriteOf));
+  const lastWrite = Math.max(0, ...tailsOf(s).map(lastWriteOf));
   const session = sessionStalled(true, lastWrite, treeCpu, now, stallMs);
   const threads: string[] = [];
   let since = session ? lastWrite : Infinity;
@@ -2381,7 +2396,11 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
     fg(C.cyan, bold(left)) + fg(waiting ? C.yellow : C.text, fit(stats, Math.max(0, room))) + " " + spark(headBuckets, Math.max(...headBuckets), [40, 110, 90], [120, 240, 170]) + "  " + fg(C.dim, clock) + " ",
   );
   out.push(machineRow(W));
-  if (opt.usage) out.push(usageRow(W, now));
+  if (opt.usage) {
+    out.push(usageRow(W, now));
+    const remedy = accountView(now).remedy;
+    if (remedy) out.push(fg(C.dim, " " + fit("        " + remedy, W - 2, "l", true))); // what to do about it, when there is something
+  }
   out.push(fg(C.faint, " " + "─".repeat(W - 2)));
 
   if (!shown.length) {
@@ -2393,7 +2412,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
 
   // Shared scales so rows are comparable with each other.
   const agentMax = Math.max(1, ...views.flatMap((v) => v.groups.flatMap((g) => g.rows.map((a) => Math.max(...buckets([a.tail.tools], now, S))))));
-  const sessionTails = (s: Session) => [...s.mains, ...s.agents.map((a) => a.tail), ...s.workflows.flatMap((w) => w.agents.map((a) => a.tail))];
+  const sessionTails = tailsOf;
   const sessionMax = Math.max(1, ...views.map((v) => Math.max(...buckets(sessionTails(v.s).map((t) => t.tools), now, S))));
 
   const ACT = W >= 150 ? 40 : W >= 120 ? 28 : W >= 100 ? 18 : 0; // "what it is doing" column

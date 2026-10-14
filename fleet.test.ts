@@ -46,7 +46,7 @@ describe("program shape", () => {
     expect(r.exitCode).toBe(0);
     expect(r.stdout.toString()).toBe("imported\n");
     expect(r.stderr.toString()).toBe("");
-  });
+  }, 30_000);
 
   test("parseArgs reads the window, the mode and the switches", () => {
     const before = { ...F.opt };
@@ -182,6 +182,15 @@ describe("graphs hold still", () => {
     t.tokens.set("last", [NOW - 1, 30]);
     expect(F.tokensIn([t], win)).toBe(230);
     expect(F.tokensIn([t], F.timeWindow(NOW + 1000, WINDOW, 30))).toBe(230);
+  });
+
+  test("the lane's window has one bar per lane cell, and a session's threads are all counted", () => {
+    expect(F.laneWindow(NOW, 150)).toEqual(F.timeWindow(NOW, F.opt.windowMin * MIN, 30));
+    expect(F.laneWindow(NOW, 110).n).toBe(20);
+    const wf: F.Workflow = { id: "wf_1", name: "w", status: "running", phase: "", phases: [], seen: [], started: NOW, finished: 0, agents: [agentOf("w1", tailOf([toolCall(NOW - 3 * MIN)]))], lastT: NOW };
+    const s = sessionOf({ sid: "x", mains: [tailOf([toolCall(NOW - MIN)])], agents: [agentOf("s1", tailOf([toolCall(NOW - 2 * MIN), toolCall(NOW - 2 * MIN + 5)]))], workflows: [wf] });
+    expect(F.tailsOf(s).length).toBe(3);
+    expect(F.sum(F.bucketsIn(F.tailsOf(s).map((t) => t.tools), F.laneWindow(NOW, 150)))).toBe(4);
   });
 
   test("bar lengths are named as the header prints them", () => {
@@ -337,6 +346,10 @@ describe("vocabulary", () => {
     expect(F.figureTone(59)).toEqual({ color: F.C.text, bold: false });
     expect(F.figureTone(60)).toEqual({ color: F.C.white, bold: true });
     expect(F.figureTone(80)).toEqual({ color: F.C.red, bold: true });
+    expect(F.railTone("working", true)).toEqual(F.C.green);
+    expect(F.railTone("working", false)).toEqual(F.mix(F.C.green, F.C.faint, 0.45));
+    expect([F.railTone("needs", true, 0), F.railTone("needs", true, 1)]).toEqual([F.C.amber, F.mix(F.C.amber, F.C.faint, 0.6)]); // a waiting session's rail alternates
+    expect(F.railTone("stalled", true, 1)).toEqual(F.C.red); // nothing else moves
     expect(F.coolTone(0)).toEqual([40, 100, 110]);
     expect(F.coolTone(1)).toEqual([150, 225, 235]);
   });
@@ -586,6 +599,7 @@ describe("usage read tells the truth", () => {
     expect([1, 2, 3, 4, 9].map((n) => F.retryDelay("Anthropic answered 429", n) / MIN)).toEqual([5, 10, 20, 30, 30]);
     expect(F.retryDelay("Anthropic answered 401", 1)).toBe(MIN);
     expect(F.retryDelay(F.REASON.keychainSilent, 1)).toBe(5 * MIN); // each try blocks for five seconds
+    expect(F.retryDelay(F.REASON.keychainRemote, 1)).toBe(5 * MIN); // it stays closed until you unlock it, and u retries at once
   });
 
   const figures = (five = 38, week = 21): F.UsageFigures => ({
@@ -631,6 +645,7 @@ describe("usage read tells the truth", () => {
     expect(F.resetText(NOW + 35 * MIN, NOW)).toBe("resets in 35m");
     expect(F.resetText(fri, NOW)).toBe("resets Fri 09:00");
     expect(F.resetText(fri, NOW, "short")).toBe("Fri 09:00");
+    expect(F.resetText(fri - 400, NOW)).toBe("resets Fri 09:00"); // a reset time a fraction of a second short of the minute
     expect(F.resetText(NOW - MIN, NOW)).toBe("");
     expect(F.resetText(0, NOW)).toBe("");
   });
@@ -678,7 +693,7 @@ describe("usage read tells the truth", () => {
     // A second dashboard, in a remote terminal, cannot read the login. It shows the shared figures and says why its own read fails.
     resetUsage();
     await F.fetchUsage(NOW + 3 * MIN, async () => ({ reason: F.REASON.keychainRemote }));
-    expect(F.usage).toMatchObject({ reason: "keychain: closed to remote sessions (ssh/mosh)", failures: 1, source: "shared", fetchedAt: NOW, nextTry: NOW + 4 * MIN });
+    expect(F.usage).toMatchObject({ reason: "keychain: closed to remote sessions (ssh/mosh)", failures: 1, source: "shared", fetchedAt: NOW, nextTry: NOW + 8 * MIN });
     expect(F.usageState(NOW + 3 * MIN)).toMatchObject({ kind: "current", failing: "keychain: closed to remote sessions (ssh/mosh)" });
     expect(F.usageState(NOW + 40 * MIN)).toMatchObject({ kind: "stale", asOf: NOW, reason: "keychain: closed to remote sessions (ssh/mosh)" });
     expect(F.usageState(NOW + 25 * 60 * MIN).kind).toBe("none");
@@ -734,7 +749,7 @@ describe("usage read tells the truth", () => {
       delete process.env.FLEET_USAGE_FIXTURE;
       process.env.FLEET_USAGE_FAIL = "keychain: closed to remote sessions (ssh/mosh)";
       await F.fetchUsage(NOW);
-      expect(F.usageState(NOW)).toEqual({ kind: "none", reason: "keychain: closed to remote sessions (ssh/mosh)", nextTry: NOW + MIN });
+      expect(F.usageState(NOW)).toEqual({ kind: "none", reason: "keychain: closed to remote sessions (ssh/mosh)", nextTry: NOW + 5 * MIN });
     } finally {
       delete process.env.FLEET_USAGE_FIXTURE;
       delete process.env.FLEET_USAGE_FAIL;
@@ -1148,6 +1163,7 @@ describe("since you looked", () => {
 
 describe("demo", () => {
   const FIXED = String(NOW);
+  const SLOW = 60_000; // these start processes; allow for a busy machine
   /** One frame of the demo as plain text, with a pinned clock. */
   const demo = (args: string[], cols = 200, rows = 60) => {
     const r = Bun.spawnSync(["bun", path.join(here, "demo.ts"), "--once", ...args], { env: { ...process.env, FLEET_NOW: FIXED, TZ: "UTC", COLUMNS: String(cols), LINES: String(rows) }, timeout: 30_000 });
@@ -1165,7 +1181,7 @@ describe("demo", () => {
     expect(a).not.toContain("\x1b]"); // no title sequence
     expect(a.split("\n").length).toBe(45); // 44 rows and the final line break
     expect(strip(a).split("\n")[0]).toContain("23:51:22"); // the pinned clock, in the UTC the demo is run in here
-  });
+  }, SLOW);
 
   test("the default demo is today's three sessions with one finished job kept off the screen", () => {
     const frame = squash(demo([]));
@@ -1175,7 +1191,7 @@ describe("demo", () => {
     expect(frame).not.toContain("fullin~");
     expect(frame).toContain("aall·1idle");
     expect(frame).toContain("bun212%"); // the made-up machine
-  });
+  }, SLOW);
 
   test("--surprise shows a stalled agent, a context forecast and things new since you looked", () => {
     const frame = squash(demo(["--surprise"]));
@@ -1183,7 +1199,7 @@ describe("demo", () => {
     expect(frame).toContain("fullin~40m");
     expect(frame).toMatch(/seen·\d+new/);
     expect(frame).toContain("86%"); // the 5-hour limit that runs out before it resets
-  });
+  }, SLOW);
 
   test("--six, --all and --ended add their sessions and workflows", () => {
     const sixFrame = squash(demo(["--six", "--mode", "compact"]));
@@ -1191,17 +1207,20 @@ describe("demo", () => {
     const allFrame = squash(demo(["--all", "--ended", "--mode", "compact"]));
     for (const name of ["releasenotesdraft", "scratch", "renamebillingmodule", "link-check", "reindex-preview", "completed", "failed", "412ktok"]) expect(allFrame).toContain(name);
     expect(allFrame).toContain("aall·3idle");
-  });
+  }, SLOW);
 
   test("--account shows each account state without a real account", () => {
-    expect(squash(demo(["--account", "current"]))).toContain("38%");
-    expect(squash(demo(["--account", "current"]))).toContain("£12of£50");
-    expect(squash(demo(["--account", "extra-off"]))).toContain("12%"); // the Opus week, returned only here
-    expect(squash(demo(["--account", "stale"]))).toContain("anthropicanswered429");
-    expect(squash(demo(["--account", "stale"]))).toMatch(/asof\d\d:\d\d/);
-    expect(squash(demo(["--account", "none"]))).toContain("keychain:noanswerin5s");
-    expect(squash(demo(["--account", "remote"]))).toContain("keychain:closedtoremote");
-    expect(squash(demo(["--account", "remote"]))).toContain("uretryusage");
-    expect(squash(demo(["--account", "current"]))).not.toContain("uretryusage");
-  });
+    const frame = Object.fromEntries(["current", "extra-off", "stale", "none", "remote"].map((a) => [a, squash(demo(["--account", a]))]));
+    expect(frame.current).toContain("38%");
+    expect(frame.current).toContain("£12of£50");
+    expect(frame.current).not.toContain("uretryusage");
+    expect(frame["extra-off"]).toContain("12%"); // the Opus week, returned only here
+    expect(frame.stale).toContain("anthropicanswered429");
+    expect(frame.stale).toMatch(/asof\d\d:\d\d/);
+    expect(frame.none).toContain("keychain:noanswerin5s");
+    expect(frame.none).not.toContain("unlock-keychain");
+    expect(frame.remote).toContain("keychain:closedtoremote");
+    expect(frame.remote).toContain("uretryusage");
+    expect(frame.remote).toContain("securityunlock-keychain~/library/keychains/login.keychain-db"); // the remedy
+  }, SLOW);
 });

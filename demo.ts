@@ -212,7 +212,9 @@ if (all) {
   session(6, { sid: "ffffffff-0000-4000-8000-000000000006", name: "scratch", kind: "interactive", status: "idle", cwd: "/work/shop", upMin: 300, branch: "main", main: transcript({ calls: 2, endAgo: 48 * MIN, ask: "what does the totals helper round to?", says: [], used: 21_000 }) });
 }
 
-const env: Record<string, string | undefined> = { ...process.env, FLEET_HOME: home, FLEET_NOW: String(now), XDG_CACHE_HOME: path.join(home, "cache") };
+const env: Record<string, string | undefined> = { ...process.env, FLEET_HOME: home, XDG_CACHE_HOME: path.join(home, "cache") };
+// One frame is drawn at exactly the moment the sessions were made for. A running demo keeps real time, unless FLEET_NOW pins it.
+if (argv.includes("--once")) env.FLEET_NOW = String(now);
 
 if (realMachine) env.FLEET_HIDE_PROCESSES = "1"; // leave this machine's process names off the screen
 else {
