@@ -15,11 +15,15 @@ import * as os from "node:os";
 import { StringDecoder } from "node:string_decoder";
 import { spawnSync } from "node:child_process";
 
-const CLAUDE = process.env.FLEET_HOME || process.env.AGENT_FLEET_HOME || path.join(os.homedir(), ".claude"); // the demo points this at made-up sessions
+/**
+ * Where Claude Code keeps its files; the demo and the tests point FLEET_HOME at made-up sessions. Read each
+ * time it is used, not once at import: a test sets FLEET_HOME after its import of this file has already run,
+ * and must never be left looking at the real sessions.
+ */
+const claudeHome = (): string => process.env.FLEET_HOME || process.env.AGENT_FLEET_HOME || path.join(os.homedir(), ".claude");
 /** The time. FLEET_NOW (test only) pins it, in milliseconds since 1970, so a frame can be reproduced exactly. */
 export const clock = (): number => Number(process.env.FLEET_NOW) || Date.now();
 const HIDE_TOP = process.env.FLEET_HIDE_PROCESSES === "1"; // leave other programs' names off the machine row
-const PROJECTS = path.join(CLAUDE, "projects");
 export const WINDOWS = [5, 15, 30, 60, 180];
 const TAIL_BYTES = 2 * 1024 * 1024;
 const ACTIVE_MS = 60_000;
@@ -135,15 +139,24 @@ export function charWidth(cp: number): number {
   if (cp < 0x300) return cp === 0xad ? 0 : 1;
   if (
     (cp >= 0x1100 && cp <= 0x115f) ||
+    (cp >= 0x2630 && cp <= 0x2637) || // Yijing trigrams and digrams: wide since Unicode 16
+    (cp >= 0x268a && cp <= 0x268f) ||
     (cp >= 0x2e80 && cp <= 0xa4cf) ||
+    (cp >= 0xa960 && cp <= 0xa97f) || // more Hangul lead consonants
     (cp >= 0xac00 && cp <= 0xd7a3) ||
     (cp >= 0xf900 && cp <= 0xfaff) ||
+    (cp >= 0xfe10 && cp <= 0xfe19) || // vertical punctuation
     (cp >= 0xfe30 && cp <= 0xfe6f) ||
     (cp >= 0xff00 && cp <= 0xff60) ||
+    (cp >= 0xffe0 && cp <= 0xffe6) || // full-width ￠ ￡ ￢ ￣ ￤ ￥ ￦
+    (cp >= 0x16fe0 && cp <= 0x18dff) || // Tangut and Khitan
+    (cp >= 0x1aff0 && cp <= 0x1b2ff) || // more kana, Nushu
+    (cp >= 0x1d300 && cp <= 0x1d37f) || // Tai Xuan Jing, counting rods
     (cp >= 0x1f300 && cp <= 0x1faff) ||
     (cp >= 0x20000 && cp <= 0x3fffd)
   )
     return 2;
+  if ((cp >= 0x1160 && cp <= 0x11ff) || (cp >= 0xd7b0 && cp <= 0xd7ff)) return 0; // Hangul vowels and tails join the letter before them
   if (cp >= 0x2190 && cp <= 0x2bff) return 1; // arrows, box drawing, blocks, shapes, braille: what the screen is built from
   return ZERO_WIDTH.test(String.fromCodePoint(cp)) ? 0 : 1;
 }
@@ -182,7 +195,7 @@ const SAFE_SWAP: Record<string, string> = {
  * names) to glyphs that are exactly one cell wide everywhere, so nothing it contains can push a column
  * out of line. Ticks and crosses become ✓ and ✗; other emoji, variation selectors, joiners, combining
  * marks, control characters and terminal escape sequences are removed; tabs become two spaces;
- * full-width Latin becomes plain Latin; any other double-width character becomes "?". Line breaks stay.
+ * full-width Latin and money signs become plain ones; any other double-width character becomes "?". Line breaks stay.
  * Afterwards every character other than a line break is one cell: width(s) equals its character count.
  */
 export function safeText(s: string): string {
@@ -203,7 +216,8 @@ export function safeText(s: string): string {
     else if (cp < 0x300) out += cp === 0xa0 ? " " : cp === 0xad ? "" : ch;
     else if ((cp >= 0x2000 && cp <= 0x200a) || cp === 0x202f || cp === 0x205f || cp === 0x3000) out += " ";
     else if (cp >= 0xff01 && cp <= 0xff5e) out += String.fromCodePoint(cp - 0xfee0);
-    else if (hasEmojiForm(cp) || ZERO_WIDTH.test(ch)) continue;
+    else if (cp >= 0xffe0 && cp <= 0xffe6) out += "¢£¬¯¦¥₩"[cp - 0xffe0];
+    else if (hasEmojiForm(cp) || charWidth(cp) === 0) continue;
     else if (charWidth(cp) !== 1) out += "?";
     else out += ch;
   }
@@ -313,8 +327,9 @@ export function stacked(segments: { tokens: number; color: RGB }[], max: number,
   return out;
 }
 
-/** Word-wrap plain text to `w` display columns. */
+/** Word-wrap plain text to `w` display columns. A width under one is taken as one, and a character wider than `w` gets a line to itself, so this always returns. */
 export function wrap(text: string, w: number): string[] {
+  w = Math.max(1, w);
   const lines: string[] = [];
   let cur = "";
   for (let word of text.split(" ")) {
@@ -322,7 +337,7 @@ export function wrap(text: string, w: number): string[] {
       if (cur) lines.push(cur), (cur = "");
       let head = "";
       for (const ch of word) {
-        if (width(head + ch) > w) break;
+        if (head && width(head + ch) > w) break;
         head += ch;
       }
       lines.push(head);
@@ -557,16 +572,59 @@ const ANSI = /\x1b\[[0-9;?]*[a-zA-Z]/g;
 /** Display cells a string takes once its colour codes are left out. */
 export const cells = (s: string) => width(s.replace(ANSI, ""));
 
+interface Cell {
+  ch: string; // what is drawn; "" for a cell covered by the one to its left
+  color?: RGB;
+  bold?: boolean;
+  bg?: RGB; // its own background (the context bar's half-cells), which wins over the row's tint
+  raw?: boolean; // ch is a coloured string kept whole
+  span?: number; // cells it covers, when more than one: a wide character, or a paste kept whole
+}
+/**
+ * A coloured string as one cell per glyph, or undefined when it holds anything but the colour,
+ * background and bold codes this file writes, or a glyph that is not one cell wide.
+ */
+function ansiCells(ansi: string): Cell[] | undefined {
+  const out: Cell[] = [];
+  let color: RGB | undefined;
+  let bg: RGB | undefined;
+  let isBold = false;
+  for (const part of ansi.split(/(\x1b\[[0-9;?]*[a-zA-Z])/)) {
+    if (part.startsWith("\x1b[")) {
+      const m = /^\x1b\[(?:(38|48);2;(\d+);(\d+);(\d+)|(39|49|1|22))m$/.exec(part);
+      if (!m) return undefined;
+      if (m[1] === "38") color = [+m[2], +m[3], +m[4]];
+      else if (m[1] === "48") bg = [+m[2], +m[3], +m[4]];
+      else if (m[5] === "39") color = undefined;
+      else if (m[5] === "49") bg = undefined;
+      else isBold = m[5] === "1";
+      continue;
+    }
+    for (const ch of part) {
+      if (ch === "\x1b" || charWidth(ch.codePointAt(0)!) !== 1) return undefined;
+      out.push({ ch, color, bold: isBold, bg });
+    }
+  }
+  return out;
+}
 /**
  * One screen row as cells, so text can be put at the columns grid() gives instead of being padded into
- * place. Columns count from 1. Later text overwrites earlier text; anything past the last column is dropped.
+ * place. Columns count from 1. Later text overwrites earlier text, cell for cell (a tick put on a gauge
+ * replaces one cell of it); anything past the last column is dropped. The row is always exactly W cells.
  */
 export class Row {
-  private cell: { ch: string; color?: RGB; bold?: boolean; raw?: boolean }[];
+  private cell: Cell[];
   private bg: (RGB | undefined)[];
   constructor(public W: number, bg?: RGB) {
     this.cell = Array.from({ length: W }, () => ({ ch: " " }));
     this.bg = new Array(W).fill(bg);
+  }
+  /** Make cell `i` (from 0) free to write on. Something wider than a cell that covers it is blanked whole, so the row cannot grow. */
+  private free(i: number) {
+    let head = i;
+    while (head > 0 && this.cell[head].ch === "") head--;
+    const span = this.cell[head].span ?? 1;
+    if (span > 1 && head + span > i) for (let k = head; k < head + span; k++) this.cell[k] = { ch: " " };
   }
   /** Put plain text starting at `col`. Returns the column after it. */
   put(col: number, text: string, color: RGB = C.text, isBold = false): number {
@@ -574,7 +632,8 @@ export class Row {
       const w = charWidth(ch.codePointAt(0)!);
       if (w === 0) continue;
       if (col >= 1 && col + w - 1 <= this.W) {
-        this.cell[col - 1] = { ch, color, bold: isBold };
+        for (let k = 0; k < w; k++) this.free(col - 1 + k);
+        this.cell[col - 1] = w === 2 ? { ch, color, bold: isBold, span: 2 } : { ch, color, bold: isBold };
         if (w === 2) this.cell[col] = { ch: "" };
       }
       col += w;
@@ -600,8 +659,14 @@ export class Row {
   /** Place something already coloured (a sparkline, a gauge, a context bar) that is `w` cells wide. Dropped if it does not fit. */
   paste(col: number, ansi: string, w = cells(ansi)): number {
     if (col >= 1 && w > 0 && col + w - 1 <= this.W) {
-      this.cell[col - 1] = { ch: ansi, raw: true };
-      for (let i = 1; i < w; i++) this.cell[col - 1 + i] = { ch: "" };
+      for (let i = 0; i < w; i++) this.free(col - 1 + i);
+      const split = ansiCells(ansi);
+      if (split) split.slice(0, w).forEach((c, i) => (this.cell[col - 1 + i] = c)); // never more cells than it was said to have
+      else {
+        // Codes that are not ours: keep it whole.
+        this.cell[col - 1] = { ch: ansi, raw: true, span: w };
+        for (let i = 1; i < w; i++) this.cell[col - 1 + i] = { ch: "" };
+      }
     }
     return col + w;
   }
@@ -615,18 +680,25 @@ export class Row {
     return this.cell.map((c) => (c.raw ? c.ch.replace(ANSI, "") : c.ch)).join("");
   }
   toString(): string {
+    const bgAt = (i: number) => this.cell[i].bg ?? this.bg[i];
     let out = "";
     let last = this.W;
-    while (last > 0 && this.cell[last - 1].ch === " " && !this.bg[last - 1]) last--; // nothing to draw past here
+    while (last > 0 && this.cell[last - 1].ch === " " && !bgAt(last - 1)) last--; // nothing to draw past here
+    const UNKNOWN: RGB = [-1, -1, -1]; // after a string kept whole, which may have changed the background itself
     let bg: RGB | undefined;
     for (let i = 0; i < last; ) {
       const c = this.cell[i];
-      if (this.bg[i] !== bg) {
-        bg = this.bg[i];
+      if (c.ch === "") {
+        i++;
+        continue;
+      }
+      if (bgAt(i) !== bg) {
+        bg = bgAt(i);
         out += bg ? `\x1b[48;2;${bg[0]};${bg[1]};${bg[2]}m` : "\x1b[49m";
       }
-      if (c.raw || c.ch === "") {
+      if (c.raw) {
         out += c.ch;
+        bg = UNKNOWN;
         i++;
         continue;
       }
@@ -635,7 +707,7 @@ export class Row {
       let j = i;
       for (; j < last; j++) {
         const d = this.cell[j];
-        if (d.raw || d.ch === "" || d.color !== c.color || !!d.bold !== !!c.bold || this.bg[j] !== bg) break;
+        if (d.raw || d.color !== c.color || !!d.bold !== !!c.bold || (d.ch !== "" && bgAt(j) !== bg)) break;
         run += d.ch;
       }
       const painted = c.color ? fg(c.color, run) : run;
@@ -1007,14 +1079,22 @@ function journal(file: string): Journal {
   return entry;
 }
 
+let projectsRoot = "";
 let projectDirs: string[] = [];
 let projectDirsAt = 0;
 const sessionDirCache = new Map<string, { at: number; dirs: string[]; mains: string[] }>();
 function locate(sid: string, now: number) {
+  const root = path.join(claudeHome(), "projects");
+  if (root !== projectsRoot) {
+    // The home has moved (a test did it): forget what was found under the old one.
+    projectsRoot = root;
+    projectDirsAt = 0;
+    sessionDirCache.clear();
+  }
   const hit = sessionDirCache.get(sid);
   if (hit && now - hit.at < 20_000) return hit;
   if (now - projectDirsAt > 20_000) {
-    projectDirs = ls(PROJECTS).map((d) => path.join(PROJECTS, d));
+    projectDirs = ls(root).map((d) => path.join(root, d));
     projectDirsAt = now;
   }
   const dirs: string[] = [];
@@ -1086,6 +1166,7 @@ function loadAgent(file: string, wf?: string, started?: any, done = false): Agen
 
 export function scan(now: number): Session[] {
   const sessions: Session[] = [];
+  const CLAUDE = claudeHome();
   for (const f of ls(path.join(CLAUDE, "sessions"))) {
     if (!f.endsWith(".json")) continue;
     const reg = readJson(path.join(CLAUDE, "sessions", f));
@@ -1198,6 +1279,9 @@ export const machine = {
   prev: [] as { idle: number; total: number }[],
 };
 
+/** A process's name as the screen may show it: the program's file name, made safe like any other text that did not come from here (a program can call itself anything, escape sequences included). */
+export const procName = (comm: string): string => safeLine(path.basename(comm.trim()));
+
 export function sampleMachine() {
   const fx = fixtureMachine();
   if (fx) {
@@ -1207,7 +1291,7 @@ export function sampleMachine() {
     machine.load = fx.load ?? 0;
     machine.memTotal = fx.memTotal ?? machine.memTotal;
     machine.memUsed = fx.memUsed ?? 0;
-    machine.procs = (fx.procs ?? []).map((p: any) => ({ pid: +p.pid, ppid: +(p.ppid ?? 1), cpu: +(p.cpu ?? 0), rss: +(p.rss ?? 0), name: String(p.name ?? "") }));
+    machine.procs = (fx.procs ?? []).map((p: any) => ({ pid: +p.pid, ppid: +(p.ppid ?? 1), cpu: +(p.cpu ?? 0), rss: +(p.rss ?? 0), name: procName(String(p.name ?? "")) }));
     machine.kids = new Map();
     for (const p of machine.procs) machine.kids.set(p.ppid, [...(machine.kids.get(p.ppid) ?? []), p]);
     return;
@@ -1251,7 +1335,7 @@ export function sampleMachine() {
     for (const line of ps.split("\n")) {
       const m = /^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+(.*)$/.exec(line);
       if (!m) continue;
-      const proc = { pid: +m[1], ppid: +m[2], cpu: +m[3], rss: +m[4], name: path.basename(m[5].trim()) };
+      const proc = { pid: +m[1], ppid: +m[2], cpu: +m[3], rss: +m[4], name: procName(m[5]) };
       procs.push(proc);
       if (!kids.has(proc.ppid)) kids.set(proc.ppid, []);
       kids.get(proc.ppid)!.push(proc);
@@ -1347,7 +1431,7 @@ export type FileOutcome = LoginParse | "missing";
 /** True when this process was reached over ssh or mosh, where macOS will not hand out keychain content. */
 export function isRemoteSession(env: Record<string, string | undefined>, ancestors: string[]): boolean {
   if (env.SSH_CONNECTION || env.SSH_TTY || env.SSH_CLIENT) return true;
-  if (Object.keys(env).some((k) => k.startsWith("MOSH_"))) return true;
+  if (Object.keys(env).some((k) => k.startsWith("MOSH_SERVER_"))) return true; // not MOSH_ESCAPE_KEY and the like: those configure the mosh client, and sit in a local shell's profile
   return ancestors.some((name) => /^(mosh-server|sshd)/.test(name));
 }
 
@@ -1423,7 +1507,7 @@ function readLogin(): { login: Login } | { reason: string } {
   let fromFile: Login | undefined;
   if (!fromKeychain) {
     try {
-      const parsed = parseLogin(fs.readFileSync(path.join(CLAUDE, ".credentials.json"), "utf8"));
+      const parsed = parseLogin(fs.readFileSync(path.join(claudeHome(), ".credentials.json"), "utf8"));
       f = parsed.parse === "empty" ? "not-json" : parsed.parse;
       fromFile = parsed.login;
     } catch (e: any) {
@@ -1552,6 +1636,7 @@ async function readUsage(now: number): Promise<Reading | { reason: string }> {
     res = await fetch("https://api.anthropic.com/api/oauth/usage", {
       headers: { Authorization: `Bearer ${found.login.token}`, "anthropic-beta": "oauth-2025-04-20" },
       signal: AbortSignal.timeout(10_000),
+      verbose: false, // with BUN_CONFIG_VERBOSE_FETCH=curl set, Bun would print this request, login and all, to the terminal
     });
   } catch (e: any) {
     return { reason: e?.name === "TimeoutError" || e?.name === "AbortError" ? REASON.timedOut : REASON.network(String(e?.code || "no connection").slice(0, 40)) };
@@ -1884,12 +1969,12 @@ export function paceCell(tick: number, pct: number, w: number): { cell: number; 
 }
 /**
  * Milliseconds until a limit reaches 100% at the pace it has kept so far, but only when that comes
- * before the reset. Says nothing in the first 15% of a window or under 5% used, where the pace means little.
+ * before the reset. Says nothing in the first 15% of a window or under 5% used, where the pace means
+ * little, nor once the limit is full: then there is nothing left to forecast, and the reset time is what matters.
  */
 export function paceForecast(pct: number, resetsAt: number, windowMs: number, now: number): number | undefined {
   const tick = paceTick(resetsAt, windowMs, now);
-  if (tick === undefined || tick < 0.15 || pct < 5) return undefined;
-  if (pct >= 100) return 0;
+  if (tick === undefined || tick < 0.15 || pct < 5 || pct >= 100) return undefined;
   const toFull = ((100 - pct) / pct) * tick * windowMs;
   return now + toFull < resetsAt ? toFull : undefined;
 }
@@ -2044,6 +2129,23 @@ export function stallOf(s: Session, f: Facts, now: number, treeCpu: number | und
 }
 /** One name per stalled thing, so the bell rings once for each: "sid" for a session, "sid/thread" for a thread. */
 export const stallKeys = (sid: string, st: Stall): string[] => (st.threads.length ? st.threads.map((id) => `${sid}/${id}`) : st.session ? [sid] : []);
+/**
+ * The same names, each with when that thing last wrote. A stall is known by its silence: while the thing
+ * has not written again it is the same stall, however often the CPU test flickers either side of 1%.
+ */
+export function stallMarks(s: Session, f: Facts, st: Stall): [key: string, wrote: number][] {
+  const wrote = (id: string): number => {
+    const t = id === "main" ? f.main : [...s.agents, ...s.workflows.flatMap((w) => w.agents)].find((a) => a.id === id)?.tail;
+    return t ? lastWriteOf(t) : st.since;
+  };
+  return st.threads.length ? st.threads.map((id) => [`${s.sid}/${id}`, wrote(id)]) : st.session ? [[s.sid, st.since]] : [];
+}
+/** The stalls in `marks` not yet announced for the silence they are in; `known` remembers each. Used to ring the bell once per stall. */
+export function newStalls(known: Map<string, number>, marks: [string, number][]): string[] {
+  const fresh = marks.filter(([k, wrote]) => known.get(k) !== wrote).map(([k]) => k);
+  for (const [k, wrote] of marks) known.set(k, wrote);
+  return fresh;
+}
 /** The members of `current` that were not in `known`; `known` is then brought up to date. Used to ring the bell once per new thing. */
 export function newSince(known: Set<string>, current: string[]): string[] {
   const fresh = current.filter((k) => !known.has(k));
@@ -2093,10 +2195,16 @@ const jobFailed = (state: string) => /fail|error|crash/i.test(state);
  * The first scan only sets the baseline. `jobState` reads a background job's state after its session
  * has gone, so a job that finishes and exits between two scans is not missed.
  */
-export function noteScan(sessions: Session[], now: number, jobState: (jobId: string) => string | undefined = (id) => readJson(path.join(CLAUDE, "jobs", id, "state.json"))?.state) {
+export function noteScan(sessions: Session[], now: number, jobState: (jobId: string) => string | undefined = (id) => readJson(path.join(claudeHome(), "jobs", id, "state.json"))?.state) {
   const next = new Map<string, string>();
+  const made = new Map<string, number>(); // how many times this scan has come up with the same event
   const push = (kind: EventKind, sid: string, key: string, t: number) => {
-    if (t > seen.at) seen.events.push({ kind, t, sid, key });
+    if (t <= seen.at) return;
+    const nth = (made.get(`${kind}|${key}|${t}`) ?? 0) + 1;
+    made.set(`${kind}|${key}|${t}`, nth);
+    // Listed already by an earlier scan: a session missing from one scan (its registry file caught half-written) comes back looking new.
+    if (seen.events.filter((e) => e.kind === kind && e.key === key && e.t === t).length >= nth) return;
+    seen.events.push({ kind, t, sid, key });
   };
   /** Record what `key` looks like now; when that is a change into `kind`, it is an event. */
   const track = (key: string, value: string, sid: string, kind: EventKind | undefined, t: number) => {
@@ -2104,9 +2212,8 @@ export function noteScan(sessions: Session[], now: number, jobState: (jobId: str
     const before = seen.known.get(key);
     if (before === value || !kind) return;
     // A change we watched happen is news even when its own timestamp is a moment older than the mark:
-    // it is then dated now. (A stall has no "before" record, so its first sighting counts as watched.)
-    // Something first seen already in this state is news only if it happened after the mark.
-    const watched = seen.primed && (before !== undefined || key.startsWith("stall:"));
+    // it is then dated now. Something first seen already in this state is news only if it happened after the mark.
+    const watched = seen.primed && before !== undefined;
     push(kind, sid, key, watched && t <= seen.at ? now : t);
   };
   for (const s of sessions) {
@@ -2118,8 +2225,13 @@ export function noteScan(sessions: Session[], now: number, jobState: (jobId: str
       track(`job:${s.sid}`, `${word}|${s.jobId ?? ""}`, s.sid, word === "done" ? "sessionDone" : word === "failed" ? "failed" : undefined, f.main ? lastWriteOf(f.main) : 0);
     }
     for (const wf of s.workflows) track(`wf:${s.sid}/${wf.id}`, wf.status, s.sid, wf.status === "running" ? undefined : wf.status === "completed" ? "workflowDone" : "failed", wf.finished || wf.lastT);
-    const stall = stallOf(s, f, now);
-    for (const k of stallKeys(s.sid, stall)) track(`stall:${k}`, "stalled", s.sid, "stalled", Math.min(now, stall.since + opt.stallMin * 60_000));
+    for (const [k, wrote] of stallMarks(s, f, stallOf(s, f, now))) {
+      // A stall is known by when the thing last wrote, so the same silence seen again is not news again.
+      next.set(`stall:${k}`, String(wrote));
+      if (seen.known.get(`stall:${k}`) === String(wrote)) continue;
+      const t = Math.min(now, wrote + opt.stallMin * 60_000); // when it crossed the line
+      push("stalled", s.sid, `stall:${k}`, seen.primed && t <= seen.at ? now : t); // watched happening: see track()
+    }
     for (const a of [...s.agents, ...s.workflows.flatMap((w) => w.agents)]) track(`agent:${s.sid}/${a.id}`, a.done ? "done" : "running", s.sid, a.done ? "agentDone" : undefined, lastWriteOf(a.tail));
     for (const m of s.mains) {
       const key = `say:${m.path}`;
@@ -2137,6 +2249,8 @@ export function noteScan(sessions: Session[], now: number, jobState: (jobId: str
     if (state === "done") push("sessionDone", key.slice(4), key, now);
     else if (jobFailed(state)) push("failed", key.slice(4), key, now);
   }
+  // A stall that has cleared is remembered for a day, in case it comes back before the thing has written again.
+  for (const [key, value] of seen.known) if (key.startsWith("stall:") && !next.has(key) && Number(value) > now - 24 * 3600_000) next.set(key, value);
   seen.known = next;
   seen.primed = true;
 }
@@ -2253,7 +2367,7 @@ export function buildViews(sessions: Session[], now: number, sayWidth: number, s
   const order: Record<AgentState, number> = { active: 0, tool: 1, quiet: 2, done: 3 };
   const pick = (list: Agent[], stuck: string[]) =>
     list
-      .filter((a) => recent(a) && (opt.showDone || !a.done))
+      .filter((a) => (recent(a) || stuck.includes(a.id)) && (opt.showDone || !a.done)) // a stalled agent has been silent longer than a short window, and is the one to look at
       .sort((a, b) => Number(stuck.includes(b.id)) - Number(stuck.includes(a.id)) || order[stateOf(a, now)] - order[stateOf(b, now)] || a.tail.birth - b.tail.birth);
 
   return sessions
@@ -2262,7 +2376,7 @@ export function buildViews(sessions: Session[], now: number, sayWidth: number, s
       const stall = stallOf(s, facts, now);
       const groups: Group[] = [];
       for (const wf of s.workflows) {
-        const live = wf.status === "running" && wf.lastT >= since;
+        const live = wf.status === "running" && (wf.lastT >= since || wf.agents.some((a) => stall.threads.includes(a.id)));
         const justFinished = wf.status !== "running" && Math.max(wf.finished, wf.lastT) >= since;
         if (live || justFinished) groups.push({ wf, rows: pick(wf.agents, stall.threads), hidden: 0 }); // a stalled agent is the last to be folded away
       }
@@ -3460,15 +3574,16 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
     out.push("", fg(C.dim, all.length ? "   Nothing active and nothing waiting on you." : "   No live Claude Code sessions found in ~/.claude/sessions."));
   }
 
+  // Shared scales so rows are comparable with each other. Taken before rows are folded away to fit the
+  // screen: a row that folds (an agent going quiet changes which ones fold) must not rescale the rows that stay.
+  const agentMax = Math.max(1, ...shown.flatMap((v) => v.groups.flatMap((g) => g.rows.map((a) => Math.max(...buckets([a.tail.tools], now, S))))));
+  const sessionTails = tailsOf;
+  const sessionMax = Math.max(1, ...shown.map((v) => Math.max(...buckets(sessionTails(v.s).map((t) => t.tools), now, S))));
+
   const avail = rows - out.length - 2 - (hidden.length ? 1 : 0);
   const { views, gaps, cut } = opt.mode !== "compact" ? { views: [] as View[], gaps: false, cut: 0 } : fitViews(shown, avail);
   // Detail mode draws its sessions with its own renderer (the detail view, above). The tree further down is compact mode's.
   if (opt.mode === "detail") out.push(...detailView(shown, W, avail, now, out.length));
-
-  // Shared scales so rows are comparable with each other.
-  const agentMax = Math.max(1, ...views.flatMap((v) => v.groups.flatMap((g) => g.rows.map((a) => Math.max(...buckets([a.tail.tools], now, S))))));
-  const sessionTails = tailsOf;
-  const sessionMax = Math.max(1, ...views.map((v) => Math.max(...buckets(sessionTails(v.s).map((t) => t.tools), now, S))));
 
   const ACT = W >= 150 ? 40 : W >= 120 ? 28 : W >= 100 ? 18 : 0; // "what it is doing" column
   const META = W >= 110 ? 18 : 0;
@@ -3781,7 +3896,7 @@ export function buttonBar(W: number, row: number, idle = 0): string {
 
 let sessions: Session[] = [];
 const needing = new Set<string>();
-const stalledNow = new Set<string>();
+const stalledNow = new Map<string, number>();
 function refresh() {
   const now = clock();
   sessions = scan(now);
@@ -3790,7 +3905,7 @@ function refresh() {
   if (opt.usage && !opt.once) tickUsage(now); // --once has already made its one read
   // Ring once when a session starts waiting on the person, and once for each thing that newly stalls.
   const facts = sessions.map((s) => ({ s, f: factsOf(s) }));
-  const rings = newSince(needing, facts.filter((x) => x.f.needs).map((x) => x.s.sid)).length + newSince(stalledNow, facts.flatMap((x) => stallKeys(x.s.sid, stallOf(x.s, x.f, now)))).length;
+  const rings = newSince(needing, facts.filter((x) => x.f.needs).map((x) => x.s.sid)).length + newStalls(stalledNow, facts.flatMap((x) => stallMarks(x.s, x.f, stallOf(x.s, x.f, now)))).length;
   if (opt.bell && !opt.once) process.stdout.write("\x07".repeat(rings));
   noteScan(sessions, now);
 }

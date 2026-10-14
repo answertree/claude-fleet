@@ -849,7 +849,7 @@ describe("runway", () => {
     const fullIn = F.paceForecast(86, NOW + 85 * MIN, 5 * H, NOW)!;
     expect(fullIn / MIN).toBeCloseTo(35, 9);
     expect(F.fullInText(fullIn / MIN)).toBe("full in ~35m");
-    expect(F.paceForecast(100, NOW + 85 * MIN, 5 * H, NOW)).toBe(0);
+    expect(F.paceForecast(100, NOW + 85 * MIN, 5 * H, NOW)).toBeUndefined(); // already full: see "runway and pace, worked by hand"
     expect(F.paceForecast(50, NOW - MIN, 5 * H, NOW)).toBeUndefined();
   });
 
@@ -1859,4 +1859,634 @@ describe("demo", () => {
     expect(frame.remote).toContain("uretryusage");
     expect(frame.remote).toContain("securityunlock-keychain~/library/keychains/login.keychain-db"); // the remedy
   }, SLOW);
+});
+
+describe("the login stays inside the process", () => {
+  // The whole usage read, entry point included, with stand-ins for the two things it must not touch here:
+  // a made-up `security` first (and alone) on PATH, and a preload that answers every fetch(). The "login" is a
+  // made-up word, so if it leaks anywhere it can be found by searching for it.
+  const CANARY = "CANARY-LOGIN-0000";
+  const dir = path.join(SCRATCH, "login-e2e");
+  const bin = path.join(dir, "bin");
+  const log = path.join(dir, "calls.log");
+  const cache = path.join(dir, "cache");
+  const login = JSON.stringify({ claudeAiOauth: { accessToken: CANARY, refreshToken: CANARY + "-refresh", expiresAt: 99999999999999 } });
+  const setUp = () => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.mkdirSync(bin, { recursive: true });
+    fs.mkdirSync(path.join(dir, "home", "sessions"), { recursive: true });
+    // On a Mac the dashboard asks the keychain tool; elsewhere it reads the login file. Both are made up here.
+    fs.writeFileSync(path.join(bin, "security"), `#!/bin/sh\necho "security $*" >> "$CALLS_LOG"\nprintf '%s\\n' '${login}'\n`, { mode: 0o755 });
+    fs.writeFileSync(path.join(dir, "home", ".credentials.json"), login);
+    fs.writeFileSync(path.join(dir, "machine.json"), JSON.stringify({ cpu: 5, cores: [5, 5], hist: [5], memTotal: 1000, memUsed: 100, load: 1, procs: [] }));
+    fs.writeFileSync(
+      path.join(dir, "preload.ts"),
+      `import * as fs from "node:fs";
+(globalThis as any).fetch = async (url: any, init: any = {}) => {
+  const auth = String(init?.headers?.Authorization ?? "");
+  fs.appendFileSync(process.env.CALLS_LOG!, "fetch " + JSON.stringify({ url: String(url), auth: auth === "Bearer ${CANARY}" ? "the login" : auth ? "something else" : "none", verbose: init.verbose }) + "\\n");
+  const status = Number(process.env.FAKE_STATUS);
+  // An answer that repeats the login back in places that are not figures: none of it may be kept.
+  if (status === 200) return Response.json({ five_hour: { utilization: 38, resets_at: new Date(Date.now() + 130 * 60000).toISOString(), echo: "${CANARY}" }, seven_day: { utilization: 21, resets_at: new Date(Date.now() + 3 * 86400000).toISOString() }, access_token: "${CANARY}", account: { token: "${CANARY}" } });
+  return new Response(JSON.stringify({ error: { message: "${CANARY} was rejected" } }), { status });
+};
+`,
+    );
+  };
+  const run = (args: string[], status = 200, extra: Record<string, string> = {}) => {
+    fs.rmSync(log, { force: true });
+    fs.rmSync(cache, { recursive: true, force: true });
+    const r = Bun.spawnSync([process.execPath, "--preload", path.join(dir, "preload.ts"), path.join(here, "fleet.ts"), "--once", ...args], {
+      env: { PATH: bin, HOME: path.join(dir, "nobody"), TZ: "UTC", COLUMNS: "150", LINES: "12", FLEET_HOME: path.join(dir, "home"), XDG_CACHE_HOME: cache, FLEET_MACHINE_FIXTURE: path.join(dir, "machine.json"), CALLS_LOG: log, FAKE_STATUS: String(status), ...extra },
+      timeout: 30_000,
+    });
+    const calls = fs.existsSync(log) ? fs.readFileSync(log, "utf8").trim().split("\n") : [];
+    const written: string[] = [];
+    const walk = (d: string) => {
+      for (const e of fs.existsSync(d) ? fs.readdirSync(d, { withFileTypes: true }) : []) e.isDirectory() ? walk(path.join(d, e.name)) : written.push(path.join(d, e.name));
+    };
+    walk(cache);
+    const ours = written.filter((f) => !f.startsWith(path.join(cache, "bun") + path.sep)); // all but the runtime's own cache of compiled scripts
+    return { code: r.exitCode, out: r.stdout.toString(), err: r.stderr.toString(), security: calls.filter((c) => c.startsWith("security ")), fetches: calls.filter((c) => c.startsWith("fetch ")).map((c) => JSON.parse(c.slice(6))), ours, everything: r.stdout.toString() + r.stderr.toString() + written.map((f) => fs.readFileSync(f, "latin1")).join("") };
+  };
+
+  test("a working read: one request, to Anthropic, with the runtime's request printing turned off; the login is not printed or saved", () => {
+    setUp();
+    // BUN_CONFIG_VERBOSE_FETCH=curl makes the runtime print every request as a curl command, Authorization header and all, unless the request says no.
+    const r = run(["--usage"], 200, { BUN_CONFIG_VERBOSE_FETCH: "curl" });
+    expect(r.code).toBe(0);
+    expect(strip(r.out)).toContain("38%");
+    if (process.platform === "darwin") expect(r.security).toEqual(["security find-generic-password -s Claude Code-credentials -w"]);
+    expect(r.fetches).toEqual([{ url: "https://api.anthropic.com/api/oauth/usage", auth: "the login", verbose: false }]);
+    expect(r.everything).not.toContain(CANARY);
+    expect(r.err).toBe("");
+    expect(r.out).not.toContain("\x1b]"); // and no title either
+    // The one file written: figures and when they were fetched, readable only by its owner.
+    expect(r.ours).toEqual([path.join(cache, "claude-fleet", "usage.json")]);
+    expect(fs.statSync(r.ours[0]).mode & 0o777).toBe(0o600);
+    expect(Object.keys(JSON.parse(fs.readFileSync(r.ours[0], "utf8"))).sort()).toEqual(["fetchedAt", "five_hour", "seven_day"]);
+  }, 60_000);
+
+  test("a refused read says so exactly, and still neither prints nor saves anything of the login or the answer", () => {
+    setUp();
+    for (const status of [401, 429]) {
+      const r = run(["--usage"], status);
+      expect(strip(r.out)).toContain(`no reading yet: Anthropic answered ${status}`);
+      expect(r.fetches.length).toBe(1);
+      expect(r.everything).not.toContain(CANARY);
+      expect(r.ours).toEqual([]);
+    }
+  }, 60_000);
+
+  test("without --usage the keychain is not asked and no request is made, in any mode", () => {
+    setUp();
+    for (const mode of ["detail", "compact", "far"]) {
+      const r = run(["--mode", mode]);
+      expect(r.code).toBe(0);
+      expect([r.security, r.fetches, r.ours]).toEqual([[], [], []]);
+    }
+  }, 60_000);
+});
+
+/**
+ * Whether fleet.ts is looking at the throwaway home this file set up, and not at the real ~/.claude.
+ * Asked in a way that is harmless when the answer is no: a made-up job's state file exists only in the
+ * throwaway home, and the one thing read is that file's path under whichever home is in force.
+ */
+function homeIsScratch(): boolean {
+  const home = process.env.FLEET_HOME!;
+  if (!home.startsWith(SCRATCH)) return false;
+  fs.mkdirSync(path.join(home, "jobs", "probe-job"), { recursive: true });
+  fs.writeFileSync(path.join(home, "jobs", "probe-job", "state.json"), JSON.stringify({ state: "done" }));
+  const saved = { ...F.seen, events: [...F.seen.events], known: new Map(F.seen.known) };
+  Object.assign(F.seen, { at: NOW, events: [], known: new Map(), primed: false });
+  try {
+    const job = sessionOf({ sid: "probe", status: "idle", jobId: "probe-job", job: { state: "working", detail: "", needs: "" } });
+    F.noteScan([job], NOW); // with no reader passed, a job's state is read from the home
+    F.noteScan([], NOW + 2000); // the session has gone: how did its job end?
+    return F.seen.events.some((e) => e.kind === "sessionDone");
+  } finally {
+    Object.assign(F.seen, saved);
+  }
+}
+
+describe("the tests never look at the real home", () => {
+  test("FLEET_HOME is read when it is used, so pointing it at a throwaway directory after the import takes effect", () => {
+    expect(homeIsScratch()).toBe(true);
+  });
+});
+
+describe("safe text holds against anything", () => {
+  // Text that tries everything: colour and title escape sequences, a bell, a backspace, a NUL, C1 controls,
+  // emoji joined and flagged, CJK, full-width Latin and money signs, combining marks, a right-to-left
+  // override, zero-width and line-separator characters, lone Hangul vowels, and one very long word.
+  const EVIL = "\x1b[31mRED\x1b[0m\x1b]2;pwned\x07 \x07\x08\r\x00 \t👨‍👩‍👧‍👦✅❌⚠️🇬🇧1️⃣ 日本語テキスト ＡＢＣ￥１００ é́ ‮gnp.exe ​  한국어 가 ☰ ︐ \x9b31m " + "W".repeat(400);
+  /** Cells as the runtime counts them, which is not fleet's own table: charWidth() must not mark its own homework. */
+  const drawn = (s: string) => Bun.stringWidth(s);
+
+  test("nothing survives as a double-width character, whatever the codepoint", () => {
+    const wide: string[] = [];
+    for (let cp = 0x20; cp <= 0x3ffff; cp++) {
+      if (cp >= 0xd800 && cp <= 0xdfff) continue;
+      const s = F.safeText(String.fromCodePoint(cp));
+      if (drawn(s) > [...s].length) wide.push("U+" + cp.toString(16).toUpperCase());
+    }
+    expect([wide.length, ...wide.slice(0, 8)]).toEqual([0]);
+  });
+
+  test("full-width money signs become ordinary ones, other wide characters become ?, and a lone Hangul vowel (which fills no cell) goes", () => {
+    expect(F.safeText("￥１００ ￡５ ￠ ￢ ￣ ￤ ￦")).toBe("¥100 £5 ¢ ¬ ¯ ¦ ₩");
+    expect(F.safeText("☰ ︐ ꥠ 𗀀 𛀀")).toBe("? ? ? ? ?");
+    expect(F.safeText("aᅡbᆨcힰd")).toBe("abcd");
+    for (const ch of ["￥", "︐", "ꥠ", "𗀀", "𛀀"]) expect(F.width(ch)).toBe(2); // fleet's own table agrees they are wide
+    const safe = F.safeLine(EVIL);
+    expect(drawn(safe)).toBe([...safe].length);
+    expect(safe).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
+  });
+
+  test("a process's name is made safe like any other text that comes from outside", () => {
+    expect(F.procName("/Applications/Some App.app/Contents/MacOS/Some App")).toBe("Some App");
+    expect(F.procName(" bun ")).toBe("bun");
+    const name = F.procName("/opt/\x1b[41m日本語アプリ🙂\x1b]2;pwned\x07\x07");
+    expect(name).toBe("??????"); // six wide characters; the picture and both escape sequences are gone
+    expect(F.procName("ｔｓｃ￥\t✅")).toBe("tsc¥ ✓");
+  });
+
+  test("wrap and fit always return, and never give a line wider than asked, even for a width of nothing", () => {
+    const text = F.safeLine(EVIL);
+    for (const w of [1, 2, 7, 37, 96]) {
+      const lines = F.wrap(text, w);
+      expect(lines.join("").replace(/ /g, "")).toBe(text.replace(/ /g, "")); // nothing lost, nothing added
+      expect(Math.max(...lines.map(drawn))).toBeLessThanOrEqual(w);
+      expect(drawn(F.fit(text, w))).toBe(w);
+    }
+    // A width of zero or less used to loop for ever; so did a character wider than the width.
+    expect(F.wrap("hello world", 0)).toEqual(["h", "e", "l", "l", "o", "w", "o", "r", "l", "d"]);
+    expect(F.wrap("hello", -3).length).toBe(5);
+    expect(F.wrap("日本", 1)).toEqual(["日", "本"]);
+    expect(F.messageLines("- one\n- two", 0).length).toBeGreaterThan(0);
+    expect(F.fit(text, 0)).toBe("");
+  });
+
+  /** Sessions on disk whose every piece of text is hostile, read back through scan() as a real home would be. */
+  function hostileHome(): F.Session[] {
+    if (!homeIsScratch()) throw new Error("fleet.ts is not looking at the throwaway home: refusing to scan");
+    const home = process.env.FLEET_HOME!;
+    const put = (file: string, data: string, t = NOW - 20_000) => {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, data);
+      fs.utimesSync(file, new Date(t), new Date(t));
+    };
+    const lines = (rows: object[]) => rows.map((r) => JSON.stringify(r)).join("\n") + "\n";
+    fs.rmSync(path.join(home, "sessions"), { recursive: true, force: true });
+    fs.rmSync(path.join(home, "projects"), { recursive: true, force: true });
+    const talk = (extra: object[] = []) => [
+      { type: "ai-title", aiTitle: EVIL },
+      { ...prompt(NOW - 29 * MIN, EVIL), gitBranch: EVIL },
+      ...callTimes(40, NOW - MIN).map((t) => toolCall(t, EVIL, { description: EVIL })),
+      { type: "system", subtype: "away_summary", timestamp: iso(NOW - 3 * MIN), content: EVIL },
+      reply(NOW - 2 * MIN, `# ${EVIL}\n\n- ${EVIL}\n- **bold** and \`code\`\n\n| a | b |\n|---|---|\n| ${EVIL} | 2 |\n\n${EVIL}`, 611_000),
+      ...extra,
+    ];
+    [
+      { n: 1, sid: "aaaaaaaa-evil", status: "idle", job: { state: "blocked", detail: EVIL, needs: EVIL }, rows: talk() },
+      { n: 2, sid: "bbbbbbbb-evil", status: "busy", job: undefined, rows: talk([toolCall(NOW - 30_000, "AskUserQuestion", { questions: [{ question: EVIL }] })]) },
+      { n: 3, sid: "cccccccc-evil", status: "busy", job: { state: "working", detail: EVIL, needs: "" }, rows: talk() },
+      { n: 4, sid: "dddddddd-evil", status: "idle", job: undefined, rows: talk() }, // your turn: kept off the screen without --all
+    ].forEach(({ n, sid, status, job, rows }) => {
+      put(path.join(home, "sessions", `${n}.json`), JSON.stringify({ pid: process.pid, sessionId: sid, name: EVIL, kind: EVIL, status, cwd: `/work/${EVIL}/shop`, jobId: job ? `evil${n}` : undefined, startedAt: NOW - 64 * MIN }));
+      if (job) put(path.join(home, "jobs", `evil${n}`, "state.json"), JSON.stringify(job));
+      const dir = path.join(home, "projects", "-evil", sid);
+      put(dir + ".jsonl", lines(rows));
+      put(path.join(home, "tasks", sid, "1.json"), JSON.stringify({ id: "1", subject: EVIL, activeForm: EVIL, status: "in_progress" }));
+      put(path.join(home, "tasks", sid, "2.json"), JSON.stringify({ id: "2", subject: EVIL, status: "pending" }));
+      for (const id of ["s1", "s2"]) {
+        put(path.join(dir, "subagents", `agent-${id}.jsonl`), lines(callTimes(12, NOW - 30_000).map((t) => toolCall(t, EVIL, { description: EVIL }))));
+        put(path.join(dir, "subagents", `agent-${id}.meta.json`), JSON.stringify({ agentType: EVIL, model: EVIL, description: EVIL }));
+      }
+      const wf = path.join(dir, "subagents", "workflows", "wf_evil");
+      put(path.join(dir, "workflows", "scripts", "bisect-wf_evil.js"), "");
+      put(path.join(wf, "journal.jsonl"), lines([{ type: "launched" }, ...["w1", "w2"].map((id) => ({ type: "started", agentId: id, label: EVIL, phase: `${id} ${EVIL}` }))]));
+      for (const id of ["w1", "w2"]) {
+        put(path.join(wf, `agent-${id}.jsonl`), lines(callTimes(9, NOW - 30_000).map((t) => toolCall(t, EVIL, { file_path: `/x/${EVIL}` }))));
+        put(path.join(wf, `agent-${id}.meta.json`), JSON.stringify({ agentType: "workflow-subagent", model: EVIL, workflowPhase: EVIL }));
+      }
+    });
+    return F.scan(NOW);
+  }
+
+  test("whatever the sessions, tasks, workflows and processes say, every frame keeps its size and no control character reaches the terminal", () => {
+    const sessions = hostileHome();
+    expect(sessions.length).toBe(4);
+    expect(sessions.every((s) => s.agents.length === 2 && s.workflows.length === 1 && s.workflows[0].agents.length === 2 && s.tasks?.total === 2)).toBe(true);
+    const saved = { opt: { ...F.opt }, procs: F.machine.procs, cores: F.machine.cores };
+    F.machine.procs = [{ pid: 1, ppid: 0, cpu: 212, rss: 1, name: F.procName("/opt/" + EVIL) }, { pid: 2, ppid: 0, cpu: 88, rss: 1, name: F.procName("ｔｓｃ￥") }];
+    F.machine.cores = [50, 60, 70, 80];
+    const problems: string[] = [];
+    try {
+      for (const showAll of [false, true])
+        for (const [cols, rows] of [[80, 24], [100, 30], [110, 44], [130, 40], [150, 34], [150, 44], [200, 60]])
+          for (const mode of ["detail", "compact", "far"] as F.Mode[]) {
+            Object.assign(F.opt, { mode, showAll, usage: false });
+            const frame = F.render(sessions, cols, rows, NOW);
+            const where = `${mode} ${cols}x${rows}${showAll ? " --all" : ""}`;
+            if (frame.length !== rows) problems.push(`${where}: ${frame.length} rows`);
+            frame.map(strip).forEach((line, i) => {
+              if (drawn(line) > cols) problems.push(`${where}: row ${i + 1} is ${drawn(line)} cells`);
+              if (/[\x00-\x1f\x7f-\x9f]/.test(line)) problems.push(`${where}: row ${i + 1} has a control character`);
+              if (/undefined|NaN/.test(line)) problems.push(`${where}: row ${i + 1} shows undefined or NaN`);
+            });
+          }
+    } finally {
+      Object.assign(F.opt, saved.opt);
+      Object.assign(F.machine, { procs: saved.procs, cores: saved.cores });
+    }
+    expect(problems).toEqual([]);
+  });
+});
+
+describe("stall watch and news under rough conditions", () => {
+  const noJobs = () => undefined;
+  const resetSeen = (at: number) => Object.assign(F.seen, { at, events: [], known: new Map(), primed: false });
+  /** A thread holding a tool call, silent for `min` minutes before NOW. */
+  const stuckFor = (min: number) => tailOf([toolCall(NOW - min * MIN)]);
+  const kinds = () => F.seen.events.map((e) => e.kind).sort().join(",");
+  /** Run `body` with the session's process tree at `cpu` percent. */
+  const withCpu = <T>(pid: number, cpu: number, body: () => T): T => {
+    const saved = { procs: F.machine.procs, kids: F.machine.kids };
+    F.machine.procs = [{ pid, ppid: 1, cpu, rss: 1, name: "claude" }];
+    F.machine.kids = new Map();
+    try {
+      return body();
+    } finally {
+      Object.assign(F.machine, saved);
+    }
+  };
+
+  test("a stalled agent stays on the screen when its silence is longer than the window: it is the thing to look at", () => {
+    const before = { ...F.opt };
+    try {
+      F.opt.windowMin = 5; // the shortest window; the agent has been silent for 14 minutes
+      const wf: F.Workflow = { id: "wf_1", name: "bisect-and-fix", status: "running", phase: "Fix", phases: [], seen: ["Fix"], started: NOW - 30 * MIN, finished: 0, agents: [agentOf("w5", stuckFor(14), { wf: "wf_1", label: "review:clock-in-refund" })], lastT: NOW - 14 * MIN };
+      const s = sessionOf({ sid: "b", pid: 4242, name: "flaky test hunt", mains: [stuckFor(1)], agents: [agentOf("s1", stuckFor(14), { label: "measure build time" }), agentOf("old", tailOf([toolCall(NOW - 20 * MIN), toolResult(NOW - 19 * MIN)]))], workflows: [wf] });
+      withCpu(4242, 0.2, () => {
+        const v = F.buildViews([s], NOW, 80)[0];
+        expect([v.state, [...v.stall.threads].sort()]).toEqual(["stalled", ["s1", "w5"]]);
+        expect(v.groups.flatMap((g) => g.rows.map((a) => a.id)).sort()).toEqual(["s1", "w5"]); // the quiet, unstalled one has aged out; these two have not
+        expect(v.groups.some((g) => g.wf?.id === "wf_1")).toBe(true);
+        const frame = F.render([s], 150, 30, NOW).map(strip).join("\n");
+        expect(frame).toContain("review:clock-in-refund");
+        expect(frame).toContain("measure build time");
+        expect(frame.match(/stalled\? Bash/g)?.length).toBe(2);
+      });
+    } finally {
+      Object.assign(F.opt, before);
+    }
+  });
+
+  test("one silence is one stall: the tree's CPU flickering either side of 1% does not ring or report it again", () => {
+    const agent = agentOf("review", stuckFor(9.5));
+    const s = sessionOf({ sid: "b", pid: 77, mains: [stuckFor(0.5)], agents: [agent] });
+    const known = new Map<string, number>();
+    let rings = 0;
+    const scanAt = (t: number, cpu: number) =>
+      withCpu(77, cpu, () => {
+        const f = F.factsOf(s);
+        rings += F.newStalls(known, F.stallMarks(s, f, F.stallOf(s, f, t))).length;
+        F.noteScan([s], t, noJobs);
+      });
+    resetSeen(NOW);
+    scanAt(NOW, 0.2); // 9.5 minutes of silence: not yet
+    expect([rings, kinds()]).toEqual([0, ""]);
+    [0.2, 1.4, 0.3, 2.0, 0.1, 0.9].forEach((cpu, i) => scanAt(NOW + MIN + i * 2000, cpu)); // stalled, clear, stalled, clear, stalled, stalled
+    expect([rings, kinds()]).toEqual([1, "stalled"]);
+    expect(F.seen.events[0]).toMatchObject({ key: "stall:b/review", t: NOW + 30_000 }); // when it crossed ten minutes
+    expect(F.stallMarks(s, F.factsOf(s), { session: false, threads: ["review"], count: 1, since: NOW - 9.5 * MIN })).toEqual([["b/review", NOW - 9.5 * MIN]]);
+
+    // It gets its answer, calls another tool, and that one hangs too: a new silence, so a new stall.
+    F.ingest(agent.tail, JSON.stringify(toolResult(NOW + 2 * MIN)));
+    F.ingest(agent.tail, JSON.stringify(toolCall(NOW + 2 * MIN + 1000)));
+    scanAt(NOW + 3 * MIN, 0.2);
+    expect([rings, kinds()]).toEqual([1, "stalled"]);
+    F.ingest(s.mains[0], JSON.stringify(toolCall(NOW + 12.5 * MIN))); // the main thread is still at work, so only the agent is stuck
+    scanAt(NOW + 13 * MIN, 0.2);
+    scanAt(NOW + 13 * MIN + 2000, 0.2);
+    expect([rings, kinds()]).toEqual([2, "stalled,stalled"]);
+
+    // A whole session gone quiet, with nothing outstanding, is known by its own name.
+    const silent = sessionOf({ sid: "c", pid: 77, mains: [tailOf([toolCall(NOW - 12 * MIN), toolResult(NOW - 12 * MIN + 1)])] });
+    const marks = withCpu(77, 0, () => F.stallMarks(silent, F.factsOf(silent), F.stallOf(silent, F.factsOf(silent), NOW)));
+    expect(marks).toEqual([["c", NOW - 12 * MIN + 1]]);
+    expect([F.newStalls(known, marks), F.newStalls(known, marks)]).toEqual([["c"], []]);
+  });
+
+  test("a session that drops out of one scan and comes back is not news a second time", () => {
+    resetSeen(NOW);
+    const main = tailOf([reply(NOW - 3 * MIN, "Old.")], "/p/a.jsonl");
+    const agent = agentOf("s1", tailOf([toolCall(NOW - MIN)], "/p/s1.jsonl"));
+    const wf: F.Workflow = { id: "wf_1", name: "w", status: "running", phase: "", phases: [], seen: [], started: NOW - 20 * MIN, finished: 0, agents: [], lastT: NOW - MIN };
+    const s = sessionOf({ sid: "a", mains: [main], agents: [agent], workflows: [wf] });
+    F.noteScan([s], NOW, noJobs);
+    // Two replies in one message carry one timestamp, and are two replies.
+    const twice = { ...reply(NOW + 500, "First part."), message: { id: "x", model: "claude-opus-5-5", content: [{ type: "text", text: "First part." }, { type: "text", text: "Second part." }], usage: { input_tokens: 4, cache_read_input_tokens: 90_000, output_tokens: 300 } } };
+    F.ingest(main, JSON.stringify(twice));
+    F.ingest(main, JSON.stringify(toolCall(NOW + 900, "AskUserQuestion", { questions: [{ question: "Merge it?" }] })));
+    agent.done = true;
+    agent.tail.mtime = NOW + 800;
+    wf.status = "completed";
+    wf.finished = NOW + 700;
+    F.noteScan([s], NOW + 2000, noJobs);
+    const news = "agentDone,asked,reply,reply,workflowDone";
+    expect(kinds()).toBe(news);
+    F.noteScan([], NOW + 4000, noJobs); // its registry file was caught half-written, say: the session is missing from one scan
+    F.noteScan([s], NOW + 6000, noJobs);
+    expect(kinds()).toBe(news);
+    F.noteScan([], NOW + 8000, noJobs);
+    F.ingest(main, JSON.stringify(reply(NOW + 8500, "One more."))); // something new while it was out of sight is still news, once
+    F.noteScan([s], NOW + 10_000, noJobs);
+    F.noteScan([s], NOW + 12_000, noJobs);
+    expect(kinds()).toBe("agentDone,asked,reply,reply,reply,workflowDone");
+    expect(F.newCount()).toBe(6);
+  });
+});
+
+describe("a row never grows", () => {
+  const drawn = (s: string) => Bun.stringWidth(strip(s));
+  /** The background a terminal would have behind each glyph of a coloured string: "" for none, else "r;g;b". */
+  const backgrounds = (ansi: string): string[] => {
+    const out: string[] = [];
+    let bg = "";
+    for (const part of ansi.split(/(\x1b\[[0-9;?]*[a-zA-Z])/)) {
+      const m = /^\x1b\[(?:48;2;([\d;]+)|(49|0))m$/.exec(part);
+      if (m) bg = m[1] ?? "";
+      else if (!part.startsWith("\x1b[")) for (const _ of part) out.push(bg);
+    }
+    return out;
+  };
+
+  test("text put over part of a gauge or a sparkline replaces just those cells", () => {
+    const r = new F.Row(20);
+    r.paste(5, F.gauge(50, 12, F.C.calm)); // ━━━━━━──────
+    r.put(11, "┼", F.C.white); // a pace tick, over the gauge
+    expect(r.plain()).toBe("    ━━━━━━┼─────    ");
+    expect(r.toString()).toBe("    " + F.fg(F.C.calm, "━━━━━━") + F.fg(F.C.white, "┼") + F.fg(F.C.faint, "─────")); // the colours either side are kept
+    const s = new F.Row(12);
+    s.paste(3, F.spark([1, 2, 3, 4, 5, 6, 7, 8], 8, ...F.RAMP.session));
+    s.put(6, "▼", F.C.white, true);
+    s.paste(9, F.fg(F.C.green, "ab"));
+    expect(strip(F.spark([1, 2, 3, 4, 5, 6, 7, 8], 8, ...F.RAMP.session))).toBe("▃▄▅▆▇▇██");
+    expect(s.plain()).toBe("  ▃▄▅▼▇▇ab  ");
+    expect(drawn(s.toString())).toBe(10);
+    // Told it is narrower than it is, a paste is cut to what it was told; told wider, it leaves the rest blank.
+    const t = new F.Row(10);
+    expect(t.paste(2, F.fg(F.C.green, "abcdef"), 3)).toBe(5);
+    t.paste(7, "xy", 4);
+    expect(t.plain()).toBe(" abc  xy  ");
+  });
+
+  test("a context bar keeps its own half-cell backgrounds on a tinted row, and the tint carries on after it", () => {
+    const bar = F.stacked([{ tokens: 30, color: [120, 120, 120] }, { tokens: 50, color: [177, 185, 249] }], 200, 10);
+    const r = new F.Row(16, F.C.tint);
+    r.paste(3, bar);
+    r.put(14, "x");
+    expect(r.plain()).toBe("  " + strip(bar) + " x  ");
+    const out = r.toString();
+    const tint = F.C.tint.join(";");
+    const behind = backgrounds(out);
+    expect(behind.length).toBe(16);
+    expect(behind.slice(0, 2)).toEqual([tint, tint]);
+    expect(behind[3]).toBe("177;185;249"); // the half-cell where two categories meet: the second one's colour behind the first one's ▌
+    expect(strip(bar)[1]).toBe("▌");
+    expect(behind.filter((b) => b !== tint).length).toBe(1); // every other cell, the x and the end of the row included, is on the tint
+    expect(out.endsWith("\x1b[49m")).toBe(true);
+    expect(drawn(out)).toBe(16);
+  });
+
+  test("a wide character that is half overwritten is blanked rather than pushed along", () => {
+    const r = new F.Row(10);
+    r.put(3, "日本");
+    r.put(4, "x");
+    expect(r.plain()).toBe("   x本    ");
+    expect(drawn(r.toString())).toBe(6);
+    r.put(6, "y");
+    expect(r.plain()).toBe("   x y    ");
+  });
+
+  test("a paste with escape codes this file does not write is kept whole, and goes whole when written over", () => {
+    const odd = "\x1b[4munder\x1b[24m"; // underline: not ours
+    const r = new F.Row(12, F.C.tint);
+    r.paste(3, odd);
+    expect(r.plain()).toBe("  under     ");
+    expect(r.toString()).toContain(odd);
+    expect(drawn(r.toString())).toBe(12);
+    r.put(5, "Z");
+    expect(r.plain()).toBe("    Z       ");
+    expect(drawn(r.toString())).toBe(12);
+  });
+
+  test("whatever is put or pasted where, the row is exactly as wide as it was made", () => {
+    let x = 11;
+    const rnd = (n: number) => ((x = (x * 1103515245 + 12345) & 0x7fffffff) % n);
+    const things = [
+      () => F.spark([0, 3, 9, 1, 0, 7], 9, ...F.RAMP.agent),
+      () => F.gauge(rnd(100), 8, F.C.calm),
+      () => F.stacked([{ tokens: 10 + rnd(50), color: [0, 204, 204] }, { tokens: rnd(90), color: [215, 119, 87] }], 200, 9),
+      () => F.bold(F.fg(F.C.amber, "NEEDS YOU")),
+      () => "\x1b[4mraw\x1b[24m",
+      () => "plain",
+    ];
+    const words = ["working", "日本語", "ＡＢ", "a", "up 1h04", "é", "▲ ● ◐", ""];
+    for (let round = 0; round < 300; round++) {
+      const W = 20 + rnd(30);
+      const r = new F.Row(W, rnd(3) === 0 ? F.C.tint : undefined);
+      for (let i = 0; i < 12; i++) {
+        const col = rnd(W + 12) - 5;
+        const op = rnd(5);
+        if (op === 0) r.paste(col, things[rnd(things.length)]());
+        else if (op === 1) r.putr(col, words[rnd(words.length)], F.C.dim);
+        else if (op === 2) r.tint(rnd(2) ? F.C.tint : undefined, col, col + rnd(10));
+        else r.put(col, words[rnd(words.length)], F.C.text, rnd(2) === 0);
+      }
+      expect(Bun.stringWidth(r.plain())).toBe(W);
+      expect(drawn(r.toString())).toBeLessThanOrEqual(W);
+      expect(strip(r.toString()).trimEnd()).toBe(r.plain().trimEnd());
+    }
+  });
+});
+
+describe("graphs hold still, checked independently", () => {
+  test("awkward windows: lengths that do not divide by the width, calls exactly on an edge, and the moment a bar closes", () => {
+    let x = 5;
+    const rnd = () => ((x = (x * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+    for (const windowMin of [1, 7, 13, 30, 77, 180])
+      for (const n of [1, 12, 25, 58, 110, 160]) {
+        const span = windowMin * MIN;
+        const bar = span / n; // 7 minutes over 58 bars is 7241.379… ms a bar
+        const calls = Array.from({ length: 300 }, () => Math.round(NOW + 3 * bar - rnd() * (span + 6 * bar)));
+        // …and calls exactly on bar edges, and a millisecond either side of them.
+        for (let k = Math.floor(NOW / bar) - n - 1; k <= Math.floor(NOW / bar) + 1; k += Math.max(1, Math.floor(n / 7))) for (const d of [-1, 0, 1]) calls.push(Math.round(k * bar) + d);
+        calls.sort((a, b) => a - b);
+        const step = Math.min(1000, Math.max(1, Math.floor(bar / 10)));
+        let before = F.timeWindow(NOW, span, n);
+        let was = F.bucketsIn([calls], before);
+        let closings = 0;
+        for (let t = NOW + step; t < NOW + 3 * bar + step; t += step) {
+          const win = F.timeWindow(t, span, n);
+          const b = F.bucketsIn([calls], win);
+          expect(F.barOf(t, win)).toBe(n - 1); // the bar still filling is the last one
+          // Counted another way: bar k of the strip is wall-clock bar floor(now / bar) - n + 1 + k.
+          const again = new Array(n).fill(0);
+          for (const c of calls) {
+            const k = Math.floor(c / bar) - Math.floor(t / bar) + n - 1;
+            if (k >= 0 && k < n) again[k]++;
+          }
+          expect(b).toEqual(again);
+          const moved = win.first - before.first;
+          if (moved === 0) expect(b).toEqual(was); // no bar closed: nothing may move, the total included
+          else {
+            expect(moved).toBe(1);
+            expect(b.slice(0, n - 1)).toEqual(was.slice(1)); // one closed: everything steps left one cell
+            closings++;
+          }
+          before = win;
+          was = b;
+        }
+        expect(closings).toBeGreaterThanOrEqual(2);
+      }
+  });
+
+  /** A session with one busy agent, one that is nearly idle, and a main thread, where folding would hide the busy one. `idle` puts that many agents which have gone quiet ahead of it. */
+  const twoAgents = (idle = 0) => {
+    const quietBusy = agentOf("busy-but-quiet", tailOf([...callTimes(90, NOW - 5 * MIN, 3, 3).map((t) => toolCall(t)), toolResult(NOW - 5 * MIN + 1)]), { label: "the busy one" });
+    const live = agentOf("live", tailOf(callTimes(6, NOW - 10_000, 25, 5).map((t) => toolCall(t))), { label: "the live one" });
+    const other = agentOf("other", tailOf(callTimes(5, NOW - 20_000, 25, 9).map((t) => toolCall(t))), { label: "another live one" });
+    const idlers = Array.from({ length: idle }, (_, i) => agentOf(`idle-${i}`, tailOf([toolCall(NOW - 9 * MIN - i * 1000), toolResult(NOW - 9 * MIN - i * 1000 + 1)]), { label: `an idle one ${i}` }));
+    return sessionOf({ sid: "b", name: "flaky test hunt", mains: [tailOf(callTimes(12, NOW - 30_000, 25, 2).map((t) => toolCall(t)))], agents: [live, other, ...idlers, quietBusy] });
+  };
+  const barsOf = (frame: string[], label: string) => frame.map(strip).find((l) => l.includes(label))?.match(/[▁▂▃▄▅▆▇█]{12,}/)?.[0];
+
+  test("a row that folds away to fit the screen does not rescale the rows that stay", () => {
+    const before = { ...F.opt };
+    try {
+      for (const mode of ["detail", "compact"] as F.Mode[]) {
+        F.opt.mode = mode;
+        // The detail view folds an agent group only once it is longer than three (and then shows as many as fit), so there six idle agents stand ahead of the busy one.
+        const session = () => twoAgents(mode === "detail" ? 6 : 0);
+        const tall = F.render([session()], 150, 30, NOW);
+        const short = F.render([session()], 150, mode === "compact" ? 8 : 15, NOW);
+        expect(barsOf(tall, "the busy one")).toBeDefined(); // on the tall screen every thread has its row
+        expect(barsOf(short, "the busy one")).toBeUndefined(); // on the short one the quiet agent has folded away
+        expect(short.map(strip).join("\n")).toContain("more agent");
+        expect(barsOf(short, "the live one")).toBe(barsOf(tall, "the live one")!);
+      }
+    } finally {
+      Object.assign(F.opt, before);
+    }
+  });
+});
+
+describe("runway and pace, worked by hand", () => {
+  const H = 60 * MIN;
+  const view = (pct: number, resetsInMs: number) => F.accountViewOf({ kind: "current", data: { five_hour: { utilization: pct, resets_at: iso(NOW + resetsInMs) } }, asOf: NOW, failing: "" }, { nextTry: 0, busy: false }, NOW).limits[0];
+
+  test("a limit that is already full has no forecast: what matters then is when it resets", () => {
+    // 100% used with 1h25 to go. "full in ~1m" would be a forecast of something that has happened, shown until the reset.
+    expect(F.paceForecast(100, NOW + 85 * MIN, 5 * H, NOW)).toBeUndefined();
+    expect(F.paceForecast(104, NOW + 85 * MIN, 5 * H, NOW)).toBeUndefined();
+    expect(view(100, 85 * MIN)).toMatchObject({ pct: 100, fullIn: undefined });
+    expect(F.resetText(view(100, 85 * MIN).resetsAt, NOW)).toBe("resets in 1h25");
+    expect(F.limitTone(100)).toEqual(F.C.red);
+    // One point short of full, at the same moment: 3h35 gone at 99%, so 215/99 minutes for the last point.
+    expect(F.paceForecast(99, NOW + 85 * MIN, 5 * H, NOW)! / MIN).toBeCloseTo(215 / 99, 9);
+    expect(F.fullInText(215 / 99)).toBe("full in ~2m");
+  });
+
+  test("a window that has just reset, nothing used, and a reset time already past", () => {
+    // Just reset: the whole 5 hours lie ahead. The tick is at the very start and nothing is forecast, however much is used.
+    expect(view(0, 5 * H)).toMatchObject({ pct: 0, tick: 0, fullIn: undefined });
+    expect(view(60, 5 * H - 1000)).toMatchObject({ fullIn: undefined }); // a second in: 60% already would be alarming, but one second is no pace
+    expect(F.paceCell(0, 0, 12)).toEqual({ cell: 0, glyph: "┼" });
+    // 0% used at any point in the window: nothing to forecast.
+    expect(F.paceForecast(0, NOW + 2 * H, 5 * H, NOW)).toBeUndefined();
+    expect(view(0, 2 * H).tick).toBeCloseTo(0.6, 9); // 3 of 5 hours gone
+    // The reset time is in the past: the figures belong to a window that has rolled over. No tick, no forecast, no "resets in".
+    expect(view(97, -5 * MIN)).toMatchObject({ pct: 97, tick: undefined, fullIn: undefined });
+    expect(F.resetText(NOW - 5 * MIN, NOW)).toBe("");
+    // By hand, mid-window: 2h30 of 5h gone at 51% used. 49 points to go at 51 points per 150 minutes = 144.1 minutes, and 150 remain.
+    expect(F.paceForecast(51, NOW + 2.5 * H, 5 * H, NOW)! / MIN).toBeCloseTo((49 / 51) * 150, 9);
+    expect(F.paceForecast(50, NOW + 2.5 * H, 5 * H, NOW)).toBeUndefined(); // exactly on pace: full at the reset, not before it
+    // The week: 6 days gone at 90%. 10 points at 15 points a day = 16 hours, and 24 remain.
+    expect(F.paceForecast(90, NOW + 24 * H, 7 * 24 * H, NOW)! / H).toBeCloseTo(16, 9);
+    expect(F.fullInText(16 * 60)).toBe("full in ~16h00");
+  });
+
+  test("context that shrinks: a compaction starts the history again, a slow decline says nothing", () => {
+    const at = (min: number, used: number): [number, number] => [NOW - min * MIN, used];
+    // 880k, 900k, 920k, then compacted to 200k six minutes ago and growing 20k a minute: 320k now, 680k to go, 34 minutes.
+    const compacted = [at(9, 880_000), at(8, 900_000), at(7, 920_000), ...[6, 5, 4, 3, 2, 1, 0].map((m) => at(m, 200_000 + (6 - m) * 20_000))];
+    expect(F.ctxRunway(compacted, 1_000_000, NOW)).toBeCloseTo(34, 9);
+    // The same, but compacted only four minutes ago: not yet five minutes of new history.
+    expect(F.ctxRunway([at(9, 880_000), at(7, 920_000), ...[4, 3, 2, 1, 0].map((m) => at(m, 200_000 + (4 - m) * 20_000))], 1_000_000, NOW)).toBeUndefined();
+    // Before the compaction it was 4 minutes from full; the forecast must not come from those readings.
+    expect(F.ctxRunway(compacted.slice(0, 3).map(([t, u]) => [t + 7 * MIN, u] as [number, number]), 1_000_000, NOW)).toBeUndefined(); // and three readings two minutes long are not enough either
+    // Shrinking a little at a time (no single drop big enough to be a compaction): no trend upward, so nothing.
+    expect(F.ctxRunway(Array.from({ length: 11 }, (_, i) => at(10 - i, 600_000 - i * 1_000)), 1_000_000, NOW)).toBeUndefined();
+    // Two compactions in the last ten minutes: only what follows the second counts (60k to 180k in six minutes: 20k a minute, 41 minutes to 1M).
+    const twice = [at(10, 900_000), at(9, 300_000), at(8, 320_000), at(7, 340_000), ...[6, 5, 4, 3, 2, 1, 0].map((m) => at(m, 60_000 + (6 - m) * 20_000))];
+    expect(F.ctxRunway(twice, 1_000_000, NOW)).toBeCloseTo(41, 9);
+    // A reading stamped later than now (clocks disagree) is left out rather than trusted.
+    expect(F.ctxRunway([...Array.from({ length: 11 }, (_, i) => at(10 - i, 600_000 + i * 10_000)), [NOW + 5 * MIN, 999_000]], 1_000_000, NOW)).toBeCloseTo(30, 9);
+  });
+});
+
+describe("what turns the usage read on", () => {
+  test("--usage, or FLEET_USAGE=1 in the environment, and nothing else", () => {
+    const before = { ...F.opt };
+    const saved = process.env.FLEET_USAGE;
+    try {
+      delete process.env.FLEET_USAGE;
+      for (const argv of [[], ["--all", "--bell", "--once"], ["--mode", "far", "60"], ["--stall", "5"], ["--plain-glyphs"]]) {
+        F.parseArgs(argv);
+        expect(F.opt.usage).toBe(false);
+      }
+      F.parseArgs(["--usage"]);
+      expect(F.opt.usage).toBe(true);
+      for (const [value, on] of [["1", true], ["0", false], ["true", false], ["", false]] as [string, boolean][]) {
+        process.env.FLEET_USAGE = value;
+        F.parseArgs([]);
+        expect(F.opt.usage).toBe(on);
+      }
+    } finally {
+      if (saved === undefined) delete process.env.FLEET_USAGE;
+      else process.env.FLEET_USAGE = saved;
+      Object.assign(F.opt, before);
+    }
+  });
+
+  test("the README names every environment variable fleet.ts reads, so none is a hidden switch", () => {
+    const source = fs.readFileSync(path.join(here, "fleet.ts"), "utf8");
+    const readme = fs.readFileSync(path.join(here, "README.md"), "utf8");
+    const read = [...new Set([...source.matchAll(/process\.env\.(FLEET_[A-Z_]+)/g)].map((m) => m[1]))].sort();
+    expect(read).toContain("FLEET_USAGE");
+    expect(read.filter((name) => !readme.includes("`" + name))).toEqual([]);
+    // And it does not promise that --usage is the only way to switch the read on.
+    expect(readme).toContain("`FLEET_USAGE=1`");
+    expect(readme).not.toMatch(/Without `--usage`, Claude Fleet makes no network requests/);
+  });
+});
+
+describe("a remote session is told apart from one that merely uses mosh", () => {
+  test("mosh's own client settings in the environment do not make a local session remote", () => {
+    // MOSH_ESCAPE_KEY, MOSH_PREDICTION_DISPLAY and MOSH_TITLE_NOPREFIX configure the mosh client. Someone who
+    // sets them in a shell profile has them in every local terminal on the Mac too.
+    const local = ["zsh", "login", "Terminal"];
+    expect(F.isRemoteSession({ MOSH_ESCAPE_KEY: "~", MOSH_PREDICTION_DISPLAY: "always", MOSH_TITLE_NOPREFIX: "1" }, local)).toBe(false);
+    expect(F.isRemoteSession({ MOSH_SERVER_NETWORK_TMOUT: "604800" }, local)).toBe(true); // set for the server side of a session
+    expect(F.isRemoteSession({ MOSH_SERVER_SIGNAL_TMOUT: "60" }, local)).toBe(true);
+    expect(F.isRemoteSession({ MOSH_ESCAPE_KEY: "~" }, ["zsh", "mosh-server"])).toBe(true); // the ancestor still says so
+    // So a local keychain that does not answer is reported as that, not as closed to remote sessions.
+    const silent: F.KeychainOutcome = { status: null, stderr: "", timedOut: true, parse: "empty" };
+    const d = F.loginDecision(silent, "missing", F.isRemoteSession({ MOSH_ESCAPE_KEY: "~" }, local));
+    expect("reason" in d && d.reason).toBe("keychain: no answer in 5s");
+  });
 });

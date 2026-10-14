@@ -72,7 +72,7 @@ Every control is a button on the bottom row, and each has a key.
 | `esc` | Leave focus (or quit) |
 | `q` | Quit |
 
-Options: `--mode detail|compact|far`, `--all`, `--usage`, `--bell`, `--stall <minutes>`, `--no-mouse`, `--once` (print one frame and exit), and a number for the window in minutes. `bun fleet.ts --help` lists them.
+Options: `--mode detail|compact|far`, `--all`, `--usage`, `--bell`, `--stall <minutes>`, `--no-mouse`, `--once` (print one frame and exit), and a number for the window in minutes. `bun fleet.ts --help` lists them. Setting `FLEET_HIDE_PROCESSES=1` in the environment leaves other programs' names off the machine row.
 
 `bun fleet.ts --glyphs` prints a test card of every glyph the screen uses, each between two bars, so you can check that your terminal (an iPad over mosh, say) draws each one a single cell wide. If one is out of line, `--plain-glyphs` swaps in fallbacks for the four that fonts most often lack.
 
@@ -82,9 +82,9 @@ Capturing clicks means a plain drag no longer selects text. Hold Shift (Option i
 
 ## Account usage and your login
 
-Usage figures are off unless you pass `--usage`. With it, Claude Fleet reads the Claude Code login already stored on your machine (the macOS keychain item `Claude Code-credentials`, or `~/.claude/.credentials.json`) and asks `api.anthropic.com/api/oauth/usage` for your figures every five minutes. The token is sent only to that address and is held in memory for that one request. It is never written, logged or printed, and never refreshed or changed. That endpoint is the one Claude Code's own `/usage` screen relies on, and it is not a documented public interface.
+Usage figures are off unless you pass `--usage` (or set `FLEET_USAGE=1` in the environment, which means the same). With it, Claude Fleet reads the Claude Code login already stored on your machine (the macOS keychain item `Claude Code-credentials`, or `~/.claude/.credentials.json`) and asks `api.anthropic.com/api/oauth/usage` for your figures every five minutes. The token is sent only to that address and is held in memory for that one request. It is never written, logged or printed, and never refreshed or changed. That endpoint is the one Claude Code's own `/usage` screen relies on, and it is not a documented public interface.
 
-Without `--usage`, Claude Fleet makes no network requests at all.
+Without `--usage` or `FLEET_USAGE=1`, Claude Fleet makes no network requests at all and does not ask the keychain for anything.
 
 **When the read fails, the screen says exactly why:** `keychain: item not found`, `keychain: no answer in 5s`, `keychain: exit N`, `keychain: entry is not JSON`, `keychain: no claude.ai login in entry`, `keychain: closed to remote sessions (ssh/mosh)`, `login file: not found`, `login file: no claude.ai login in it`, `token expired · any Claude Code session renews it`, `Anthropic answered 401` (or whatever status it gave), `network: timed out`. It says `no Claude Code login found` only when the keychain and the login file both answered "not found". It tries again by itself, a minute after a failure and then less often, and `u` retries at once.
 
