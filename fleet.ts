@@ -432,6 +432,8 @@ export const STATE: Record<SessionState, { glyph: string; word: string; color: R
   finished: { glyph: "✓", word: "FINISHED", color: C.done },
 };
 export const STATE_ORDER = Object.keys(STATE) as SessionState[];
+/** Your turn, idle, finished: nothing is running, so the session's title recedes from bold white to text colour in every mode. */
+const isReceded = (state: SessionState) => state === "yourTurn" || state === "idle" || state === "finished";
 /**
  * The state rail's colour: the state colour on a session's head rows (thick), mixed 45% toward faint on
  * its body rows (thin). A waiting session's thick rail alternates amber and dimmed amber; pass the frame counter as `tick`.
@@ -914,6 +916,12 @@ export function newTail(file: string, start = 0, birth = 0): Tail {
     birth,
   };
 }
+
+/** When a transcript was last written: its newest row, or the file's own time when that is later. */
+const lastWriteOf = (t: Tail) => Math.max(t.lastT, t.mtime);
+/** The tool call a thread is waiting on, if it has one outstanding. */
+const pendingOf = (t: Tail) => (t.lastTool && t.lastTool.t > t.lastResultT ? t.lastTool : undefined);
+const pendingTool = (t: Tail) => !!pendingOf(t);
 
 const chunk = Buffer.allocUnsafe(1 << 20);
 function pump(file: string, isMain = false): Tail | undefined {
@@ -2012,9 +2020,9 @@ export interface Facts {
 }
 export function factsOf(s: Session): Facts {
   const main = [...s.mains].sort((x, y) => y.mtime - x.mtime)[0];
-  const pendingAsk = !!main?.lastTool && main.lastTool.name === "AskUserQuestion" && main.lastTool.t > main.lastResultT;
-  const needs = pendingAsk
-    ? main!.lastTool!.hint || "has a question for you"
+  const ask = main && pendingOf(main)?.name === "AskUserQuestion" ? pendingOf(main) : undefined;
+  const needs = ask
+    ? ask.hint || "has a question for you"
     : s.job?.state === "blocked"
       ? s.job.needs || s.job.detail || "waiting on you"
       : "";
@@ -2043,8 +2051,9 @@ export const byState = (a: { state: SessionState; s: Session }, b: { state: Sess
 /** When the session's state began: how long it has waited, been stalled, been up, or since Claude last spoke. */
 export function stateSince(s: Session, f: Facts, state: SessionState, stalledSince = 0): number {
   const m = f.main;
-  const lastWrite = Math.max(m?.lastT ?? 0, m?.mtime ?? 0);
-  if (state === "needs") return m?.lastTool && m.lastTool.name === "AskUserQuestion" && m.lastTool.t > m.lastResultT ? m.lastTool.t : lastWrite;
+  const lastWrite = m ? lastWriteOf(m) : 0;
+  const ask = m && pendingOf(m);
+  if (state === "needs") return ask?.name === "AskUserQuestion" ? ask.t : lastWrite;
   if (state === "stalled") return stalledSince || lastWrite;
   if (state === "working") return s.startedAt;
   if (state === "yourTurn") return m?.say?.t ?? lastWrite;
@@ -2128,8 +2137,6 @@ const treeCpuOf = (pid: number): number | undefined => {
   const u = treeUsage(pid);
   return u.known ? u.cpu : undefined;
 };
-const lastWriteOf = (t: Tail) => Math.max(t.lastT, t.mtime);
-const pendingTool = (t: Tail) => !!t.lastTool && t.lastTool.t > t.lastResultT;
 /** What was stalled at the last scan: each thing's name ("sid" for a session, "sid/thread" for a thread) with when it last wrote. holdStalls() keeps it. */
 const stallHeld = new Map<string, number>();
 /**
@@ -2384,10 +2391,12 @@ export function titleChange(title: string): string {
 export type AgentState = "active" | "tool" | "quiet" | "done";
 export function stateOf(a: Agent, now: number): AgentState {
   if (a.done) return "done";
-  if (now - Math.max(a.tail.lastT, a.tail.mtime) < ACTIVE_MS) return "active";
-  if (a.tail.lastTool && a.tail.lastTool.t > a.tail.lastResultT) return "tool";
+  if (now - lastWriteOf(a.tail) < ACTIVE_MS) return "active";
+  if (pendingTool(a.tail)) return "tool";
   return "quiet";
 }
+/** The order threads are listed in: live, in a tool, quiet, finished. */
+const AGENT_ORDER: Record<AgentState, number> = { active: 0, tool: 1, quiet: 2, done: 3 };
 
 export interface Group {
   wf?: Workflow;
@@ -2410,12 +2419,11 @@ export interface View {
 
 /** Every session as the screen shows it, in sort order. `since` is where the window begins, as for fleetCounts(). */
 export function buildViews(sessions: Session[], now: number, since = frameWindow(now, 150, "detail").start): View[] {
-  const recent = (a: Agent) => Math.max(a.tail.lastT, a.tail.mtime) >= since;
-  const order: Record<AgentState, number> = { active: 0, tool: 1, quiet: 2, done: 3 };
+  const recent = (a: Agent) => lastWriteOf(a.tail) >= since;
   const pick = (list: Agent[], stuck: string[]) =>
     list
       .filter((a) => (recent(a) || stuck.includes(a.id)) && (opt.showDone || !a.done)) // a stalled agent has been silent longer than a short window, and is the one to look at
-      .sort((a, b) => Number(stuck.includes(b.id)) - Number(stuck.includes(a.id)) || order[stateOf(a, now)] - order[stateOf(b, now)] || a.tail.birth - b.tail.birth);
+      .sort((a, b) => Number(stuck.includes(b.id)) - Number(stuck.includes(a.id)) || AGENT_ORDER[stateOf(a, now)] - AGENT_ORDER[stateOf(b, now)] || a.tail.birth - b.tail.birth);
 
   return sessions
     .map((s) => {
@@ -2864,8 +2872,7 @@ export interface Block {
   keep: Keep;
   folded: boolean; // gone into the "… n more" line
 }
-const AGENT_ORDER: Record<AgentState, number> = { active: 0, tool: 1, quiet: 2, done: 3 };
-const EARLIER_TONE = mix(C.cyan, C.faint, 0.5);
+const EARLIER_TONE = mix(C.cyan, C.faint, 0.5); // ◇: cyan mixed halfway to faint
 
 export function blockOf(v: View, g: Grid, now: number, win: Win, focus = false): Block {
   const { s, facts: f, state } = v;
@@ -3240,7 +3247,7 @@ function headRows(b: Block, p: Paint): Row[] {
   const { g, now } = p;
   const { s, facts: f, state } = b.v;
   const needs = state === "needs";
-  const receded = state === "yourTurn" || state === "idle" || state === "finished";
+  const receded = isReceded(state);
   const tone = STATE[state].color;
   const dim = needs ? C.warmDim : C.dim;
   const start = () => {
@@ -3367,7 +3374,7 @@ function threadRow(b: Block, t: Thread, r: Row, p: Paint) {
   const st = stateOf(a, now);
   const stalled = b.v.stall.threads.includes(a.id);
   const at = t.child ? g.childIcon : g.icon;
-  const quietFor = now - Math.max(a.tail.lastT, a.tail.mtime);
+  const quietFor = now - lastWriteOf(a.tail);
   const receded = st === "quiet" || st === "done";
   if (stalled) r.put(at, ICON.progress, C.red);
   else if (st === "active") r.put(at, SPIN[frame % SPIN.length], C.green);
@@ -3377,7 +3384,7 @@ function threadRow(b: Block, t: Thread, r: Row, p: Paint) {
   if (!g.small) {
     const meta = g.wide ? (t.child ? a.model : [shortType(a.type), a.model].filter(Boolean).join(` ${ICON.sep} `)) : "";
     const room = (meta ? g.actionEnd : g.textEnd) - g.action + 1;
-    const pending = a.tail.lastTool && a.tail.lastTool.t > a.tail.lastResultT ? a.tail.lastTool : undefined;
+    const pending = pendingOf(a.tail);
     if (st === "done") r.put(g.action, "finished", C.dim);
     else if (pending) {
       // The pending tool's name in cyan, its hint in text colour. A stalled thread says so first.
@@ -3973,11 +3980,10 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
     out.push("", fg(C.dim, all.length ? "   Nothing active and nothing waiting on you." : "   No live Claude Code sessions found in ~/.claude/sessions."));
   }
 
-  // Shared scales so rows are comparable with each other. Taken before rows are folded away to fit the
-  // screen: a row that folds (an agent going quiet changes which ones fold) must not rescale the rows that stay.
+  // Compact rows share these scales, so they can be compared with each other. Taken before rows are folded away to fit
+  // the screen: a row that folds (an agent going quiet changes which ones fold) must not rescale the rows that stay.
   const agentMax = Math.max(1, ...shown.flatMap((v) => v.groups.flatMap((g) => g.rows.map((a) => Math.max(...buckets([a.tail.tools], now, S))))));
-  const sessionTails = tailsOf;
-  const sessionMax = Math.max(1, ...shown.map((v) => Math.max(...buckets(sessionTails(v.s).map((t) => t.tools), now, S))));
+  const sessionMax = Math.max(1, ...shown.map((v) => Math.max(...buckets(tailsOf(v.s).map((t) => t.tools), now, S))));
 
   // Rows for the sessions: all of them but the button bar and, while one session is focused, the hint above it. Detail mode's blocks
   // run down to the buttons, as the design's frames do; compact rows and far cards keep one row clear above them, as they always have.
@@ -3986,9 +3992,10 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
   // Detail mode draws its sessions with its own renderer (the detail view, above). The tree further down is compact mode's.
   if (opt.mode === "detail") out.push(...detailView(shown, W, avail, now, out.length));
 
+  // Compact rows' columns.
   const ACT = W >= 150 ? 40 : W >= 120 ? 28 : W >= 100 ? 18 : 0; // "what it is doing" column
-  const META = W >= 110 ? 18 : 0;
-  const PW = W >= 130 ? 20 : 12; // progress glyph column // agent type / model column
+  const META = W >= 110 ? 18 : 0; // agent type / model column
+  const PW = W >= 130 ? 20 : 12; // progress glyph column
 
   if (opt.mode === "far") {
     // Big cards, readable from across the room: colour and shape carry the state.
@@ -3996,7 +4003,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
     const fitCount = Math.max(1, Math.floor(avail / H));
     const cards = shown.slice(0, fitCount);
     const CW = Math.max(10, W - 40);
-    const farBuckets = new Map(cards.map((v) => [v.s.sid, buckets(sessionTails(v.s).map((t) => t.tools), now, CW)]));
+    const farBuckets = new Map(cards.map((v) => [v.s.sid, buckets(tailsOf(v.s).map((t) => t.tools), now, CW)]));
     const farMax = Math.max(1, ...[...farBuckets.values()].map((b) => Math.max(...b)));
     const sideAt = 5 + CW + 3; // the side column: 32 cells, ending one short of the edge
     for (const v of cards) {
@@ -4004,7 +4011,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
       const f = v.facts;
       const st = STATE[v.state];
       const waiting = v.state === "needs";
-      const quietened = v.state === "yourTurn" || v.state === "idle" || v.state === "finished";
+      const quietened = isReceded(v.state);
       const dimHere = waiting ? C.warmDim : C.dim; // dim text on the amber tint is a warm dim
       // The thick rail runs the card's full height in the state's colour; a waiting card is tinted across its whole width.
       const railColor = railTone(v.state, true, frame);
@@ -4037,7 +4044,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
       const chartH = Math.max(1, H - 3);
       const cardBuckets = farBuckets.get(s.sid)!;
       const chart = tallSpark(cardBuckets, farMax, chartH, ...RAMP.session);
-      const agentsLive = [...s.agents, ...s.workflows.flatMap((w) => w.agents)].filter((a) => !a.done && Math.max(a.tail.lastT, a.tail.mtime) >= since).length;
+      const agentsLive = [...s.agents, ...s.workflows.flatMap((w) => w.agents)].filter((a) => !a.done && lastWriteOf(a.tail) >= since).length;
       const wfLive = s.workflows.filter((w) => w.status === "running" && w.lastT >= since).length;
       const ctx = f.main?.ctx;
       const use = treeUsage(s.pid);
@@ -4066,7 +4073,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
         });
       side.push((r) => r.put(sideAt, `CPU ${Math.round(use.cpu)}% ${ICON.sep} ${gb(use.rss * 1024)}`, dimHere));
       // Counted on the lane's bars, as the header's total and detail mode's figure are, so the cards add up to the header (the chart beside it has finer bars).
-      side.push((r) => r.put(sideAt, `${human(sum(bucketsIn(sessionTails(s).map((t) => t.tools), win)))} tool calls / ${opt.windowMin}m`, dimHere));
+      side.push((r) => r.put(sideAt, `${human(sum(bucketsIn(tailsOf(s).map((t) => t.tools), win)))} tool calls / ${opt.windowMin}m`, dimHere));
       const tasks = s.tasks;
       if (tasks?.total)
         side.push((r) => {
@@ -4088,10 +4095,10 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
 
   const agentRow = (a: Agent, prefix: string, stalled = false): string => {
     const st = stateOf(a, now);
-    const quietFor = now - Math.max(a.tail.lastT, a.tail.mtime);
+    const quietFor = now - lastWriteOf(a.tail);
     // ◐ is a tool call outstanding: white, red when stalled, never a yellow dot. Amber is kept for what needs you.
     const dot = stalled ? fg(C.red, ICON.progress) : st === "active" ? spin : st === "tool" ? fg(C.white, ICON.progress) : st === "done" ? fg(C.done, ICON.done) : fg(C.dim, ICON.idle);
-    const pending = a.tail.lastTool && a.tail.lastTool.t > a.tail.lastResultT ? a.tail.lastTool : undefined;
+    const pending = pendingOf(a.tail);
     const labelW = W - width(prefix) - 2 - (META ? META + 2 : 0) - S - 2 - (ACT ? ACT + 2 : 0) - 6 - 1;
     const b = buckets([a.tail.tools], now, S);
     const tone = st === "done" ? C.dim : st === "quiet" ? C.dim : C.text;
@@ -4121,7 +4128,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
 
   views.forEach((v, vi) => {
     const s = v.s;
-    const tailsHere = sessionTails(s);
+    const tailsHere = tailsOf(s);
     const b = buckets(tailsHere.map((t) => t.tools), now, S);
     const branch = s.mains.map((m) => m.branch).find(Boolean);
     const home = os.homedir();
@@ -4130,7 +4137,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
     // The lead glyph is the state: ▲ needs you, ◐ stalled, ● working, ▸ your turn, ○ idle, ✓ finished.
     const state = STATE[v.state];
     const dot = fg(state.color, state.glyph);
-    const quietened = v.state === "yourTurn" || v.state === "idle" || v.state === "finished"; // their names recede to text colour
+    const quietened = isReceded(v.state);
     const f = v.facts;
     const wide = W >= 120;
     const use = treeUsage(s.pid);
@@ -4339,7 +4346,7 @@ export function legend(cols: number, rows: number): string[] {
     head("CONVERSATION"),
     mark(ICON.you, C.blue, "you", "something you typed", true),
     mark(ICON.claude, C.cyan, "Claude", "newest; white when new"),
-    mark(ICON.earlier, mix(C.cyan, C.faint, 0.5), "earlier", "an earlier reply"),
+    mark(ICON.earlier, EARLIER_TONE, "earlier", "an earlier reply"),
     [],
     head("THREADS, TASKS, WORKFLOWS"),
     mark(spin, C.green, "live", "wrote in the last minute"),

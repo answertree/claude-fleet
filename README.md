@@ -205,7 +205,7 @@ The demo has options of its own, so every state can be seen without waiting for 
 | `--surprise` | `--stalled --runway --account early --seen 18` together. |
 | `--real-machine` | This machine's CPU, memory and load instead of the made-up ones. |
 
-`bun test` runs the tests in `fleet.test.ts` (Bun's built-in runner, no packages). `tools/check-frames` renders the demo at seven terminal sizes in all three modes and fails if a frame has the wrong number of rows, a line wider than the terminal, or the text "undefined" or "NaN" on it. `bun run check` runs both. `tools/shot.sh out.png 150 44` renders one demo frame to a PNG for looking at (it needs `rsvg-convert`).
+`bun test` runs the tests in `fleet.test.ts` (Bun's built-in runner, no packages). `tools/check-frames` renders the demo at seven terminal sizes in all three modes and fails if a frame has the wrong number of rows, a line wider than the terminal, the text "undefined" or "NaN" on it, or a glyph the design retired. `bun run check` runs both. `tools/shot.sh out.png 150 44` renders one demo frame to a PNG for looking at (it needs `rsvg-convert`).
 
 These environment variables exist for tests and screenshots only:
 

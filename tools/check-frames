@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 // Renders the demo at every supported terminal size, in every mode and demo
 // variant, and fails if a frame does not fit: the wrong number of rows, a line
-// wider than the terminal (measured in display cells, not characters), or the
-// text "undefined" or "NaN" on the screen.
+// wider than the terminal (measured in display cells, not characters), the
+// text "undefined" or "NaN" on the screen, or a glyph the design retired.
 //
 // Usage: tools/check-frames [--save <dir>] [--only <text>] [--list]
 //   --save <dir>   also write each frame as plain text into <dir>
@@ -31,6 +31,8 @@ const saveDir = valueOf("--save");
 const only = valueOf("--only");
 const demo = path.join(import.meta.dir, "..", "demo.ts");
 const strip = (s: string) => s.replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, "").replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "");
+/** Retired from the vocabulary: each has an emoji form or is missing from common fonts. None may be drawn in any mode. */
+const RETIRED = "⚠⚙⎇▪◈▤┆";
 
 interface Job {
   name: string;
@@ -70,6 +72,7 @@ async function check(job: Job): Promise<string[]> {
     const w = Bun.stringWidth(line);
     if (w > job.cols) problems.push(`row ${i + 1} is ${w} cells wide (limit ${job.cols}): ${line.trim().slice(0, 70)}`);
     for (const bad of ["undefined", "NaN"]) if (line.includes(bad)) problems.push(`row ${i + 1} shows "${bad}": ${line.trim().slice(0, 70)}`);
+    for (const bad of RETIRED) if (line.includes(bad)) problems.push(`row ${i + 1} draws the retired glyph ${bad}: ${line.trim().slice(0, 70)}`);
   });
   return problems;
 }
