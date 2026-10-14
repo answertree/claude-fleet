@@ -2488,8 +2488,8 @@ export function fitViews(views: View[], avail: number): { views: View[]; gaps: b
 export type HeaderKind = "tall" | "medium" | "old";
 export const headerKind = (W: number, rows: number, mode: Mode = opt.mode): HeaderKind => (mode === "compact" || W < 100 ? "old" : rows >= 40 ? "tall" : "medium");
 
-type Seg = [text: string, color?: RGB, bold?: boolean];
-const segsWidth = (parts: Seg[]) => parts.reduce((n, p) => n + width(p[0]), 0);
+type Piece = [text: string, color?: RGB, bold?: boolean];
+const piecesWidth = (parts: Piece[]) => parts.reduce((n, p) => n + width(p[0]), 0);
 /** `text` when it fits in `w` cells; cut with … when enough of it would be left to mean something; else nothing. */
 const fitOrDrop = (text: string, w: number): string => (width(text) <= w ? text : w >= 8 ? fit(text, w, "l", true).replace(/\s+…$/, "…") : "");
 /** The first wording that fits in `w` cells, else the fullest one cut with …. */
@@ -2548,11 +2548,11 @@ const dateText = (now: number): string => {
 /** A process's name (already made safe when it was sampled), cut to what the header has room for. */
 const shortProc = (p: Proc) => p.name.slice(0, 14);
 /** "top bun 212% · node 88%": the busiest processes, as many whole ones as fit in `w` cells. */
-function topSegs(w: number): Seg[] {
-  const parts: Seg[] = [["top ", C.dim]];
+function topSegs(w: number): Piece[] {
+  const parts: Piece[] = [["top ", C.dim]];
   for (const p of topProcs(4)) {
-    const next: Seg[] = [...(parts.length > 1 ? [[` ${ICON.sep} `, C.faint] as Seg] : []), [`${shortProc(p)} ${Math.round(p.cpu)}%`, C.text]];
-    if (segsWidth(parts) + segsWidth(next) > w) break;
+    const next: Piece[] = [...(parts.length > 1 ? [[` ${ICON.sep} `, C.faint] as Piece] : []), [`${shortProc(p)} ${Math.round(p.cpu)}%`, C.text]];
+    if (piecesWidth(parts) + piecesWidth(next) > w) break;
     parts.push(...next);
   }
   return parts.length > 1 ? parts : [];
@@ -2569,8 +2569,8 @@ function masthead(g: Grid, c: FleetCounts, now: number): Row {
   const r = new Row(g.W);
   r.put(2, `${ICON.claude} CLAUDE FLEET`, C.cyan, true);
   const first = g.wide ? 21 : 19;
-  const count = (n: number): Seg => [` ${n}`, n ? C.white : C.dim, n > 0];
-  let tiles: { name: string; parts: Seg[]; slot: number }[] = [
+  const count = (n: number): Piece => [` ${n}`, n ? C.white : C.dim, n > 0];
+  let tiles: { name: string; parts: Piece[]; slot: number }[] = [
     { name: "working", parts: [[ICON.working, c.working ? C.green : C.dim], count(c.working), [" working", C.dim]], slot: 12 },
     { name: "agents", parts: [[c.agents ? SPIN[frame % SPIN.length] : ICON.idle, c.agents ? C.green : C.dim], count(c.agents), [` agent${c.agents === 1 ? "" : "s"}`, C.dim]], slot: 11 },
     { name: "workflows", parts: [[ICON.workflow, c.workflows ? C.purple : C.dim], count(c.workflows), [` workflow${c.workflows === 1 ? "" : "s"}`, C.dim]], slot: 13 },
@@ -2579,7 +2579,7 @@ function masthead(g: Grid, c: FleetCounts, now: number): Row {
   if (c.stalled) tiles.push({ name: "stalled", parts: [[ICON.progress, C.red], [` ${c.stalled}`, C.red, true], [" stalled?", C.red]], slot: 12 });
   const tilesFrom = first + 17; // after the needs-you slot
   /** The column after the last of these tiles, laid out from the first slot. */
-  const endOf = (list: typeof tiles) => list.reduce((col, t, i) => col + (i === list.length - 1 ? segsWidth(t.parts) : Math.max(t.slot, segsWidth(t.parts)) + 3), tilesFrom);
+  const endOf = (list: typeof tiles) => list.reduce((col, t, i) => col + (i === list.length - 1 ? piecesWidth(t.parts) : Math.max(t.slot, piecesWidth(t.parts)) + 3), tilesFrom);
   let showDate = g.wide;
   const limit = () => g.W - (showDate ? 24 : 10);
   if (endOf(tiles) > limit()) showDate = false;
@@ -2593,9 +2593,9 @@ function masthead(g: Grid, c: FleetCounts, now: number): Row {
   } else r.put(first, `${ICON.done} none waiting`, C.done);
   let col = tilesFrom;
   for (const t of tiles) {
-    if (col + segsWidth(t.parts) > limit()) break;
+    if (col + piecesWidth(t.parts) > limit()) break;
     r.segs(col, t.parts);
-    col += Math.max(t.slot, segsWidth(t.parts)) + 3;
+    col += Math.max(t.slot, piecesWidth(t.parts)) + 3;
   }
   const left = r.putr(g.figEnd, new Date(now).toTimeString().slice(0, 8), C.white, true);
   if (showDate) r.putr(left - 2, dateText(now), C.dim);
@@ -2614,14 +2614,14 @@ function axisRow(g: Grid, win: Win): Row {
   r.put(2, ICON.gaugeTrack.repeat(g.lane - 3), C.faint);
   const news = digest();
   if (news.groups.length) {
-    const parts: Seg[] = [[`since ${hhmm(news.since)}`, C.dim]];
+    const parts: Piece[] = [[`since ${hhmm(news.since)}`, C.dim]];
     for (const group of news.groups) {
-      const next: Seg[] = [[`  ${ICON.sep}  `, C.faint], [`${group.glyph} `, group.color, group.kind === "asked"], [group.text, C.text]];
-      if (5 + segsWidth(parts) + segsWidth(next) > g.lane - 7) break; // "before column 100" at 150 columns
+      const next: Piece[] = [[`  ${ICON.sep}  `, C.faint], [`${group.glyph} `, group.color, group.kind === "asked"], [group.text, C.text]];
+      if (5 + piecesWidth(parts) + piecesWidth(next) > g.lane - 7) break; // "before column 100" at 150 columns
       parts.push(...next);
     }
     if (parts.length > 1) {
-      r.put(4, " ".repeat(segsWidth(parts) + 2));
+      r.put(4, " ".repeat(piecesWidth(parts) + 2));
       r.segs(5, parts);
     }
   }
@@ -2725,13 +2725,13 @@ function accountBlock(rows: Row[], g: Grid, a: AccountView | undefined, now: num
   const forms = ["long", "short", "bare"] as const;
   const form = forms.find((f) => [five, week].every((l) => !l || width(resetText(l.resetsAt, now, f)) <= room)) ?? "bare";
   const resets = (l: LimitView): string => forms.slice(forms.indexOf(form)).map((f) => resetText(l.resetsAt, now, f)).find((text) => width(text) <= room) ?? "";
-  const limitRow = (r: Row, name: string, l: LimitView | undefined, extra?: Seg[]) => {
+  const limitRow = (r: Row, name: string, l: LimitView | undefined, extra?: Piece[]) => {
     r.put(label, name, C.dim);
     r.paste(gaugeAt, limitGauge(l?.pct, GW, l?.tick, stale), GW);
     if (!l) return void r.putr(valueEnd, "--", C.dim);
     const tone = figureTone(l.pct);
     r.putr(valueEnd, `${Math.round(l.pct)}%`, stale ? C.dim : tone.color, !stale && tone.bold);
-    if (extra) r.segs(detail, segsWidth(extra) <= room ? extra : []);
+    if (extra) r.segs(detail, piecesWidth(extra) <= room ? extra : []);
     else if (l.fullIn) {
       // Runway: at this pace the limit is full before it resets. Say when, instead of the reset time.
       const minutes = l.fullIn / 60_000;
@@ -2747,8 +2747,8 @@ function accountBlock(rows: Row[], g: Grid, a: AccountView | undefined, now: num
   const opus = limitOf("seven_day_opus");
   const sonnet = limitOf("seven_day_sonnet");
   if (x?.enabled) {
-    const spend: Seg[] = [[x.used, C.text], [` of ${x.limit}`, C.dim]];
-    limitRow(rows[2], "extra", { key: "extra", label: "extra", pct: x.pct, resetsAt: 0, windowMs: 0 }, segsWidth(spend) <= room ? spend : [spend[0]]);
+    const spend: Piece[] = [[x.used, C.text], [` of ${x.limit}`, C.dim]];
+    limitRow(rows[2], "extra", { key: "extra", label: "extra", pct: x.pct, resetsAt: 0, windowMs: 0 }, piecesWidth(spend) <= room ? spend : [spend[0]]);
   } else if (opus && sonnet) {
     const tone = figureTone(sonnet.pct);
     limitRow(rows[2], "opus", opus, [["sonnet ", C.dim], [`${Math.round(sonnet.pct)}%`, tone.color, tone.bold]]);
@@ -3319,12 +3319,12 @@ let legendOn = false; // key ?: the legend is showing instead of the fleet
  */
 export function legend(cols: number, rows: number): string[] {
   const W = Math.max(60, cols);
-  type Line = Seg[];
+  type Line = Piece[];
   const head = (text: string): Line => [[text, C.white, true]];
   /** A mark in its own colour, its name, and what it means. */
   const mark = (glyph: string, color: RGB, name: string, note: Line | string, isBold = false): Line => [[glyph, color, isBold], [" " + fit(name, 12), C.text], ...(typeof note === "string" ? ([[note, C.dim]] as Line) : note)];
   /** A graph or gauge sample, or a key, and what it is. */
-  const sample = (parts: Line, w: number, note: string): Line => [...parts, [" ".repeat(Math.max(1, w - segsWidth(parts))), C.dim], [note, C.dim]];
+  const sample = (parts: Line, w: number, note: string): Line => [...parts, [" ".repeat(Math.max(1, w - piecesWidth(parts))), C.dim], [note, C.dim]];
   const key = (name: string, note: string): Line => sample([[name, C.text, true]], 6, note);
   const spin = SPIN[frame % SPIN.length];
   const left: Line[] = [
@@ -3350,7 +3350,7 @@ export function legend(cols: number, rows: number): string[] {
   ];
   const right: Line[] = [
     head("GRAPHS AND GAUGES"),
-    sample([1, 3, 5, 8].map((level): Seg => [BARS[level - 1], mix(...RAMP.session, level / 8)]), 5, "tool calls per bar, oldest left"),
+    sample([1, 3, 5, 8].map((level): Piece => [BARS[level - 1], mix(...RAMP.session, level / 8)]), 5, "tool calls per bar, oldest left"),
     sample([[ICON.gaugeFill.repeat(2), C.calm], [ICON.gaugeTrack, C.faint]], 5, "limit: white from 60%, red 80%"),
     sample([[ICON.gaugeTrack, C.faint], [ICON.pace, C.white], [ICON.gaugeTrack, C.faint]], 5, "pace: time gone in that window"),
     sample([[ICON.gaugeNone.repeat(3), C.faint]], 5, "no reading"),
