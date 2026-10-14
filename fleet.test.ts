@@ -200,9 +200,9 @@ describe("graphs hold still", () => {
   });
 
   test("a whole frame at now and at now + 1s differs only in its clock, in every mode", () => {
-    // Pick a second in which no strip on the screen closes a bar (today's layout uses 25, 58 and 110 bars at 150 columns).
+    // Pick a second in which no strip on the screen closes a bar (at 150 columns: 30 in the lane, 25 in compact rows and 58 in its header, 110 in far cards).
     let now = NOW;
-    const sameBars = (t: number) => [25, 58, 110].every((n) => F.timeWindow(t, WINDOW, n).first === F.timeWindow(t + 1000, WINDOW, n).first);
+    const sameBars = (t: number) => [25, 30, 58, 110].every((n) => F.timeWindow(t, WINDOW, n).first === F.timeWindow(t + 1000, WINDOW, n).first);
     while (!sameBars(now)) now += 1000;
 
     const half = 30_000; // every age on screen sits half a minute from its next tick
@@ -1199,7 +1199,8 @@ describe("demo", () => {
     expect(frame).not.toContain("stalled?");
     expect(frame).not.toContain("fullin~");
     expect(frame).toContain("aall·1idle");
-    expect(frame).toContain("bun212%"); // the made-up machine
+    expect(frame).toContain("212%bun"); // the made-up machine: without --usage the account block lists its busiest processes
+    expect(frame).not.toContain("hidden"); // the line that named the hidden sessions is gone; the a button carries their count
   }, SLOW);
 
   test("--surprise shows a stalled agent, a context forecast and things new since you looked", () => {
