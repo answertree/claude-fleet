@@ -1170,6 +1170,462 @@ describe("since you looked", () => {
   });
 });
 
+describe("header and chrome", () => {
+  const WINDOW = 30 * MIN;
+  const SIZES: [number, number][] = [[80, 24], [100, 30], [110, 44], [130, 40], [150, 34], [150, 44], [200, 60]];
+  /** The design's made-up machine: 54% CPU, 38% of 128G, sixteen cores, three busy processes. Process 4243 is an idle session's. */
+  const MACHINE = {
+    cpu: 54, load: 14.6, memTotal: 128 * 1024 ** 3, memUsed: 0.38 * 128 * 1024 ** 3,
+    cores: [58, 62, 49, 44, 37, 33, 30, 35, 41, 47, 66, 70, 72, 69, 81, 84],
+    hist: [6, 7, 8, 8, 8, 9, 10, 14, 16, 22, 24, 20, 26, 33, 41, 44, 38, 43, 52, 55, 47, 54, 63, 54],
+    procs: [{ pid: 1, ppid: 0, cpu: 212, rss: 0, name: "bun" }, { pid: 2, ppid: 0, cpu: 88, rss: 0, name: "node" }, { pid: 3, ppid: 0, cpu: 41, rss: 0, name: "tsc" }, { pid: 4243, ppid: 0, cpu: 0.2, rss: 1000, name: "claude" }],
+    kids: new Map<number, F.Proc[]>(),
+  };
+  /** Tool calls a minute across the lane, as the design's fleet chart draws them (372 in all, 286 in the last twenty). */
+  const FLEET = [6, 9, 7, 11, 0, 8, 12, 14, 10, 9, 13, 16, 12, 8, 5, 3, 6, 9, 13, 17, 15, 12, 16, 19, 22, 18, 21, 24, 20, 17];
+  /** A thread that wrote five seconds ago and has made no tool call, so it adds nothing to the chart. */
+  const live = () => Object.assign(tailOf([]), { mtime: NOW - 5_000 });
+  /**
+   * The design's fleet: one session needs you, two are working with `agents` agents and one workflow
+   * between them, and one finished job is kept off the screen. `stalled` leaves one agent silent on a
+   * tool call for 14 minutes in a session whose processes are idle.
+   */
+  function fleet(laneW = 30, o: { agents?: number; stalled?: boolean } = {}): F.Session[] {
+    const win = F.timeWindow(NOW, WINDOW, laneW);
+    const calls = FLEET.slice(-laneW).flatMap((n, k) => Array.from({ length: n }, (_, i) => toolCall(win.start + k * win.bar + 1000 + i, "Read", {}, `c${k}-${i}`)));
+    const wf: F.Workflow = { id: "wf_1", name: "bisect-and-fix", status: "running", phase: "Fix", phases: [], seen: ["Fix"], started: NOW - 14 * MIN, finished: 0, agents: ["w3", "w4", "w5"].map((id) => agentOf(id, live(), { wf: "wf_1" })), lastT: NOW - 5_000 };
+    const solo = Array.from({ length: (o.agents ?? 5) - 3 }, (_, i) => agentOf(`s${i}`, o.stalled && i === 0 ? tailOf([toolCall(NOW - 14 * MIN)]) : live()));
+    return [
+      sessionOf({ sid: "aaaaaaaa", status: "idle", job: { state: "blocked", detail: "", needs: "Approve dropping the column?" } }),
+      sessionOf({ sid: "bbbbbbbb", mains: [tailOf(calls)], workflows: [wf] }),
+      sessionOf({ sid: "cccccccc", pid: 4243, mains: [live()], agents: solo }),
+      sessionOf({ sid: "dddddddd", status: "idle", job: { state: "done", detail: "merged", needs: "" } }),
+    ];
+  }
+  /** The design's account: 38% of the 5-hour limit with 2h10 to go, 21% of the week resetting on Friday at 09:00, £12 of £50 extra. */
+  const figures = (five = 38, resetsIn = 130 * MIN): F.UsageFigures => ({
+    five_hour: { utilization: five, resets_at: iso(NOW + resetsIn) },
+    seven_day: { utilization: 21, resets_at: iso(Date.UTC(2026, 9, 16, 9, 0, 0)) },
+    extra_usage: { is_enabled: true, monthly_limit: 5000, used_credits: 1200, currency: "GBP", decimal_places: 2 },
+  });
+  const week = (pct: number): F.UsageWindow => ({ utilization: pct, resets_at: iso(Date.UTC(2026, 9, 16, 9, 0, 0)) });
+  /** Every state the account block can be in. `false` is a dashboard started without --usage. */
+  const ACCOUNT: Record<string, Partial<typeof F.usage> | false> = {
+    current: { data: figures(), fetchedAt: NOW },
+    early: { data: figures(86, 85 * MIN), fetchedAt: NOW }, // 86% with 1h25 to go: full in about 35 minutes
+    extraOff: { data: { ...figures(), extra_usage: { is_enabled: false } }, fetchedAt: NOW },
+    modelWeeks: { data: { ...figures(), extra_usage: { is_enabled: false }, seven_day_opus: week(12), seven_day_sonnet: week(4) }, fetchedAt: NOW },
+    sonnetWeek: { data: { ...figures(), extra_usage: { is_enabled: false }, seven_day_sonnet: week(64) }, fetchedAt: NOW },
+    shared: { data: figures(), fetchedAt: NOW - 3 * MIN, reason: F.REASON.keychainRemote, source: "shared" }, // our read fails, another dashboard's figures are fresh
+    stale: { data: figures(), fetchedAt: NOW - 39 * MIN - 22_000, reason: "Anthropic answered 429" }, // fetched at 23:12
+    staleRemote: { data: figures(), fetchedAt: NOW - 39 * MIN - 22_000, reason: F.REASON.keychainRemote },
+    none: { reason: "keychain: no answer in 5s" },
+    remote: { reason: F.REASON.keychainRemote },
+    reading: { busy: true, nextTry: 0 },
+    off: false,
+  };
+  /** Draw on the design's machine with one of those accounts and nothing new since you looked, then put every global back. */
+  function draw<T>(account: string, fn: () => T, o: { mode?: F.Mode; all?: boolean; windowMin?: number } = {}): T {
+    const saved = { opt: { ...F.opt }, machine: { ...F.machine }, usage: { ...F.usage }, seen: { ...F.seen } };
+    const u = ACCOUNT[account];
+    Object.assign(F.machine, MACHINE);
+    Object.assign(F.opt, { mode: o.mode ?? "detail", usage: u !== false, windowMin: o.windowMin ?? 30, showAll: !!o.all, showDone: false });
+    Object.assign(F.usage, { at: NOW, nextTry: NOW + 5 * MIN, busy: false, failures: 0, reason: "", data: undefined, fetchedAt: 0, source: "", sharedAt: 0 }, u || {});
+    Object.assign(F.seen, { at: NOW, events: [], known: new Map(), primed: true });
+    try {
+      return fn();
+    } finally {
+      Object.assign(F.opt, saved.opt);
+      Object.assign(F.machine, saved.machine);
+      Object.assign(F.usage, saved.usage);
+      Object.assign(F.seen, saved.seen);
+    }
+  }
+  const raw = (W: number, rows: number, account = "current", sessions = fleet(F.grid(W).laneW), o: Parameters<typeof draw>[2] = {}) => draw(account, () => F.header(sessions, W, rows, NOW, NOW - WINDOW), o);
+  const head = (...args: Parameters<typeof raw>) => raw(...args).map(strip);
+  /** The account block's three rows, by its own columns. */
+  const block = (W: number, account: string) => {
+    const g = F.grid(W);
+    return head(W, 44, account).slice(1, 4).map((line) => line.padEnd(W).slice(g.account - 1, g.accountEnd).trimEnd());
+  };
+
+  // The designer's own frames (reference/header_*.txt), with the totals this fleet adds up to.
+  const TALL_150 = [
+    " ◆ CLAUDE FLEET     ▲ 1 needs you    ● 2 working    ⠋ 5 agents    ≡ 1 workflow    ○ 1 idle                                       Tue 13 Oct  23:51:22",
+    " cpu  ━━━━━━──────  54%  ▁▁▁▂▂▂▂▂▃▃▄▄▄▄▅▅▄▅▆▅  load 14.6    5h    ━━━━━─┼─────  38%  resets in 2h10                          ▁   ▃▆▂▅█▄▁    372 tools",
+    " mem  ━━━━━───────  38%  49G of 128G                        7d    ━━━────┼────  21%  resets Fri 09:00      ▁ ▃  ▄▆▂▁▅█▄    ▁▅█▇▄████████      37k out",
+    " core ▅▅▄▄▃▃▃▃▄▄▆▆▆▆▇▇   top bun 212% · node 88%            extra ━━━─────────  24%  £12 of £50           ▆█▇█▁█████████▅▃▆█████████████     1m a bar",
+    " ──────────────────────────────────────────────────────────────────────────────────────────────────────── 30m ──────┴─────────┴───── now ────────────",
+  ];
+  const MEDIUM_150 = [
+    TALL_150[0],
+    " cpu ━━━━────  54%   mem ━━━─────  38%   load 14.6    5h ━━━─┼───  38% 2h10   7d ━━───┼──  21% Fri 09:00  ▂▃▃▄▁▃▄▅▄▃▅▆▄▃▂▁▂▃▅▆▅▄▆▇█▆▇█▇▆    372 tools",
+    TALL_150[4],
+  ];
+  const TALL_110 = [
+    " ◆ CLAUDE FLEET   ▲ 1 needs you    ● 2 working    ⠋ 5 agents    ≡ 1 workflow    ○ 1 idle             23:51:22",
+    " cpu  ━━━━────  54%  ▃▃▄▄▄▄▅▅▄▅▆▅        5h    ━━━─┼───  38%  2h10 left                 ▁   ▃▆▂▅█▄▁ 286 tools",
+    " mem  ━━━─────  38%  49G of 128G         7d    ━━───┼──  21%  Fri 09:00        ▅█▄    ▁▅█▇▄████████   29k out",
+    " core ▅▅▄▄▃▃▃▃▄▄▆▆▆▆▇▇  load 14.6        extra ━━──────  24%  £12 of £50       ████▅▃▆█████████████ 90s a bar",
+    " ───────────────────────────────────────────────────────────────────────────── 30m ──┴─────┴─── now ─────────",
+  ];
+  const MEDIUM_110 = [
+    TALL_110[0],
+    " cpu ━━━━────  54%   mem ━━━─────  38%   5h ━━━─┼───  38%   7d ━━───┼──  21%   ▅▆▄▃▂▁▂▃▅▆▅▄▆▇█▆▇█▇▆ 286 tools",
+    TALL_110[4],
+  ];
+
+  test("five rows from 40 terminal rows, three below; compact mode and under 100 columns keep the older header", () => {
+    expect([F.headerKind(150, 40, "detail"), F.headerKind(150, 39, "detail"), F.headerKind(150, 44, "far"), F.headerKind(110, 30, "far")]).toEqual(["tall", "medium", "tall", "medium"]);
+    expect([F.headerKind(150, 44, "compact"), F.headerKind(99, 60, "detail"), F.headerKind(100, 60, "detail")]).toEqual(["old", "old", "tall"]);
+    expect([head(150, 44).length, head(150, 34).length, head(110, 44).length, head(110, 30).length]).toEqual([5, 3, 5, 3]);
+    // The height follows the terminal's rows, never the number of sessions, so the header does not jump.
+    expect([head(150, 44, "current", []).length, head(150, 44, "current", [...fleet(), ...fleet(), ...fleet()]).length]).toEqual([5, 5]);
+    // Compact: the older lines, with ▲ where ⚠ was and amber spent on that alone.
+    const compact = raw(150, 44, "current", fleet(), { mode: "compact" });
+    expect(compact.length).toBe(4); // fleet line, machine line, account line, rule
+    expect(strip(compact[0])).toContain("▲ 1 needs you · 3 active sessions · 5 agents running · 1 work…");
+    expect(compact[0]).toContain(F.bold(F.fg(F.C.amber, "▲ 1 needs you")));
+    expect(compact.join("")).not.toContain("⚠");
+    expect(strip(head(90, 44).join("\n"))).toContain("active sessions"); // under 100 columns, whatever the mode
+  });
+
+  test("at 150 columns the header is the design's, cell for cell: tall and medium", () => {
+    expect(head(150, 44)).toEqual(TALL_150);
+    expect(head(150, 34)).toEqual(MEDIUM_150);
+    expect(draw("current", () => F.render(fleet(), 150, 44, NOW).slice(0, 5).map(strip), { mode: "far" })).toEqual(TALL_150); // far mode takes the same header
+  });
+
+  test("at 110 columns: narrow blocks, a 20-cell lane, shorter reset times, no date and no top processes", () => {
+    expect(head(110, 44)).toEqual(TALL_110);
+    expect(head(110, 34)).toEqual(MEDIUM_110);
+  });
+
+  test("masthead: tiles sit in fixed slots, a zero goes dim instead of leaving, and the stalled tile is added only while something is stalled", () => {
+    const columns = (line: string) => ["▲", "●", "⠋", "≡", "○"].map((g) => line.indexOf(g) + 1);
+    expect(columns(head(150, 44)[0])).toEqual([21, 38, 53, 67, 83]);
+    expect(columns(head(110, 44)[0])).toEqual([19, 36, 51, 65, 81]);
+    // A count going from 9 to 10 moves nothing.
+    const nine = head(150, 44, "current", fleet(30, { agents: 9 }))[0];
+    const ten = head(150, 44, "current", fleet(30, { agents: 10 }))[0];
+    expect([nine.slice(52, 63), ten.slice(52, 63)]).toEqual(["⠋ 9 agents ", "⠋ 10 agents"]);
+    expect(ten.slice(63)).toBe(nine.slice(63));
+    // The needs-you tile is the one warm thing: bold amber on the amber tint, columns 20 to 34.
+    expect(raw(150, 44)[0]).toContain(`\x1b[48;2;52;38;0m${F.bold(F.fg(F.C.amber, " ▲ 1 needs you "))}\x1b[49m`);
+    // Nothing anywhere: the slot reads "none waiting" in receded green, and every zero is dim, the agents' spinner a ○.
+    const empty = raw(150, 44, "current", []);
+    expect(strip(empty[0])).toBe(" ◆ CLAUDE FLEET     ✓ none waiting   ● 0 working    ○ 0 agents    ≡ 0 workflows   ○ 0 idle                                       Tue 13 Oct  23:51:22");
+    expect(empty[0]).toContain(F.fg(F.C.done, "✓ none waiting"));
+    expect(empty[0]).toContain(F.fg(F.C.dim, "● 0 working"));
+    expect(empty[0]).not.toContain("\x1b[48;2;"); // no tint
+    // Stall watch: a red tile at column 95, and the stalled session is no longer counted as working.
+    const stalled = raw(150, 44, "current", fleet(30, { stalled: true }));
+    expect(strip(stalled[0])).toBe(" ◆ CLAUDE FLEET     ▲ 1 needs you    ● 1 working    ⠋ 5 agents    ≡ 1 workflow    ○ 1 idle    ◐ 1 stalled?                       Tue 13 Oct  23:51:22");
+    expect(strip(stalled[0]).indexOf("◐") + 1).toBe(95);
+    expect(stalled[0]).toContain(F.fg(F.C.red, "◐") + F.bold(F.fg(F.C.red, " 1")) + F.fg(F.C.red, " stalled?"));
+    expect(head(150, 44)[0]).not.toContain("stalled");
+    // Where they do not all fit, the stalled tile outranks the date, then the idle tile, then workflows.
+    expect(head(130, 44, "current", fleet(30, { stalled: true }))[0]).toBe(" ◆ CLAUDE FLEET     ▲ 1 needs you    ● 1 working    ⠋ 5 agents    ≡ 1 workflow    ○ 1 idle    ◐ 1 stalled?               23:51:22");
+    expect(head(110, 44, "current", fleet(20, { stalled: true }))[0]).toBe(" ◆ CLAUDE FLEET   ▲ 1 needs you    ● 1 working    ⠋ 5 agents    ≡ 1 workflow    ◐ 1 stalled?         23:51:22");
+    expect(head(100, 44, "current", fleet(20, { stalled: true }))[0]).toBe(" ◆ CLAUDE FLEET   ▲ 1 needs you    ● 1 working    ⠋ 5 agents    ◐ 1 stalled?               23:51:22");
+  });
+
+  test("the account block shows every state exactly, on the design's columns", () => {
+    expect(block(150, "current")).toEqual(["5h    ━━━━━─┼─────  38%  resets in 2h10", "7d    ━━━────┼────  21%  resets Fri 09:00", "extra ━━━─────────  24%  £12 of £50"]);
+    // No reading yet: ╌ gauges, when the next try is, and the exact reason.
+    expect(block(150, "none")).toEqual(["5h    ╌╌╌╌╌╌╌╌╌╌╌╌   --  no reading yet", "7d    ╌╌╌╌╌╌╌╌╌╌╌╌   --  next try 23:56", "✗ keychain: no answer in 5s · u retries"]);
+    expect(block(150, "reading")).toEqual(["5h    ╌╌╌╌╌╌╌╌╌╌╌╌   --  no reading yet", "7d    ╌╌╌╌╌╌╌╌╌╌╌╌   --  reading now", ""]);
+    // Stale: the figures stay, over the time they date from and the reason.
+    expect(block(150, "stale")).toEqual(["5h    ━━━━━─┼─────  38%  resets in 2h10", "7d    ━━━────┼────  21%  resets Fri 09:00", "✗ as of 23:12 · Anthropic answered 429"]);
+    // Without --usage: the busiest processes on the same columns, one full core to a full gauge, and the machine's third row counts cores instead.
+    expect(block(150, "off")).toEqual(["top   ━━━━━━━━━━━━ 212%  bun", "      ━━━━━━━━━━━─  88%  node", "      ━━━━━───────  41%  tsc"]);
+    expect(head(150, 44, "off")[3].slice(0, 57).trimEnd()).toBe(" core ▅▅▄▄▃▃▃▃▄▄▆▆▆▆▇▇   16 cores");
+    // Extra usage off: the Opus and Sonnet weeks take the third row, but only when Anthropic returned them.
+    expect(block(150, "extraOff")[2]).toBe("extra off");
+    expect(block(150, "modelWeeks")[2]).toBe("opus  ━──────┼────  12%  sonnet 4%");
+    expect(block(150, "sonnetWeek")[2]).toBe("sonn… ━━━━━━━┿────  64%  resets Fri 09:00");
+    // 110 columns: the same block on narrower columns, with reasons cut rather than spilling under the lane.
+    expect(block(110, "none")).toEqual(["5h    ╌╌╌╌╌╌╌╌   --  no reading yet", "7d    ╌╌╌╌╌╌╌╌   --  next try 23:56", "✗ keychain: no answer in 5s"]);
+    expect(block(110, "stale")[2]).toBe("✗ as of 23:12 · Anthropic answered …");
+    expect(block(110, "off")).toEqual(["top   ━━━━━━━━ 212%  bun", "      ━━━━━━━─  88%  node", "      ━━━─────  41%  tsc"]);
+  });
+
+  test("stale figures are drawn dim, a limit from 60% is bold white and from 80% red, and CPU never turns warm", () => {
+    const stale = raw(150, 44, "stale");
+    expect(stale[1]).toContain(F.fg(F.C.dim, "━━━━━") + F.fg(F.C.faint, "─") + F.fg(F.C.dim, "┼") + F.fg(F.C.faint, "─────")); // the fill and the tick recede
+    expect(stale[1]).toContain(F.fg(F.C.dim, "38%"));
+    expect(stale[3]).toContain(F.fg(F.C.red, "✗ ") + F.fg(F.C.dim, "as of 23:12 · Anthropic answered 429"));
+    const early = raw(150, 44, "early");
+    expect(early[1]).toContain(F.fg(F.C.red, "━━━━━━━━") + F.fg(F.C.white, "┿") + F.fg(F.C.red, "━") + F.fg(F.C.faint, "──"));
+    expect(early[1]).toContain(F.bold(F.fg(F.C.red, "86%")));
+    expect(raw(150, 44, "sonnetWeek")[3]).toContain(F.bold(F.fg(F.C.white, "64%")));
+    expect(raw(150, 44)[1]).toContain(F.fg(F.C.calm, "━━━━━") + F.fg(F.C.faint, "─") + F.fg(F.C.white, "┼")); // 38%: calm, with a white tick
+    // The machine at 100% CPU: still the cool ramp. Memory at 85% is a limit, and red.
+    const hot = draw("current", () => {
+      Object.assign(F.machine, { cpu: 100, cores: MACHINE.cores.map(() => 100), hist: MACHINE.hist.map(() => 100), memUsed: 0.85 * MACHINE.memTotal });
+      return F.header(fleet(), 150, 44, NOW, NOW - WINDOW);
+    });
+    for (const warm of [F.C.amber, F.C.red]) expect(hot[1]).not.toContain(F.fg(warm, "━").slice(0, -5));
+    expect(hot[1]).toContain(F.fg(F.coolTone(0.75), "━".repeat(12)));
+    expect(hot[2]).toContain(F.fg(F.C.red, "━".repeat(10)));
+    expect(hot[2]).toContain(F.bold(F.fg(F.C.red, "85%")));
+  });
+
+  test("runway in the header: pace ticks on the 5h and 7d gauges, and 'full in' in bold red when the limit fills before it resets", () => {
+    expect(strip(F.limitGauge(38, 12, 170 / 300))).toBe("━━━━━─┼─────"); // 2h50 of 5 hours gone, 38% used: under pace, ┼ on the track
+    expect(strip(F.limitGauge(86, 12, 215 / 300))).toBe("━━━━━━━━┿━──"); // the fill has passed the tick: ┿
+    expect(strip(F.limitGauge(38, 12))).toBe("━━━━━───────"); // no tick without a reset time
+    expect(strip(F.limitGauge(undefined, 12))).toBe("╌".repeat(12));
+    expect(strip(F.limitGauge(0, 8, 0))).toBe("┼───────");
+    expect(strip(F.limitGauge(100, 8, 1))).toBe("━━━━━━━┿");
+    for (const w of [6, 8, 12, 16]) for (const pct of [0, 1, 50, 99, 100, 140]) expect(F.cells(F.limitGauge(pct, w, 0.5))).toBe(w);
+    expect(block(150, "early")).toEqual(["5h    ━━━━━━━━┿━──  86%  full in ~35m", "7d    ━━━────┼────  21%  resets Fri 09:00", "extra ━━━─────────  24%  £12 of £50"]);
+    expect(raw(150, 44, "early")[1]).toContain(F.bold(F.fg(F.C.red, "full in ~35m")));
+    expect(block(110, "early")[0]).toBe("5h    ━━━━━┿━─  86%  full in ~35m");
+    expect(head(150, 34, "early")[1]).toContain("5h ━━━━━┿━─  86% ~35m   7d ━━───┼──  21% Fri 09:00"); // the medium header has room for the figure alone
+    expect(block(150, "stale")[0]).not.toContain("full in"); // no forecast from stale figures
+  });
+
+  test("the usage read that fails with a remedy gets one dim line under the blocks, and the chart grows a row to stay on its axis", () => {
+    const remote = head(150, 44, "remote");
+    expect(remote.length).toBe(6);
+    expect(remote.slice(1, 4).map((l) => l.slice(60, 104).trimEnd())).toEqual(["5h    ╌╌╌╌╌╌╌╌╌╌╌╌   --  no reading yet", "7d    ╌╌╌╌╌╌╌╌╌╌╌╌   --  next try 23:56", "✗ keychain: closed to remote sessions (ssh/…"]);
+    expect(remote[4].slice(0, 104).trimEnd()).toBe(" run: security unlock-keychain ~/Library/Keychains/login.keychain-db · or use a tmux started on the Mac");
+    expect(remote[4].slice(106, 136)).toMatch(/^[▁▂▃▄▅▆▇█]{30}$/); // the chart's bottom row, directly above the axis
+    expect(remote[5]).toBe(TALL_150[4]);
+    expect(raw(150, 44, "remote")[4]).toContain(F.fg(F.C.dim, "run: security unlock-keychain ~/Library/Keychains/login.keychain-db · or use a tmux started on the Mac"));
+    // Stale figures and a closed keychain: the same line. Fresh figures from another dashboard: nothing is wrong on screen, so no line.
+    expect(head(150, 44, "staleRemote").length).toBe(6);
+    expect(head(150, 44, "shared")).toEqual(TALL_150);
+    // Other reasons have no remedy, so no line.
+    expect([head(150, 44, "none").length, head(150, 44, "stale").length]).toEqual([5, 5]);
+    // Medium: one more row, with the chart two rows tall. Narrow: the command is the last thing to be cut.
+    const medium = head(150, 34, "remote");
+    expect(medium.length).toBe(4);
+    expect(medium[1]).toContain("load 14.6    ✗ keychain: closed to remote sessions (ssh/mosh)");
+    expect(medium[2].slice(0, 104).trimEnd()).toBe(remote[4].slice(0, 104).trimEnd());
+    expect(head(110, 44, "remote")[4].slice(0, 77).trimEnd()).toBe(" run: security unlock-keychain ~/Library/Keychains/login.keychain-db");
+  });
+
+  test("the fleet chart: linear against its own peak, in the lane, with its totals and the bar length", () => {
+    expect(F.fleetChart(FLEET, 3).map(strip)).toEqual(TALL_150.slice(1, 4).map((l) => l.slice(106, 136)));
+    expect(F.fleetChart(FLEET, 1).map(strip)).toEqual([MEDIUM_150[1].slice(106, 136)]);
+    // Linear: a bar a quarter of the peak is a quarter of the height (24 levels over three rows), where a square-root sparkline would draw half.
+    expect(F.fleetChart([24, 6, 1, 0], 3).map(strip)).toEqual(["█   ", "█   ", "█▆▁▁"]);
+    expect(F.fleetChart([24, 6, 1, 0], 3)[2]).toContain(F.fg(F.C.faint, "▁")); // an empty bar is a faint ▁ on the bottom row
+    expect(F.fleetChart([0, 0], 2).map(strip)).toEqual(["  ", "▁▁"]);
+    for (const [W, laneW] of [[150, 30], [110, 20], [130, 30], [200, 30]]) {
+      const g = F.grid(W);
+      const rows = head(W, 44);
+      expect(g.laneW).toBe(laneW);
+      for (const line of rows.slice(1, 4)) expect(line.padEnd(W).slice(g.figEnd - 5, g.figEnd)).toMatch(/tools$| out$| bar$/); // figures end at the figure field's last column
+      expect(rows[3].slice(g.lane - 1, g.laneEnd)).toMatch(new RegExp(`^[▁▂▃▄▅▆▇█]{${laneW}}$`));
+    }
+    // The bar length follows the window: 30 bars at 150 columns, 20 at 110.
+    const barOf = (W: number, windowMin: number) => head(W, 44, "current", fleet(F.grid(W).laneW), { windowMin })[3].trimEnd().split(/\s{2,}/).pop();
+    expect([5, 15, 30, 60, 180].map((m) => barOf(150, m))).toEqual(["10s a bar", "30s a bar", "1m a bar", "2m a bar", "6m a bar"]);
+    expect([5, 15, 30, 60, 180].map((m) => barOf(110, m)?.trim().split(" ").slice(-3).join(" "))).toEqual(["15s a bar", "45s a bar", "90s a bar", "3m a bar", "9m a bar"]);
+  });
+
+  test("the rule is the time axis: the window, a tick at each third, now; the mark for when you last looked; the digest of what is new", () => {
+    const ev = (kind: F.EventKind, n: number): F.FleetEvent[] => Array.from({ length: n }, (_, i) => ({ kind, t: NOW - i, sid: "a", key: `${kind}${i}` }));
+    const axis = (W: number, seenAt: number, events: F.FleetEvent[] = [], windowMin = 30) =>
+      draw("current", () => {
+        Object.assign(F.seen, { at: seenAt, events });
+        return strip(F.header(fleet(F.grid(W).laneW), W, 44, NOW, NOW - WINDOW).at(-1)!);
+      }, { windowMin });
+    expect(axis(150, NOW)).toBe(TALL_150[4]); // just looked: nothing new, and the mark does not sit on "now"
+    expect(axis(110, NOW)).toBe(TALL_110[4]);
+    expect(axis(150, NOW, [], 180).slice(105)).toBe(" 180m ─────┴─────────┴───── now ────────────");
+    // The design's own digest row, 17 minutes after looking: the mark falls in the lane's bar for 23:34.
+    const news = [...ev("asked", 1), ...ev("agentDone", 3), ...ev("reply", 4)];
+    expect(axis(150, NOW - 17 * MIN, news)).toBe(" ── since 23:34  ·  ▲ 1 asked  ·  ✓ 3 agents done  ·  ◆ 4 new replies ─────────────────────────────────── 30m ──────┴─▼───────┴───── now ────────────");
+    const rule = draw("current", () => {
+      Object.assign(F.seen, { at: NOW - 17 * MIN, events: news });
+      return F.header(fleet(), 150, 44, NOW, NOW - WINDOW).at(-1)!;
+    });
+    expect(rule).toContain(F.bold(F.fg(F.C.white, "▼")));
+    expect(rule).toContain(F.bold(F.fg(F.C.amber, "▲ ")) + F.fg(F.C.text, "1 asked"));
+    // The mark with nothing new: still drawn. On a tick it takes the tick's place. Under either label it gives way.
+    expect(axis(150, NOW - 17 * MIN).slice(105)).toBe(" 30m ──────┴─▼───────┴───── now ────────────");
+    expect(axis(150, NOW - 19 * MIN).slice(105)).toBe(" 30m ──────▼─────────┴───── now ────────────");
+    for (const minutes of [0, 1, 2, 3, 27, 28, 29, 31, 60]) expect(axis(150, NOW - minutes * MIN)).toBe(TALL_150[4]);
+    // Order: asked, failed, stalled, finished, new replies; as many as fit before the lane, whole groups only.
+    const everything = [...ev("reply", 2), ...ev("agentDone", 1), ...ev("workflowDone", 1), ...ev("stalled", 1), ...ev("failed", 2), ...ev("asked", 1)];
+    expect(axis(200, NOW - 17 * MIN, everything)).toContain(" ── since 23:34  ·  ▲ 1 asked  ·  ✗ 2 failed  ·  ◐ 1 stalled  ·  ✓ 1 workflow done  ·  ✓ 1 agent done  ·  ◆ 2 new replies ──");
+    expect(axis(150, NOW - 17 * MIN, everything)).toContain(" ── since 23:34  ·  ▲ 1 asked  ·  ✗ 2 failed  ·  ◐ 1 stalled  ·  ✓ 1 workflow done ───");
+    expect(axis(110, NOW - 17 * MIN, everything)).toBe(" ── since 23:34  ·  ▲ 1 asked  ·  ✗ 2 failed  ·  ◐ 1 stalled ───────────────── 30m ──┴▼────┴─── now ─────────");
+  });
+
+  test("nothing in the header reaches the lane or the edge, at any width, in any account state", () => {
+    const fleets = { 20: fleet(20, { stalled: true }), 30: fleet(30, { stalled: true }) };
+    for (let W = 100; W <= 220; W++) {
+      const g = F.grid(W);
+      for (const rows of [30, 44])
+        for (const account of Object.keys(ACCOUNT)) {
+          const lines = head(W, rows, account, fleets[g.laneW as 20 | 30]);
+          const where = `${W}x${rows} ${account}`;
+          const remedy = account === "remote" || account === "staleRemote" ? 1 : 0;
+          expect([where, lines.length]).toEqual([where, (rows >= 40 ? 5 : 3) + remedy]);
+          for (const line of lines) expect([where, F.width(line) <= W - 1]).toEqual([where, true]); // column W stays blank
+          for (const line of lines.slice(1, -1)) {
+            const cells = line.padEnd(W);
+            expect([where, cells.slice(g.textEnd, g.lane - 1)]).toEqual([where, "  "]); // the two cells before the lane
+            expect([where, cells[0], cells[g.laneEnd]]).toEqual([where, " ", " "]); // column 1, and the cell between the lane and the figures
+          }
+          expect([where, lines.at(-1)!.slice(g.lane - 1, g.lane + 3)]).toEqual([where, "30m "]);
+          expect([where, lines.join("\n").includes("undefined") || lines.join("\n").includes("NaN")]).toEqual([where, false]);
+        }
+    }
+  });
+
+  test("the button bar carries the hidden count, and its labels shorten in two steps", () => {
+    const bar = (W: number, idle = 1, account = "current") => draw(account, () => strip(F.buttonBar(W, 44, idle)).trimEnd());
+    expect(bar(150)).toBe("  1 Detail   2 Compact   3 Far    −  30m  +    a All · 1 idle   d Finished agents   b Bell   space Seen   ? Legend    q Quit");
+    expect(bar(110)).toBe("  1   2   3    −  30m  +    a All · 1 idle   d Done   b Bell   space Seen   ?    q Quit");
+    expect(bar(80, 1, "remote")).toBe("  1   2   3    −  30m  +    a   d   b   u   space   ?    q");
+    // "u Retry usage" is there only while a usage read is failing, whatever figures are on screen.
+    expect([bar(170, 1, "none"), bar(170, 1, "stale"), bar(170, 1, "shared")].map((b) => b.includes(" u Retry usage "))).toEqual([true, true, true]);
+    expect([bar(170), bar(170, 1, "off")].map((b) => b.includes("Retry"))).toEqual([false, false]);
+    expect(bar(120, 1, "none")).toContain(" u Retry ");
+    for (let W = 80; W <= 200; W += 5) for (const account of ["current", "none"]) expect(F.width(bar(W, 12, account))).toBeLessThanOrEqual(W);
+    // The line that used to name the hidden sessions is gone from every mode.
+    for (const mode of ["detail", "compact", "far"] as F.Mode[]) {
+      const frame = draw("current", () => F.render(fleet(), 150, 44, NOW).map(strip), { mode });
+      expect(frame.length).toBe(44);
+      expect(frame.join("\n")).not.toMatch(/hidden|a shows/);
+      expect(frame.at(-1)).toContain(" a All · 1 idle ");
+    }
+  });
+
+  test("key ?: the legend names every mark and key on one screen, at every terminal size", () => {
+    for (const [cols, rows] of SIZES) {
+      const lines = F.legend(cols, rows).map(strip);
+      expect(lines.length).toBe(rows);
+      for (const line of lines) expect(F.width(line)).toBeLessThanOrEqual(cols);
+      const text = lines.join("\n");
+      for (const word of ["needs you", "stalled?", "working", "your turn", "idle", "finished", "you", "Claude", "earlier", "live", "in progress", "not started", "done", "failed", "workflow", "no reading", "pace", "context", "rail"]) expect([cols, word, text.includes(word)]).toEqual([cols, word, true]);
+      for (const glyph of ["▲", "◐", "●", "▸", "○", "✓", "✗", "◆", "◇", "⠋", "≡", "━", "┼", "╌", "█", "▌", "░", "┴", "▼"]) expect([cols, glyph, text.includes(glyph)]).toEqual([cols, glyph, true]);
+      for (const key of ["1 2 3", "+ -", "a ", "d ", "tab", "b ", "u ", "space", "? ", "q "]) expect([cols, key, lines.some((l) => l.includes(key))]).toEqual([cols, key, true]);
+      expect(lines.at(-1)).toContain("any key or click returns");
+    }
+    // With --plain-glyphs it shows the stand-ins the screen is drawing.
+    F.setPlainGlyphs(true);
+    try {
+      const text = F.legend(150, 44).map(strip).join("\n");
+      for (const missing of ["≡", "╌", "┿"]) expect(text).not.toContain(missing);
+      expect(text).toContain("◇ workflow"); // ≡ → ◇
+      expect(text).toContain("◆ earlier"); // ◇ → ◆
+    } finally {
+      F.setPlainGlyphs(false);
+    }
+  });
+
+  // Sessions with names, places and words, for the rows under the header.
+  const say = (t: number, text: string, branch: string) => ({ ...reply(t, text, 372_000), gitBranch: branch });
+  function story(): F.Session[] {
+    const quick = (id: string, label: string) => agentOf(id, tailOf([toolCall(NOW - 9_000), toolResult(NOW - 8_000)]), { label, type: "workflow-subagent", model: "opus", wf: "wf_1", phase: "Fix" });
+    const reviewer = agentOf("w5", tailOf([toolCall(NOW - 4 * MIN, "Bash", { description: "Run the refund tests 200 times under load" })]), { label: "review:clock-in-refund", type: "workflow-subagent", model: "opus", wf: "wf_1", phase: "Fix" });
+    const passed = ["w1", "w2"].map((id) => agentOf(id, tailOf([toolCall(NOW - 12 * MIN), toolResult(NOW - 12 * MIN + 1)]), { label: id, wf: "wf_1", phase: "Reproduce", done: true }));
+    const wf: F.Workflow = { id: "wf_1", name: "bisect-and-fix", status: "running", phase: "Fix", phases: [], seen: ["Reproduce", "Fix"], started: NOW - 14 * MIN - 20_000, finished: 0, agents: [...passed, quick("w3", "fix:clock-in-refund"), quick("w4", "fix:retry-backoff"), reviewer], lastT: NOW - 8_000 };
+    return [
+      sessionOf({ sid: "aaaaaaaa-1", name: "checkout flow redesign", status: "idle", job: { state: "blocked", detail: "migration drafted and tested against a copy", needs: "Approve dropping the legacy coupon_code column before I run the migration?" }, mains: [tailOf([say(NOW - 6 * MIN - 20_000, "The migration is written.", "feature/checkout-v2")])] }),
+      sessionOf({ sid: "cccccccc-3", name: "docs site search", kind: "interactive", cwd: "/work/docs", startedAt: NOW - 22 * MIN - 20_000, mains: [tailOf([{ ...prompt(NOW - 29 * MIN, "why does search miss pages added this week?"), gitBranch: "main" }, toolCall(NOW - 20_000), toolResult(NOW - 19_000)])], agents: [agentOf("s1", tailOf([toolCall(NOW - 9_000), toolResult(NOW - 8_000)]), { label: "Find where the search index is built" }), agentOf("s3", tailOf([toolCall(NOW - 9 * MIN), toolResult(NOW - 9 * MIN + 1)]), { label: "List pages added since the last release", done: true })] }),
+      sessionOf({ sid: "bbbbbbbb-2", name: "flaky test hunt", job: { state: "working", detail: "bisecting the three payment tests that fail one run in twenty", needs: "" }, mains: [tailOf([say(NOW - 2 * MIN - 20_000, "Two of the three share a cause.", "fix/flaky-payments"), toolCall(NOW - 2 * MIN, "Workflow", { description: "Bisect and fix the flaky payment tests" })])], workflows: [wf], tasks: { done: 2, doing: 1, total: 6, active: "Fixing the clock-dependent tests" } }),
+      sessionOf({ sid: "eeeeeeee-5", name: "release notes draft", kind: "interactive", status: "idle", cwd: "/work/docs", mains: [tailOf([prompt(NOW - 14 * MIN, "draft the release notes"), say(NOW - 12 * MIN - 20_000, "The draft is in docs/releases/4.2.md. Shall I open a pull request?", "docs/release-4.2")])] }),
+      sessionOf({ sid: "dddddddd-4", name: "rename billing module", status: "idle", job: { state: "done", detail: "merged", needs: "" }, mains: [tailOf([say(NOW - 50 * MIN, "Merged.", "main")])] }),
+    ];
+  }
+  const screen = (mode: F.Mode, cols = 150, rows = 44, all = true) => draw("off", () => F.render(story(), cols, rows, NOW), { mode, all });
+
+  test("far cards: the state glyph leads the state word, the subheading says who is speaking, and the side column uses the one vocabulary", () => {
+    const rawFrame = screen("far", 150, 60);
+    const frame = rawFrame.map(strip);
+    const line = (text: string) => frame.find((l) => l.includes(text)) ?? "";
+    // Title row: the name from column 5, the state ending at column 149.
+    expect(line("C H E C K O U T")).toBe(" ██ C H E C K O U T   F L O W   R E D E S I G N" + " ".repeat(83) + "▲ N E E D S   Y O U ");
+    for (const state of ["● W O R K I N G", "▸ Y O U R   T U R N", "✓ F I N I S H E D"]) expect(frame.some((l) => l.endsWith(state) && F.width(l) === 149)).toBe(true);
+    expect(rawFrame.join("\n")).toContain(F.bold(F.fg(F.C.blue, "▸ Y O U R   T U R N"))); // blue, no longer purple
+    expect(rawFrame.join("\n")).not.toContain(F.fg(F.C.purple, "Y O U R"));
+    // Subheading: the question; the now-line; a promoted prompt led by ▸; a reply led by ◆.
+    expect(line("Approve dropping")).toBe(" ██ Approve dropping the legacy coupon_code column before I run the migration?" + " ".repeat(72));
+    expect(line("bisecting")).toBe(" ██ bisecting the three payment tests that fail one run in twenty");
+    expect(line("why does search")).toBe(" ██ ▸ why does search miss pages added this week?");
+    expect(line("The draft is in")).toBe(" ██ ◆ The draft is in docs/releases/4.2.md. Shall I open a pull request?");
+    // A waiting card is tinted across its whole width, on every one of its rows.
+    const top = frame.findIndex((l) => l.includes("C H E C K O U T"));
+    const height = frame.slice(top).findIndex((l) => l === "");
+    expect(height).toBeGreaterThanOrEqual(6);
+    for (const l of rawFrame.slice(top, top + height)) expect(l.startsWith("\x1b[48;2;52;38;0m") && F.cells(l) === 150).toBe(true);
+    // Side column from column 118: agents and workflows, context on the limit rule, the process tree, tool calls, tasks.
+    for (const text of ["○ 0 AGENTS", "⠋ 1 AGENT", "⠋ 3 AGENTS   ≡ 1 WORKFLOW", "CTX ━━━━━━────────── 37%", "CPU 0% · 0.0G", "3 tool calls / 30m", "✓✓◐○○○  2/6"]) expect([text, line(text).indexOf(text) + 1]).toEqual([text, 118]);
+    expect(rawFrame.join("\n")).toContain(F.fg(F.C.calm, "━".repeat(6))); // 37%: calm, never yellow
+    for (const retired of ["⚠", "⚙", "⎇"]) expect(frame.join("\n")).not.toContain(retired);
+    for (const l of frame) expect(F.width(l)).toBeLessThanOrEqual(150);
+  });
+
+  test("compact rows keep today's columns with the new glyphs and words", () => {
+    const rawFrame = screen("compact");
+    const frame = rawFrame.map(strip);
+    const text = frame.join("\n");
+    const line = (part: string) => frame.find((l) => l.includes(part)) ?? "";
+    // Session rows: the lead glyph is the state; the place uses @; the status cell has no second warning glyph.
+    expect(line("checkout flow")).toMatch(/^ ▲ checkout flow red…  bg aaaaaaaa    work\/shop @ feature\/c…  NEEDS YOU · 6m       [▁▂▃▄▅▆▇█]{25} +\d+ tools +\S+ out   ctx 37%/);
+    expect(line("flaky test hunt")).toMatch(/^ ● flaky test hunt     bg bbbbbbbb    work\/shop @ fix\/flaky…  working · up 1h04    /);
+    expect(line("docs site search")).toMatch(/^ ● docs site search    interactive …  work\/docs @ main        working · up 22m     /); // "busy" reads "working"
+    expect(line("release notes")).toMatch(/^ ▸ release notes dra…  interactive …  work\/docs @ docs\/rele…  your turn · 12m      /);
+    expect(line("rename billing")).toMatch(/^ ✓ rename billing mo…  bg dddddddd    work\/shop @ main        finished · 50m       /);
+    expect(rawFrame.join("\n")).toContain(F.bold(F.fg(F.C.amber, "NEEDS YOU · 6m     ")));
+    expect(rawFrame.join("\n")).toContain(F.fg(F.C.blue, "▸") + " "); // a your-turn row leads with a blue ▸
+    expect(rawFrame.join("\n")).toContain(F.fg(F.C.dim, "work/shop @ feature/c…")); // the place is dim, no longer blue
+    // The question: ▲ and bold white on the amber tint, under the session.
+    expect(line("Approve dropping")).toBe("   └─ ▲ Approve dropping the legacy coupon_code column before I run the migration? ");
+    expect(rawFrame.join("\n")).toContain(`\x1b[48;2;52;38;0m${F.bold(F.fg(F.C.amber, "▲"))}${F.bold(F.fg(F.C.white, " Approve dropping the legacy coupon_code column before I run the migration? "))}\x1b[49m`);
+    // Workflow row: ≡, the current phase as ◐ and its name, steps as ticks.
+    expect(line("bisect-and-fix")).toMatch(/^   └─ ≡ bisect-and-fix                     ◐ Fix                        ✓✓◐◐◐                2\/5     [▁▂▃▄▅▆▇█]{25}     up 14m/);
+    expect(rawFrame.join("\n")).toContain(F.fg(F.C.green, "✓✓") + F.fg(F.C.white, "◐◐◐"));
+    // Agent rows: live is a green spinner; a tool call outstanding is a white ◐ with the tool's name in cyan and its hint after it.
+    expect(line("fix:retry-backoff")).toMatch(/^      ├─ ⠋ fix:retry-backoff +workflow · opus +[▁▂▃▄▅▆▇█]{25}  thinking +live$/);
+    expect(line("review:clock-in-refund")).toMatch(/^      └─ ◐ review:clock-in-refund +workflow · opus +[▁▂▃▄▅▆▇█]{25}  Bash  Run the refund tests 200 times un… +4m$/);
+    expect(rawFrame.join("\n")).toContain(F.fg(F.C.white, "◐") + " " + F.fg(F.C.text, "review:clock-in-refund").slice(0, -5));
+    expect(rawFrame.join("\n")).toContain(F.fg(F.C.cyan, "Bash") + "  " + F.fg(F.C.text, "Run the refund tests 200 times un…"));
+    expect(line("agent finished")).toBe("   └─ ✓ 1 agent finished in the last 30m  ·  d lists them");
+    // None of the old vocabulary is left, and nothing but the needs-you marks is amber.
+    for (const old of ["⚠", "⚙", "⎇", "? needs you", "(d to list)", "busy ·", "phase ", "●●"]) expect([old, text.includes(old)]).toEqual([old, false]);
+    const amber = "\x1b[38;2;229;181;68m";
+    const amberText = rawFrame.join("\n").split(amber).slice(1).map((piece) => strip(piece.split("\x1b[39m")[0]).trim());
+    expect([...new Set(amberText)].sort()).toEqual(["NEEDS YOU · 6m", "▲", "▲ 1 needs you"]);
+    for (const l of frame) expect(F.width(l)).toBeLessThanOrEqual(150);
+  });
+
+  test("an ended workflow shows ✓ or ✗ in place of ≡, and step glyphs are ticks, never dots", () => {
+    expect(strip(F.pips(2, 1, 6, 6))).toBe("✓✓◐○○○");
+    expect(strip(F.pips(6, 0, 6, 6))).toBe("✓✓✓✓✓✓");
+    expect(F.cells(F.pips(40, 3, 60, 20))).toBe(20); // scaled past the width it is given
+    expect(F.pips(2, 1, 6, 6)).toContain(F.fg(F.C.white, "◐")); // in progress is white, never yellow
+    const ended = (status: string): F.Session[] => {
+      const s = story();
+      Object.assign(s[2].workflows[0], { status, finished: NOW - 2 * MIN, tokens: 412_000, agents: s[2].workflows[0].agents.map((a) => ({ ...a, done: true })) });
+      return s;
+    };
+    const row = (status: string) => draw("off", () => F.render(ended(status), 150, 44, NOW).map(strip).find((l) => l.includes("bisect-and-fix")) ?? "", { mode: "compact" });
+    expect(row("completed")).toMatch(/^   └─ ✓ bisect-and-fix +✓✓✓✓✓ +5\/5 +[▁▂▃▄▅▆▇█]{25}  completed   412k tok$/);
+    expect(row("failed")).toMatch(/^   └─ ✗ bisect-and-fix .* failed/);
+    expect(row("completed")).not.toContain("◐");
+  });
+
+  test("every mode's whole frame fits at every size with the new header, in every account state", () => {
+    for (const [cols, rows] of SIZES)
+      for (const mode of ["detail", "compact", "far"] as F.Mode[])
+        for (const account of ["current", "remote", "stale", "off"]) {
+          const frame = draw(account, () => F.render(story(), cols, rows, NOW), { mode, all: true });
+          const where = `${cols}x${rows} ${mode} ${account}`;
+          expect([where, frame.length]).toEqual([where, rows]);
+          for (const l of frame) expect([where, F.cells(l) <= cols]).toEqual([where, true]);
+        }
+  });
+});
+
 describe("demo", () => {
   const FIXED = String(NOW);
   const SLOW = 60_000; // these start processes; allow for a busy machine

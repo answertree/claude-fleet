@@ -2390,23 +2390,23 @@ export function limitGauge(pct: number | undefined, w: number, tick?: number, st
   if (pct === undefined) return fg(C.faint, ICON.gaugeNone.repeat(w));
   const filled = Math.max(pct > 0 ? 1 : 0, Math.min(w, Math.round((pct / 100) * w)));
   const at = tick === undefined ? undefined : paceCell(tick, pct, w);
-  let out = "";
-  for (let i = 0; i < w; i++) {
-    if (at && i === at.cell) out += fg(stale ? C.dim : C.white, at.glyph);
-    else out += i < filled ? fg(stale ? C.dim : limitTone(pct), ICON.gaugeFill) : fg(C.faint, ICON.gaugeTrack);
-  }
-  return out;
+  const fill = (from: number, to: number) => (to > from ? fg(stale ? C.dim : limitTone(pct), ICON.gaugeFill.repeat(to - from)) : "");
+  const track = (from: number, to: number) => (to > from ? fg(C.faint, ICON.gaugeTrack.repeat(to - from)) : "");
+  /** The cells from `from` up to `to`: the filled part, then the track. */
+  const part = (from: number, to: number) => fill(from, Math.min(to, filled)) + track(Math.max(from, filled), to);
+  return at ? part(0, at.cell) + fg(stale ? C.dim : C.white, at.glyph) + part(at.cell + 1, w) : part(0, w);
 }
-/** A gauge for a rate (CPU), where 100 is one whole: the cool ramp, brighter the busier, never warm. */
+/** A gauge for a rate (CPU), where 100 is one whole: one cool tone from the machine ramp, whatever the figure. A rate is not a limit, so it never turns warm. */
 export function rateGauge(pct: number, w: number): string {
   const filled = Math.max(pct > 0 ? 1 : 0, Math.min(w, Math.round((pct / 100) * w)));
-  return fg(coolTone(0.5 + Math.min(100, pct) / 200), ICON.gaugeFill.repeat(filled)) + fg(C.faint, ICON.gaugeTrack.repeat(w - filled));
+  return fg(coolTone(0.75), ICON.gaugeFill.repeat(filled)) + fg(C.faint, ICON.gaugeTrack.repeat(w - filled));
 }
 
 /**
  * The fleet chart: `h` rows, top row first. LINEAR against its own peak, eight levels a row, so a busy
  * minute towers over a quiet one (one-row sparklines of single sessions keep the square-root scale). A
- * bar with anything in it shows at least ▁; an empty one is a faint ▁ on the bottom row.
+ * bar with anything in it shows at least ▁; an empty one is a faint ▁ on the bottom row. With a single
+ * row there are only eight levels, so a bar rounds up, as it does in every other one-row sparkline.
  */
 export function fleetChart(counts: number[], h: number): string[] {
   const [lo, hi] = RAMP.fleet;
@@ -2417,7 +2417,7 @@ export function fleetChart(counts: number[], h: number): string[] {
       counts
         .map((v) => {
           const t = v / max;
-          const eighths = Math.max(v > 0 && r === 0 ? 1 : 0, Math.round(t * h * 8) - r * 8);
+          const eighths = Math.max(v > 0 && r === 0 ? 1 : 0, (h === 1 ? Math.ceil(t * 8) : Math.round(t * h * 8)) - r * 8);
           if (eighths <= 0) return r === 0 ? fg(C.faint, BARS[0]) : " ";
           return fg(mix(lo, hi, t), BARS[Math.min(7, eighths - 1)]);
         })
@@ -2458,7 +2458,7 @@ function masthead(g: Grid, c: FleetCounts, now: number): Row {
   let tiles: { name: string; parts: Seg[]; slot: number }[] = [
     { name: "working", parts: [[ICON.working, c.working ? C.green : C.dim], count(c.working), [" working", C.dim]], slot: 12 },
     { name: "agents", parts: [[c.agents ? SPIN[frame % SPIN.length] : ICON.idle, c.agents ? C.green : C.dim], count(c.agents), [` agent${c.agents === 1 ? "" : "s"}`, C.dim]], slot: 11 },
-    { name: "workflows", parts: [[ICON.workflow, c.workflows ? C.purple : C.dim, c.workflows > 0], count(c.workflows), [` workflow${c.workflows === 1 ? "" : "s"}`, C.dim]], slot: 13 },
+    { name: "workflows", parts: [[ICON.workflow, c.workflows ? C.purple : C.dim], count(c.workflows), [` workflow${c.workflows === 1 ? "" : "s"}`, C.dim]], slot: 13 },
     { name: "idle", parts: [[ICON.idle, C.dim], [` ${c.idle}`, C.dim], [" idle", C.dim]], slot: 9 },
   ];
   if (c.stalled) tiles.push({ name: "stalled", parts: [[ICON.progress, C.red], [` ${c.stalled}`, C.red, true], [" stalled?", C.red]], slot: 12 });
@@ -2872,7 +2872,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
           r.segs(sideAt, [
             [`${agentsLive ? SPIN[frame % SPIN.length] : ICON.idle} `, agentsLive ? C.green : dimHere],
             [`${agentsLive} AGENT${agentsLive === 1 ? "" : "S"}`, agentsLive ? C.text : dimHere, true],
-            ...(wfLive ? ([[`   ${ICON.workflow} `, C.purple, true], [`${wfLive} WORKFLOW${wfLive === 1 ? "" : "S"}`, C.purple]] as [string, RGB, boolean?][]) : []),
+            ...(wfLive ? ([[`   ${ICON.workflow} `, C.purple], [`${wfLive} WORKFLOW${wfLive === 1 ? "" : "S"}`, C.purple]] as [string, RGB][]) : []),
           ]),
       ];
       if (ctx)
@@ -2954,7 +2954,8 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
     const stalled = v.state === "stalled";
     // The lead glyph is the state: ▲ needs you, ◐ stalled, ● working, ▸ your turn, ○ idle, ✓ finished.
     const state = STATE[v.state];
-    const dot = v.state === "needs" ? bold(fg(state.color, state.glyph)) : fg(state.color, state.glyph);
+    const dot = fg(state.color, state.glyph);
+    const quietened = v.state === "yourTurn" || v.state === "idle" || v.state === "finished"; // their names recede to text colour
     const f = v.facts;
     const wide = W >= 120;
     const use = treeUsage(s.pid);
@@ -2984,7 +2985,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
       " " +
         dot +
         " " +
-        fg(busyNow ? C.white : C.text, bold(fit(s.name, nameW))) +
+        fg(quietened ? C.text : C.white, bold(fit(s.name, nameW))) +
         "  " +
         fg(C.dim, fit(`${s.kind || "cli"} ${s.sid.slice(0, 8)}`, idW)) +
         (whereW ? "  " + fg(C.dim, fit(where, whereW)) : "") +
