@@ -4351,6 +4351,9 @@ export function header(sessions: Session[], W: number, rows: number, now: number
   return [masthead(g, fleetCounts(sessions, now, win.start), now), ...body, axisRow(g, win)].map(String);
 }
 
+/** Terminals with at least this many rows get a blank row under the header; shorter ones need every row for sessions. */
+export const HEADER_GAP_MIN_ROWS = 30
+
 export function render(sessions: Session[], cols: number, rows: number, now: number): string[] {
   const W = Math.max(60, cols);
   const S = stripBars(W); // sparkline columns in compact rows
@@ -4369,9 +4372,12 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
 
   // The header: tall or medium in detail and far mode, the older lines in compact mode and under 100 columns.
   out.push(...header(sessions, W, rows, now, win));
+  // One clear row between the header and the sessions, in every mode, unless the terminal is too short to spare it.
+  const gap = rows >= HEADER_GAP_MIN_ROWS;
+  if (gap) out.push("");
 
   if (!shown.length) {
-    out.push("", fg(C.dim, all.length ? "   Nothing active and nothing waiting on you." : "   No live Claude Code sessions found in ~/.claude/sessions."));
+    out.push(...(gap ? [] : [""]), fg(C.dim, all.length ? "   Nothing active and nothing waiting on you." : "   No live Claude Code sessions found in ~/.claude/sessions."));
   }
 
   // Compact rows share these scales, so they can be compared with each other. Taken before rows are folded away to fit
@@ -4394,7 +4400,9 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
   if (opt.mode === "far") {
     // Big cards, readable from across the room: colour and shape carry the state.
     const H = Math.max(4, Math.min(11, Math.floor(avail / Math.max(1, shown.length))));
-    const fitCount = Math.max(1, Math.floor(avail / H));
+    // When some cards do not fit, the line that says so needs a row of its own, inside the rows given.
+    const fitAll = Math.max(1, Math.floor(avail / H));
+    const fitCount = fitAll >= shown.length ? fitAll : Math.max(1, Math.floor((avail - 1) / H));
     const cards = shown.slice(0, fitCount);
     const CW = Math.max(10, W - 40);
     const bars = farBars(CW, opt.windowMin * 60_000);

@@ -3528,6 +3528,25 @@ describe("one program: the header, the sessions and the buttons agree", () => {
     }
   });
 
+  test("a blank row sits under the header from 30 rows up, and far mode's 'more sessions' line stays inside the rows it was given", () => {
+    const crowd = (now: number) => [...fleet(now), ...fleet(now).map((s) => ({ ...s, sid: s.sid + "-2" })), ...fleet(now).map((s) => ({ ...s, sid: s.sid + "-3" }))];
+    const saved = { ...F.opt };
+    try {
+      for (const [cols, rows] of [[150, 29], [150, 30], [150, 34], [150, 44], [110, 44], [200, 60]]) {
+        for (const mode of MODES) {
+          Object.assign(F.opt, { mode, usage: false, windowMin: 30, showAll: true });
+          const frame = F.render(crowd(NOW), cols, rows, NOW).map(strip);
+          const head = F.header(crowd(NOW), Math.max(60, cols), rows, NOW).length;
+          // The row under the header is blank exactly when the terminal can spare it; the first session follows straight after otherwise.
+          expect([mode, cols, rows, frame[head] === ""]).toEqual([mode, cols, rows, rows >= F.HEADER_GAP_MIN_ROWS]);
+          if (mode === "far" && frame.some((l) => l.includes("not shown (screen full)"))) expect([cols, rows, frame[rows - 2].trim()]).toEqual([cols, rows, ""]);
+        }
+      }
+    } finally {
+      Object.assign(F.opt, saved);
+    }
+  });
+
   test("compact mode cuts a session only when one does not fit, and says so on a row of its own", () => {
     const views = () => F.buildViews(fleet(NOW), NOW);
     const need = F.sum(views().map(F.rowsOf));

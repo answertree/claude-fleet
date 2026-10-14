@@ -159,113 +159,111 @@
 <text x="1080.8" y="99" fill="#3a404a" textLength="42.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">─────</text>
 <text x="1122.8" y="99" fill="#5c6370" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> now</text>
 <text x="1164.8" y="99" fill="#3a404a" textLength="100.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">────────────</text>
-<rect x="14.0" y="104" width="8.4" height="18" fill="#342600"/>
-<rect x="22.4" y="104" width="16.8" height="18" fill="#342600"/>
-<text x="22.4" y="117" fill="#e5b544" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">██</text>
-<rect x="39.2" y="104" width="8.4" height="18" fill="#342600"/>
-<rect x="47.6" y="104" width="361.2" height="18" fill="#342600"/>
-<text x="47.6" y="117" fill="#f5f7fa" font-weight="700" textLength="361.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">C H E C K O U T   F L O W   R E D E S I G N</text>
-<rect x="408.8" y="104" width="100.8" height="18" fill="#342600"/>
-<rect x="509.6" y="104" width="378.0" height="18" fill="#342600"/>
-<text x="509.6" y="117" fill="#96825a" textLength="378.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">work/shop @ feature/checkout-v2 · bg aaaaaaaa</text>
-<rect x="887.6" y="104" width="159.6" height="18" fill="#342600"/>
-<rect x="1047.2" y="104" width="159.6" height="18" fill="#342600"/>
-<text x="1047.2" y="117" fill="#e5b544" font-weight="700" textLength="159.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▲ N E E D S   Y O U</text>
-<rect x="1206.8" y="104" width="42.0" height="18" fill="#342600"/>
-<text x="1206.8" y="117" fill="#96825a" textLength="42.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">  ·  </text>
-<rect x="1248.8" y="104" width="16.8" height="18" fill="#342600"/>
-<text x="1248.8" y="117" fill="#e5b544" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">6m</text>
-<rect x="1265.6" y="104" width="8.4" height="18" fill="#342600"/>
 <rect x="14.0" y="122" width="8.4" height="18" fill="#342600"/>
 <rect x="22.4" y="122" width="16.8" height="18" fill="#342600"/>
 <text x="22.4" y="135" fill="#e5b544" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">██</text>
 <rect x="39.2" y="122" width="8.4" height="18" fill="#342600"/>
-<rect x="47.6" y="122" width="621.6" height="18" fill="#342600"/>
-<text x="47.6" y="135" fill="#f5f7fa" font-weight="700" textLength="621.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">Approve dropping the legacy coupon_code column before I run the migration?</text>
-<rect x="669.2" y="122" width="235.2" height="18" fill="#342600"/>
-<rect x="904.4" y="122" width="16.8" height="18" fill="#342600"/>
-<text x="904.4" y="135" fill="#3a404a" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▁▁</text>
-<rect x="921.2" y="122" width="8.4" height="18" fill="#342600"/>
-<text x="921.2" y="135" fill="#6088c5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▄</text>
-<rect x="929.6" y="122" width="8.4" height="18" fill="#342600"/>
-<text x="929.6" y="135" fill="#5379b7" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▃</text>
-<rect x="938.0" y="122" width="8.4" height="18" fill="#342600"/>
-<text x="938.0" y="135" fill="#6a94d0" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▅</text>
-<rect x="946.4" y="122" width="8.4" height="18" fill="#342600"/>
-<text x="946.4" y="135" fill="#6088c5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▄</text>
-<rect x="954.8" y="122" width="8.4" height="18" fill="#342600"/>
-<text x="954.8" y="135" fill="#6a94d0" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▅</text>
-<rect x="963.2" y="122" width="8.4" height="18" fill="#342600"/>
-<text x="963.2" y="135" fill="#3a404a" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▁</text>
-<rect x="971.6" y="122" width="8.4" height="18" fill="#342600"/>
-<text x="971.6" y="135" fill="#6a94d0" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▅</text>
-<rect x="980.0" y="122" width="8.4" height="18" fill="#342600"/>
-<text x="980.0" y="135" fill="#5379b7" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▃</text>
-<rect x="988.4" y="122" width="8.4" height="18" fill="#342600"/>
-<text x="988.4" y="135" fill="#6088c5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▄</text>
-<rect x="996.8" y="122" width="8.4" height="18" fill="#342600"/>
-<text x="996.8" y="135" fill="#5379b7" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▃</text>
-<rect x="1005.2" y="122" width="8.4" height="18" fill="#342600"/>
-<text x="1005.2" y="135" fill="#6088c5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▄</text>
-<rect x="1013.6" y="122" width="8.4" height="18" fill="#342600"/>
-<text x="1013.6" y="135" fill="#5379b7" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▃</text>
-<rect x="1022.0" y="122" width="8.4" height="18" fill="#342600"/>
-<text x="1022.0" y="135" fill="#6088c5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▄</text>
-<rect x="1030.4" y="122" width="8.4" height="18" fill="#342600"/>
-<text x="1030.4" y="135" fill="#5379b7" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▃</text>
-<rect x="1038.8" y="122" width="16.8" height="18" fill="#342600"/>
-<text x="1038.8" y="135" fill="#3a404a" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▁▁</text>
-<rect x="1055.6" y="122" width="8.4" height="18" fill="#342600"/>
-<text x="1055.6" y="135" fill="#6088c5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▄</text>
-<rect x="1064.0" y="122" width="8.4" height="18" fill="#342600"/>
-<text x="1064.0" y="135" fill="#729dd8" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▆</text>
-<rect x="1072.4" y="122" width="8.4" height="18" fill="#342600"/>
-<text x="1072.4" y="135" fill="#3a404a" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▁</text>
-<rect x="1080.8" y="122" width="16.8" height="18" fill="#342600"/>
-<text x="1080.8" y="135" fill="#6a94d0" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▅▅</text>
-<rect x="1097.6" y="122" width="8.4" height="18" fill="#342600"/>
-<text x="1097.6" y="135" fill="#86b5ee" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▇</text>
-<rect x="1106.0" y="122" width="50.4" height="18" fill="#342600"/>
-<text x="1106.0" y="135" fill="#3a404a" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▁▁▁▁▁▁</text>
-<rect x="1156.4" y="122" width="58.8" height="18" fill="#342600"/>
-<text x="1156.4" y="135" fill="#c6cdd7" textLength="58.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">     43</text>
-<rect x="1215.2" y="122" width="50.4" height="18" fill="#342600"/>
-<text x="1215.2" y="135" fill="#96825a" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> tools</text>
+<rect x="47.6" y="122" width="361.2" height="18" fill="#342600"/>
+<text x="47.6" y="135" fill="#f5f7fa" font-weight="700" textLength="361.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">C H E C K O U T   F L O W   R E D E S I G N</text>
+<rect x="408.8" y="122" width="100.8" height="18" fill="#342600"/>
+<rect x="509.6" y="122" width="378.0" height="18" fill="#342600"/>
+<text x="509.6" y="135" fill="#96825a" textLength="378.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">work/shop @ feature/checkout-v2 · bg aaaaaaaa</text>
+<rect x="887.6" y="122" width="159.6" height="18" fill="#342600"/>
+<rect x="1047.2" y="122" width="159.6" height="18" fill="#342600"/>
+<text x="1047.2" y="135" fill="#e5b544" font-weight="700" textLength="159.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▲ N E E D S   Y O U</text>
+<rect x="1206.8" y="122" width="42.0" height="18" fill="#342600"/>
+<text x="1206.8" y="135" fill="#96825a" textLength="42.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">  ·  </text>
+<rect x="1248.8" y="122" width="16.8" height="18" fill="#342600"/>
+<text x="1248.8" y="135" fill="#e5b544" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">6m</text>
 <rect x="1265.6" y="122" width="8.4" height="18" fill="#342600"/>
-<text x="22.4" y="153" fill="#988047" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▌</text>
-<text x="47.6" y="153" fill="#5c6370" textLength="361.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">migration drafted and tested against a copy</text>
-<rect x="904.4" y="140" width="8.4" height="18" fill="#a8a8a8"/>
-<text x="904.4" y="153" fill="#787878" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▌</text>
-<rect x="912.8" y="140" width="8.4" height="18" fill="#4eba65"/>
-<text x="912.8" y="153" fill="#00cccc" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▌</text>
-<rect x="921.2" y="140" width="8.4" height="18" fill="#ffc107"/>
-<text x="921.2" y="153" fill="#d77757" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▌</text>
-<text x="929.6" y="153" fill="#b1b9f9" textLength="67.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">████████</text>
-<text x="996.8" y="153" fill="#3a404a" textLength="159.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">░░░░░░░░░░░░░░░░░░░</text>
-<text x="1156.4" y="153" fill="#c6cdd7" textLength="42.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">  37%</text>
-<text x="1198.4" y="153" fill="#5c6370" textLength="67.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> of 1.0M</text>
+<rect x="14.0" y="140" width="8.4" height="18" fill="#342600"/>
+<rect x="22.4" y="140" width="16.8" height="18" fill="#342600"/>
+<text x="22.4" y="153" fill="#e5b544" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">██</text>
+<rect x="39.2" y="140" width="8.4" height="18" fill="#342600"/>
+<rect x="47.6" y="140" width="621.6" height="18" fill="#342600"/>
+<text x="47.6" y="153" fill="#f5f7fa" font-weight="700" textLength="621.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">Approve dropping the legacy coupon_code column before I run the migration?</text>
+<rect x="669.2" y="140" width="235.2" height="18" fill="#342600"/>
+<rect x="904.4" y="140" width="16.8" height="18" fill="#342600"/>
+<text x="904.4" y="153" fill="#3a404a" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▁▁</text>
+<rect x="921.2" y="140" width="8.4" height="18" fill="#342600"/>
+<text x="921.2" y="153" fill="#6088c5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▄</text>
+<rect x="929.6" y="140" width="8.4" height="18" fill="#342600"/>
+<text x="929.6" y="153" fill="#5379b7" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▃</text>
+<rect x="938.0" y="140" width="8.4" height="18" fill="#342600"/>
+<text x="938.0" y="153" fill="#6a94d0" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▅</text>
+<rect x="946.4" y="140" width="8.4" height="18" fill="#342600"/>
+<text x="946.4" y="153" fill="#6088c5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▄</text>
+<rect x="954.8" y="140" width="8.4" height="18" fill="#342600"/>
+<text x="954.8" y="153" fill="#6a94d0" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▅</text>
+<rect x="963.2" y="140" width="8.4" height="18" fill="#342600"/>
+<text x="963.2" y="153" fill="#3a404a" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▁</text>
+<rect x="971.6" y="140" width="8.4" height="18" fill="#342600"/>
+<text x="971.6" y="153" fill="#6a94d0" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▅</text>
+<rect x="980.0" y="140" width="8.4" height="18" fill="#342600"/>
+<text x="980.0" y="153" fill="#5379b7" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▃</text>
+<rect x="988.4" y="140" width="8.4" height="18" fill="#342600"/>
+<text x="988.4" y="153" fill="#6088c5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▄</text>
+<rect x="996.8" y="140" width="8.4" height="18" fill="#342600"/>
+<text x="996.8" y="153" fill="#5379b7" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▃</text>
+<rect x="1005.2" y="140" width="8.4" height="18" fill="#342600"/>
+<text x="1005.2" y="153" fill="#6088c5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▄</text>
+<rect x="1013.6" y="140" width="8.4" height="18" fill="#342600"/>
+<text x="1013.6" y="153" fill="#5379b7" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▃</text>
+<rect x="1022.0" y="140" width="8.4" height="18" fill="#342600"/>
+<text x="1022.0" y="153" fill="#6088c5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▄</text>
+<rect x="1030.4" y="140" width="8.4" height="18" fill="#342600"/>
+<text x="1030.4" y="153" fill="#5379b7" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▃</text>
+<rect x="1038.8" y="140" width="16.8" height="18" fill="#342600"/>
+<text x="1038.8" y="153" fill="#3a404a" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▁▁</text>
+<rect x="1055.6" y="140" width="8.4" height="18" fill="#342600"/>
+<text x="1055.6" y="153" fill="#6088c5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▄</text>
+<rect x="1064.0" y="140" width="8.4" height="18" fill="#342600"/>
+<text x="1064.0" y="153" fill="#729dd8" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▆</text>
+<rect x="1072.4" y="140" width="8.4" height="18" fill="#342600"/>
+<text x="1072.4" y="153" fill="#3a404a" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▁</text>
+<rect x="1080.8" y="140" width="16.8" height="18" fill="#342600"/>
+<text x="1080.8" y="153" fill="#6a94d0" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▅▅</text>
+<rect x="1097.6" y="140" width="8.4" height="18" fill="#342600"/>
+<text x="1097.6" y="153" fill="#86b5ee" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▇</text>
+<rect x="1106.0" y="140" width="50.4" height="18" fill="#342600"/>
+<text x="1106.0" y="153" fill="#3a404a" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▁▁▁▁▁▁</text>
+<rect x="1156.4" y="140" width="58.8" height="18" fill="#342600"/>
+<text x="1156.4" y="153" fill="#c6cdd7" textLength="58.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">     43</text>
+<rect x="1215.2" y="140" width="50.4" height="18" fill="#342600"/>
+<text x="1215.2" y="153" fill="#96825a" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> tools</text>
+<rect x="1265.6" y="140" width="8.4" height="18" fill="#342600"/>
 <text x="22.4" y="171" fill="#988047" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▌</text>
-<text x="47.6" y="171" fill="#61aaff" font-weight="700" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▸</text>
-<text x="64.4" y="171" fill="#96bef5" textLength="554.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">move coupons to the new promotions table and remove the old column</text>
-<text x="862.4" y="171" fill="#5c6370" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">29m</text>
-<text x="904.4" y="171" fill="#b1b9f9" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">■ </text>
-<text x="921.2" y="171" fill="#5c6370" textLength="109.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">Messages 337k</text>
-<text x="1047.2" y="171" fill="#a8a8a8" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">■ </text>
-<text x="1064.0" y="171" fill="#5c6370" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">Tools 18k</text>
-<text x="1156.4" y="171" fill="#d77757" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">■ </text>
-<text x="1173.2" y="171" fill="#5c6370" textLength="92.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">Memory 5.5k</text>
+<text x="47.6" y="171" fill="#5c6370" textLength="361.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">migration drafted and tested against a copy</text>
+<rect x="904.4" y="158" width="8.4" height="18" fill="#a8a8a8"/>
+<text x="904.4" y="171" fill="#787878" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▌</text>
+<rect x="912.8" y="158" width="8.4" height="18" fill="#4eba65"/>
+<text x="912.8" y="171" fill="#00cccc" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▌</text>
+<rect x="921.2" y="158" width="8.4" height="18" fill="#ffc107"/>
+<text x="921.2" y="171" fill="#d77757" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▌</text>
+<text x="929.6" y="171" fill="#b1b9f9" textLength="67.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">████████</text>
+<text x="996.8" y="171" fill="#3a404a" textLength="159.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">░░░░░░░░░░░░░░░░░░░</text>
+<text x="1156.4" y="171" fill="#c6cdd7" textLength="42.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">  37%</text>
+<text x="1198.4" y="171" fill="#5c6370" textLength="67.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> of 1.0M</text>
 <text x="22.4" y="189" fill="#988047" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▌</text>
-<text x="47.6" y="189" fill="#488790" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">◇</text>
-<text x="64.4" y="189" fill="#5c6370" textLength="747.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">The new promotions table is in place and every read now goes through it. All 212 checkout</text>
-<text x="870.8" y="189" fill="#5c6370" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">7m</text>
-<text x="887.6" y="189" fill="#c6cdd7" textLength="42.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">  12k</text>
-<text x="929.6" y="189" fill="#5c6370" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> out</text>
-<text x="963.2" y="189" fill="#3a404a" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> · </text>
-<text x="988.4" y="189" fill="#5c6370" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">cpu 3%</text>
-<text x="1038.8" y="189" fill="#3a404a" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> · </text>
-<text x="1064.0" y="189" fill="#5c6370" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">0.1G</text>
+<text x="47.6" y="189" fill="#61aaff" font-weight="700" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▸</text>
+<text x="64.4" y="189" fill="#96bef5" textLength="554.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">move coupons to the new promotions table and remove the old column</text>
+<text x="862.4" y="189" fill="#5c6370" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">29m</text>
+<text x="904.4" y="189" fill="#b1b9f9" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">■ </text>
+<text x="921.2" y="189" fill="#5c6370" textLength="109.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">Messages 337k</text>
+<text x="1047.2" y="189" fill="#a8a8a8" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">■ </text>
+<text x="1064.0" y="189" fill="#5c6370" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">Tools 18k</text>
+<text x="1156.4" y="189" fill="#d77757" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">■ </text>
+<text x="1173.2" y="189" fill="#5c6370" textLength="92.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">Memory 5.5k</text>
 <text x="22.4" y="207" fill="#988047" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▌</text>
-<text x="64.4" y="207" fill="#5c6370" textLength="92.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">tests pass.</text>
+<text x="47.6" y="207" fill="#488790" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">◇</text>
+<text x="64.4" y="207" fill="#5c6370" textLength="764.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">The new promotions table is in place and every read now goes through it. All 212 checkout …</text>
+<text x="870.8" y="207" fill="#5c6370" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">7m</text>
+<text x="887.6" y="207" fill="#c6cdd7" textLength="42.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">  12k</text>
+<text x="929.6" y="207" fill="#5c6370" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> out</text>
+<text x="963.2" y="207" fill="#3a404a" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> · </text>
+<text x="988.4" y="207" fill="#5c6370" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">cpu 3%</text>
+<text x="1038.8" y="207" fill="#3a404a" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> · </text>
+<text x="1064.0" y="207" fill="#5c6370" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">0.1G</text>
 <text x="22.4" y="225" fill="#988047" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▌</text>
 <text x="47.6" y="225" fill="#56cdd6" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">◆</text>
 <text x="56.0" y="225" fill="#c6cdd7" textLength="814.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> The migration that drops coupon_code is written and has run cleanly against a copy of the       </text>
