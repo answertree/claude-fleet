@@ -67,12 +67,15 @@ Every control is a button on the bottom row, and each has a key.
 | `tab` | Focus the next session |
 | `b` | Ring the terminal bell when a session starts waiting on you |
 | `u` | Retry the usage read now (the button appears only while it is failing) |
+| `space` | Seen it. The button counts what is new since you last pressed it: sessions that started waiting on you, things that failed, stalled or finished, and new replies |
 | `esc` | Leave focus (or quit) |
 | `q` | Quit |
 
 Options: `--mode detail|compact|far`, `--all`, `--usage`, `--bell`, `--stall <minutes>`, `--no-mouse`, `--once` (print one frame and exit), and a number for the window in minutes. `bun fleet.ts --help` lists them.
 
 `bun fleet.ts --glyphs` prints a test card of every glyph the screen uses, each between two bars, so you can check that your terminal (an iPad over mosh, say) draws each one a single cell wide. If one is out of line, `--plain-glyphs` swaps in fallbacks for the four that fonts most often lack.
+
+While it runs, Claude Fleet sets the terminal's title to the fleet's state in the screen's own glyphs (`▲1 ●2 ≡1 Claude Fleet`: one waiting on you, two working, one workflow), so a tab or window switcher shows whether anything needs you. The title is cleared when you quit.
 
 Capturing clicks means a plain drag no longer selects text. Hold Shift (Option in iTerm2 and Terminal.app) while dragging, or start with `--no-mouse`.
 
@@ -115,6 +118,7 @@ These environment variables exist for tests and screenshots only:
 | `FLEET_HOME` | Look here instead of `~/.claude` (the demo uses it). |
 | `FLEET_NOW` | Pin the clock, in milliseconds since 1970, so `--once` prints the same frame every time. |
 | `FLEET_USAGE_FIXTURE` | Take the usage figures from this JSON file instead of reading the login and asking Anthropic. A `fetchedAt` in the file sets their age. Figures from a fixture are never saved to the shared file. |
+| `FLEET_SEEN` | Start the "seen" mark at this time (milliseconds since 1970) instead of at launch, so a single frame can show things as new. |
 | `FLEET_USAGE_FAIL` | Make the usage read fail with this reason. With `FLEET_USAGE_FIXTURE` also set, the fixture stands in for the shared file, which shows the "as of" state. |
 
 ## Licence

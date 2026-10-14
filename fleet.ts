@@ -49,7 +49,7 @@ Usage: bun fleet.ts [minutes] [options]
 
 Keys: 1 2 3 view mode · + - window · a all sessions · d finished agents
       tab focus next session · b bell · u retry the usage read
-      esc leave focus · q quit
+      space seen it (marks what is new from now on) · esc leave focus · q quit
 `;
 
 export type Mode = "detail" | "compact" | "far";
@@ -658,6 +658,7 @@ export interface Tail {
   ask?: { text: string; t: number }; // last thing the person typed
   say?: { text: string; t: number }; // last thing Claude wrote
   says: { text: string; t: number }[]; // its last few messages, oldest first
+  sayTs: number[]; // when each of its replies in the window was written, for "new since you looked"
   summary?: string; // the session's own "while you were away" summary
   summaryT?: number; // when it was written, so it can be compared with the last prompt
   ctx?: { used: number; model: string; req: string };
@@ -761,6 +762,7 @@ export function ingest(t: Tail, line: string) {
           t.say = { text: safeText(item.text), t: ts };
           t.says.push(t.say);
           if (t.says.length > 6) t.says.shift();
+          t.sayTs.push(ts);
         }
       if (u) {
         const used = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
@@ -818,6 +820,7 @@ export function newTail(file: string, start = 0, birth = 0): Tail {
     decoder: new StringDecoder("utf8"),
     tools: [],
     says: [],
+    sayTs: [],
     ctxLog: [],
     tokens: new Map(),
     lastResultT: 0,
@@ -874,6 +877,7 @@ function prune(now: number) {
   const cutoff = now - WINDOWS[WINDOWS.length - 1] * 60_000;
   for (const t of tails.values()) {
     if (t.tools.length && t.tools[0] < cutoff) t.tools = t.tools.filter((x) => x >= cutoff);
+    if (t.sayTs.length && t.sayTs[0] < cutoff) t.sayTs = t.sayTs.filter((x) => x >= cutoff);
     if (t.tokens.size > 5000) for (const [k, v] of t.tokens) if (v[0] < cutoff) t.tokens.delete(k);
   }
 }
@@ -916,6 +920,7 @@ export interface Session {
   workflows: Workflow[];
   tasks?: { done: number; doing: number; total: number; active: string };
   job?: { state: string; detail: string; needs: string };
+  jobId?: string;
 }
 
 const readJson = (f: string): any => {
@@ -1154,6 +1159,7 @@ export function scan(now: number): Session[] {
       workflows,
       tasks,
       job,
+      jobId: job ? String(reg.jobId) : undefined,
     });
   }
   return sessions;
@@ -2012,6 +2018,170 @@ export function newSince(known: Set<string>, current: string[]): string[] {
   return fresh;
 }
 
+// ───────────────────────── since you looked ─────────────────────────
+//
+// Unread marks for a screen you walk away from. The mark starts at launch and is moved by the space
+// key ("seen it"). What has happened since is a list built by comparing each scan with the one before.
+
+export type EventKind = "asked" | "failed" | "stalled" | "sessionDone" | "workflowDone" | "agentDone" | "reply";
+export interface FleetEvent {
+  kind: EventKind;
+  t: number; // when it happened, or when it was noticed if it was written before the mark
+  sid: string;
+  key: string; // what it happened to
+}
+export const seen = {
+  at: 0, // the mark: launch, then the last press of space
+  events: [] as FleetEvent[], // everything new since the mark, oldest first
+  known: new Map<string, string>(), // what each thing looked like at the last scan
+  primed: false, // false until the first scan has set the baseline
+};
+/** "Seen it": move the mark to now and forget what came before it. */
+export function markSeen(now: number) {
+  seen.at = now;
+  seen.events = [];
+}
+/** Is this timestamp new since you last looked? Replies newer than the mark get a bold ◆ and the word "new" for an age. */
+export const isNew = (t: number): boolean => t > seen.at;
+/** How many new things in total, for the button: "space Seen · 4 new". */
+export const newCount = (): number => seen.events.length;
+/** The lane cell the mark falls in, for the ▼ on the time axis; undefined when it is outside the window. */
+export function seenCell(win: Win): number | undefined {
+  const k = barOf(seen.at, win);
+  return k >= 0 && k < win.n ? k : undefined;
+}
+
+/** Whether a background job's own state word means it failed. */
+const jobFailed = (state: string) => /fail|error|crash/i.test(state);
+/**
+ * Compare this scan with the last and add what changed to the event list: a session started needing
+ * you, a session or workflow finished or failed, something stalled, an agent finished, Claude replied.
+ * The first scan only sets the baseline. `jobState` reads a background job's state after its session
+ * has gone, so a job that finishes and exits between two scans is not missed.
+ */
+export function noteScan(sessions: Session[], now: number, jobState: (jobId: string) => string | undefined = (id) => readJson(path.join(CLAUDE, "jobs", id, "state.json"))?.state) {
+  const next = new Map<string, string>();
+  const push = (kind: EventKind, sid: string, key: string, t: number) => {
+    if (t > seen.at) seen.events.push({ kind, t, sid, key });
+  };
+  /** Record what `key` looks like now; when that is a change into `kind`, it is an event. */
+  const track = (key: string, value: string, sid: string, kind: EventKind | undefined, t: number) => {
+    next.set(key, value);
+    const before = seen.known.get(key);
+    if (before === value || !kind) return;
+    // A change we watched happen is news even when its own timestamp is a moment older than the mark:
+    // it is then dated now. (A stall has no "before" record, so its first sighting counts as watched.)
+    // Something first seen already in this state is news only if it happened after the mark.
+    const watched = seen.primed && (before !== undefined || key.startsWith("stall:"));
+    push(kind, sid, key, watched && t <= seen.at ? now : t);
+  };
+  for (const s of sessions) {
+    const f = factsOf(s);
+    const asked = f.needs ? stateSince(s, f, "needs") : 0;
+    track(`ask:${s.sid}`, f.needs ? String(asked) : "-", s.sid, f.needs ? "asked" : undefined, asked);
+    if (s.job) {
+      const word = f.finished ? "done" : jobFailed(s.job.state) ? "failed" : "open";
+      track(`job:${s.sid}`, `${word}|${s.jobId ?? ""}`, s.sid, word === "done" ? "sessionDone" : word === "failed" ? "failed" : undefined, f.main ? lastWriteOf(f.main) : 0);
+    }
+    for (const wf of s.workflows) track(`wf:${s.sid}/${wf.id}`, wf.status, s.sid, wf.status === "running" ? undefined : wf.status === "completed" ? "workflowDone" : "failed", wf.finished || wf.lastT);
+    const stall = stallOf(s, f, now);
+    for (const k of stallKeys(s.sid, stall)) track(`stall:${k}`, "stalled", s.sid, "stalled", Math.min(now, stall.since + opt.stallMin * 60_000));
+    for (const a of [...s.agents, ...s.workflows.flatMap((w) => w.agents)]) track(`agent:${s.sid}/${a.id}`, a.done ? "done" : "running", s.sid, a.done ? "agentDone" : undefined, lastWriteOf(a.tail));
+    for (const m of s.mains) {
+      const key = `say:${m.path}`;
+      const noted = Number(seen.known.get(key) ?? 0);
+      for (const t of m.sayTs) if (t > noted) push("reply", s.sid, key, t); // a reply's own time, so the count matches the replies marked "new"
+      next.set(key, String(Math.max(noted, ...m.sayTs)));
+    }
+  }
+  // A background job whose session has gone since the last scan: ask its state file how it ended.
+  for (const [key, value] of seen.known) {
+    if (!key.startsWith("job:") || next.has(key)) continue;
+    const [word, jobId] = value.split("|");
+    if (word !== "open" || !/^[\w-]+$/.test(jobId)) continue;
+    const state = String(jobState(jobId) ?? "");
+    if (state === "done") push("sessionDone", key.slice(4), key, now);
+    else if (jobFailed(state)) push("failed", key.slice(4), key, now);
+  }
+  seen.known = next;
+  seen.primed = true;
+}
+
+export interface DigestGroup {
+  kind: "asked" | "failed" | "stalled" | "finished" | "replies";
+  glyph: string;
+  color: RGB;
+  count: number;
+  text: string; // "1 asked", "3 agents done", "4 new replies"
+}
+/**
+ * What has happened since the mark, as ordered groups for the header rule: asked, failed, stalled,
+ * finished (sessions, workflows, agents), new replies. Empty when nothing is new. `since` is the mark.
+ */
+export function digest(events: FleetEvent[] = seen.events, since = seen.at): { since: number; groups: DigestGroup[] } {
+  const n = (kind: EventKind) => events.filter((e) => e.kind === kind).length;
+  const some = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
+  const groups: DigestGroup[] = [
+    { kind: "asked", glyph: ICON.needs, color: C.amber, count: n("asked"), text: `${n("asked")} asked` },
+    { kind: "failed", glyph: ICON.failed, color: C.red, count: n("failed"), text: `${n("failed")} failed` },
+    { kind: "stalled", glyph: ICON.progress, color: C.red, count: n("stalled"), text: `${n("stalled")} stalled` },
+    { kind: "finished", glyph: ICON.done, color: C.green, count: n("sessionDone"), text: some(n("sessionDone"), "session done", "sessions done") },
+    { kind: "finished", glyph: ICON.done, color: C.green, count: n("workflowDone"), text: some(n("workflowDone"), "workflow done", "workflows done") },
+    { kind: "finished", glyph: ICON.done, color: C.green, count: n("agentDone"), text: some(n("agentDone"), "agent done", "agents done") },
+    { kind: "replies", glyph: ICON.claude, color: C.cyan, count: n("reply"), text: some(n("reply"), "new reply", "new replies") },
+  ];
+  return { since, groups: groups.filter((g) => g.count > 0) };
+}
+
+/** Sessions nobody needs to look at: finished background jobs, and idle sessions with nothing running under them. */
+export function isQuiet(s: Session, f: Facts, since: number): boolean {
+  if (f.needs) return false;
+  if (s.job) return s.job.state === "done";
+  if (s.status === "busy") return false;
+  const shown = s.workflows.filter((wf) => (wf.status === "running" ? wf.lastT : Math.max(wf.finished, wf.lastT)) >= since);
+  return !shown.some((wf) => wf.status === "running") && ![...s.agents, ...shown.flatMap((wf) => wf.agents)].some((a) => !a.done && lastWriteOf(a.tail) >= since);
+}
+
+/** The masthead's counts. Every session is in exactly one of needs, stalled, working or idle. */
+export interface FleetCounts {
+  sessions: number;
+  needs: number; // waiting on you
+  stalled: number; // working, but something in them is stuck
+  working: number; // on screen and not waiting on you
+  idle: number; // the idle and finished sessions kept off the screen (shown with a)
+  agents: number; // agents running in the window
+  workflows: number; // workflows running in the window
+}
+export function fleetCounts(sessions: Session[], now: number, since = now - opt.windowMin * 60_000): FleetCounts {
+  const c: FleetCounts = { sessions: sessions.length, needs: 0, stalled: 0, working: 0, idle: 0, agents: 0, workflows: 0 };
+  for (const s of sessions) {
+    const f = factsOf(s);
+    const state = sessionState(f, stallOf(s, f, now).count > 0);
+    if (state === "needs") c.needs++;
+    else if (isQuiet(s, f, since)) c.idle++;
+    else if (state === "stalled") c.stalled++;
+    else c.working++;
+    c.agents += [...s.agents, ...s.workflows.flatMap((w) => w.agents)].filter((a) => !a.done && lastWriteOf(a.tail) >= since).length;
+    c.workflows += s.workflows.filter((w) => w.status === "running" && w.lastT >= since).length;
+  }
+  return c;
+}
+
+/** The terminal title: the fleet's state in the screen's own glyphs, so a tab or window switcher shows whether anything needs you. */
+export function titleFor(c: Pick<FleetCounts, "needs" | "stalled" | "working" | "workflows">): string {
+  const parts = [c.needs ? `${ICON.needs}${c.needs}` : "", c.stalled ? `${ICON.progress}${c.stalled}` : "", c.working ? `${ICON.working}${c.working}` : "", c.workflows ? `${ICON.workflow}${c.workflows}` : ""];
+  return [...parts.filter(Boolean), "Claude Fleet"].join(" ");
+}
+/** The escape sequence (OSC 2) that sets the terminal title; an empty title clears it. */
+export const titleSequence = (title: string): string => `\x1b]2;${title}\x07`;
+let titleShown: string | undefined;
+/** What to write to move the title from what it shows now to `title`: nothing when it has not changed. */
+export function titleChange(title: string): string {
+  if (title === titleShown) return "";
+  titleShown = title;
+  return titleSequence(title);
+}
+
 export type AgentState = "active" | "tool" | "quiet" | "done";
 export function stateOf(a: Agent, now: number): AgentState {
   if (a.done) return "done";
@@ -2040,6 +2210,7 @@ export interface View {
   facts: Facts;
   state: SessionState;
   stall: Stall; // the stall watch's verdict: stall.count things are stalled in this session
+  quiet: boolean; // nobody needs to look at it: kept off the screen unless --all
   lastT: number;
 }
 
@@ -2082,19 +2253,15 @@ export function buildViews(sessions: Session[], now: number, sayWidth: number, s
         facts,
         state: sessionState(facts, stall.count > 0),
         stall,
+        quiet: isQuiet(s, facts, since),
         lastT,
       };
     })
     .sort(byState);
 }
 
-/** Sessions nobody needs to look at: finished background jobs, and idle sessions with nothing running under them. */
-export function isHidden(v: View): boolean {
-  if (v.facts.needs) return false;
-  if (v.s.job) return v.s.job.state === "done";
-  const liveChildren = v.groups.some((g) => (g.wf && g.wf.status === "running") || g.rows.some((a) => !a.done));
-  return v.s.status !== "busy" && !liveChildren;
-}
+/** Kept off the screen unless --all: see isQuiet(). */
+export const isHidden = (v: View): boolean => v.quiet;
 
 export const rowsOf = (v: View) =>
   1 +
@@ -2470,12 +2637,12 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
   }
   while (out.length < rows - 1) out.push("");
   out.length = rows - 1;
-  out.push(buttonBar(W, rows));
+  out.push(buttonBar(W, rows, all.filter(isHidden).length));
   return out;
 }
 
 /** The bottom row: every control, clickable, with its key. */
-export function buttonBar(W: number, row: number): string {
+export function buttonBar(W: number, row: number, idle = 0): string {
   const build = (short: boolean) => {
     const found: typeof hits = [];
     let x = 2;
@@ -2499,10 +2666,11 @@ export function buttonBar(W: number, row: number): string {
     plain(`${opt.windowMin}m `);
     add("+", "win+");
     plain(" ");
-    add(short ? "a" : "a All sessions", "all", opt.showAll);
+    add(short ? "a" : idle ? `a All · ${idle} idle` : "a All", "all", opt.showAll);
     add(short ? "d" : "d Finished agents", "done", opt.showDone);
     add(short ? "b" : "b Bell", "bell", opt.bell);
     if (opt.usage && usage.reason) add(short ? "u" : "u Retry usage", "usage");
+    add(short ? "space" : newCount() ? `space Seen · ${newCount()} new` : "space Seen", "seen");
     plain(" ");
     add(short ? "q" : "q Quit", "quit");
     return { line, used: x, found };
@@ -2529,6 +2697,7 @@ function refresh() {
   const facts = sessions.map((s) => ({ s, f: factsOf(s) }));
   const rings = newSince(needing, facts.filter((x) => x.f.needs).map((x) => x.s.sid)).length + newSince(stalledNow, facts.flatMap((x) => stallKeys(x.s.sid, stallOf(x.s, x.f, now)))).length;
   if (opt.bell && !opt.once) process.stdout.write("\x07".repeat(rings));
+  noteScan(sessions, now);
 }
 
 if (import.meta.main) {
@@ -2538,6 +2707,7 @@ if (import.meta.main) {
     process.exit(0);
   }
 
+  seen.at = Number(process.env.FLEET_SEEN) || clock(); // FLEET_SEEN (test only) starts the mark in the past
   if (opt.once) {
     sampleMachine();
     if (opt.usage) await fetchUsage();
@@ -2554,8 +2724,10 @@ if (import.meta.main) {
     const lines = render(sessions, out.columns || 140, out.rows || 45, clock());
     out.write("\x1b[H" + lines.map((l) => l + "\x1b[K").join("\n"));
   };
+  /** The tab title follows the fleet's state. It is written only when it changes, and cleared on the way out. */
+  const retitle = () => out.write(titleChange(titleFor(fleetCounts(sessions, clock()))));
   const restore = () => {
-    out.write((opt.mouse ? "\x1b[?1000l\x1b[?1006l" : "") + "\x1b[?25h\x1b[?1049l");
+    out.write(titleSequence("") + (opt.mouse ? "\x1b[?1000l\x1b[?1006l" : "") + "\x1b[?25h\x1b[?1049l");
     if (process.stdin.isTTY) process.stdin.setRawMode(false);
   };
   const quit = () => {
@@ -2573,6 +2745,7 @@ if (import.meta.main) {
     else if (name === "done") opt.showDone = !opt.showDone;
     else if (name === "all") opt.showAll = !opt.showAll;
     else if (name === "bell") opt.bell = !opt.bell;
+    else if (name === "seen") markSeen(clock());
     else if (name === "usage") {
       if (opt.usage) void fetchUsage().then(draw); // retry now, whatever the next try was set to
     } else if (name.startsWith("focus:")) focusSid = focusSid === name.slice(6) ? null : name.slice(6);
@@ -2590,10 +2763,14 @@ if (import.meta.main) {
 
   out.write("\x1b[?1049h\x1b[?25l\x1b[2J" + (opt.mouse ? "\x1b[?1000h\x1b[?1006h" : ""));
   refresh();
+  retitle();
   draw();
   setInterval(() => {
     frame++;
-    if (frame % 2 === 0) refresh();
+    if (frame % 2 === 0) {
+      refresh();
+      retitle();
+    }
     draw();
   }, 1000);
   out.on("resize", () => {
@@ -2608,7 +2785,7 @@ if (import.meta.main) {
     q: "quit", "\x03": "quit", "\x1b": "back", "\t": "next",
     "1": "mode:detail", "2": "mode:compact", "3": "mode:far",
     "+": "win+", "=": "win+", "-": "win-", _: "win-",
-    d: "done", a: "all", b: "bell", u: "usage",
+    d: "done", a: "all", b: "bell", u: "usage", " ": "seen",
   };
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(true);

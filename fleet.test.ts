@@ -975,3 +975,173 @@ describe("stall watch", () => {
     }
   });
 });
+
+describe("since you looked", () => {
+  const resetSeen = (at: number) => Object.assign(F.seen, { at, events: [], known: new Map(), primed: false });
+  const noJobs = () => undefined;
+  const blocked = { state: "blocked", detail: "", needs: "Approve?" };
+  const wfOf = (status: string, agents: F.Agent[], finished = 0): F.Workflow => ({ id: "wf_1", name: "bisect-and-fix", status, phase: "Fix", phases: [], seen: ["Fix"], started: NOW - 20 * MIN, finished, agents, lastT: NOW - MIN });
+  /** A thread that last wrote `min` minutes ago and holds a tool call. */
+  const thread = (min: number) => tailOf([toolCall(NOW - min * MIN)]);
+  const kinds = () => F.seen.events.map((e) => e.kind);
+
+  test("the mark starts where it is put, space moves it, and a timestamp is new when it is after the mark", () => {
+    resetSeen(NOW - 10 * MIN);
+    expect(F.isNew(NOW - 9 * MIN)).toBe(true);
+    expect(F.isNew(NOW - 10 * MIN)).toBe(false);
+    expect(F.isNew(NOW - 11 * MIN)).toBe(false);
+    F.seen.events.push({ kind: "reply", t: NOW - MIN, sid: "a", key: "say:a" });
+    expect(F.newCount()).toBe(1);
+    F.markSeen(NOW);
+    expect([F.seen.at, F.newCount(), F.isNew(NOW - MIN), F.isNew(NOW + 1)]).toEqual([NOW, 0, false, true]);
+  });
+
+  test("the first scan is the baseline: what was already so at launch is not news", () => {
+    resetSeen(NOW);
+    const s = sessionOf({ sid: "a", status: "idle", job: blocked, mains: [tailOf([reply(NOW - 3 * MIN, "Done."), toolCall(NOW - 2 * MIN)])], agents: [agentOf("s1", thread(5), { done: true })], workflows: [wfOf("completed", [], NOW - 4 * MIN)] });
+    F.noteScan([s], NOW, noJobs);
+    expect(F.seen.events).toEqual([]);
+    expect(F.newCount()).toBe(0);
+    expect(F.digest().groups).toEqual([]);
+    F.noteScan([s], NOW + 2000, noJobs); // nothing changed
+    expect(F.seen.events).toEqual([]);
+  });
+
+  test("successive scans turn changes into events: asked, agents done, a workflow done, one failed, replies", () => {
+    resetSeen(NOW);
+    const main = tailOf([prompt(NOW - 29 * MIN, "go"), reply(NOW - 3 * MIN, "Started.")]);
+    const agents = ["w1", "w2", "w3"].map((id) => agentOf(id, thread(1), { wf: "wf_1" }));
+    const solo = agentOf("s1", thread(1));
+    const s = sessionOf({ sid: "b", mains: [main], agents: [solo], workflows: [wfOf("running", agents), { ...wfOf("running", []), id: "wf_2" }] });
+    F.noteScan([s], NOW, noJobs);
+    expect(F.seen.events).toEqual([]);
+
+    // Two seconds later: three agents have finished, both workflows have ended, Claude has replied twice and now asks a question.
+    const later = NOW + 2000;
+    for (const a of [agents[0], agents[1], solo]) a.done = true;
+    s.workflows[0].status = "completed";
+    s.workflows[1].status = "failed";
+    F.ingest(main, JSON.stringify(reply(NOW + 500, "Two of the three share a cause.")));
+    F.ingest(main, JSON.stringify(reply(NOW + 900, "Fixed.")));
+    F.ingest(main, JSON.stringify(toolCall(NOW + 1000, "AskUserQuestion", { questions: [{ question: "Merge it?" }] })));
+    F.noteScan([s], later, noJobs);
+    expect(kinds().sort()).toEqual(["agentDone", "agentDone", "agentDone", "asked", "failed", "reply", "reply", "workflowDone"]);
+    expect(F.seen.events.every((e) => e.t > NOW && e.t <= later && e.sid === "b")).toBe(true);
+    expect(F.seen.events.filter((e) => e.kind === "reply").map((e) => e.t)).toEqual([NOW + 500, NOW + 900]); // a reply keeps its own time
+    expect(F.newCount()).toBe(8);
+
+    F.noteScan([s], later + 2000, noJobs); // the same picture again adds nothing
+    expect(F.newCount()).toBe(8);
+
+    const d = F.digest();
+    expect(d.since).toBe(NOW);
+    expect(d.groups.map((g) => `${g.glyph} ${g.text}`)).toEqual(["▲ 1 asked", "✗ 1 failed", "✓ 1 workflow done", "✓ 3 agents done", "◆ 2 new replies"]);
+    expect(d.groups.map((g) => g.kind)).toEqual(["asked", "failed", "finished", "finished", "replies"]);
+    expect(d.groups.map((g) => g.color)).toEqual([F.C.amber, F.C.red, F.C.green, F.C.green, F.C.cyan]);
+
+    F.markSeen(later + 3000); // space: seen it
+    expect([F.newCount(), F.digest().groups.length]).toEqual([0, 0]);
+    F.noteScan([s], later + 4000, noJobs); // and what was already known does not come back
+    expect(F.newCount()).toBe(0);
+    F.ingest(main, JSON.stringify(reply(later + 5000, "One more thing.")));
+    F.noteScan([s], later + 6000, noJobs);
+    expect(F.digest().groups.map((g) => g.text)).toEqual(["1 new reply"]);
+  });
+
+  test("a stall, a session that finishes, and a job that exits between scans", () => {
+    resetSeen(NOW);
+    const procs = { procs: F.machine.procs, kids: F.machine.kids };
+    F.machine.procs = [{ pid: 77, ppid: 1, cpu: 0.1, rss: 1, name: "claude" }];
+    F.machine.kids = new Map();
+    try {
+      const stuck = sessionOf({ sid: "b", pid: 77, mains: [thread(1)], agents: [agentOf("review", thread(9.5))] });
+      const job = sessionOf({ sid: "j", status: "idle", jobId: "job7", job: { state: "working", detail: "", needs: "" }, mains: [thread(1)] });
+      const gone = sessionOf({ sid: "g", status: "idle", jobId: "job8", job: { state: "working", detail: "", needs: "" }, mains: [thread(1)] });
+      const crash = sessionOf({ sid: "c", status: "idle", jobId: "job9", job: { state: "working", detail: "", needs: "" }, mains: [thread(1)] });
+      F.noteScan([stuck, job, gone, crash], NOW, noJobs);
+      expect(F.seen.events).toEqual([]);
+      // A minute later the agent has been silent for 10.5 minutes; one job says it is done; two sessions have exited.
+      job.job!.state = "done";
+      F.noteScan([stuck, job], NOW + MIN, (id) => ({ job8: "done", job9: "failed" })[id]);
+      expect(kinds().sort()).toEqual(["failed", "sessionDone", "sessionDone", "stalled"]);
+      expect(F.seen.events.find((e) => e.kind === "stalled")).toMatchObject({ sid: "b", key: "stall:b/review", t: NOW + 30_000 }); // when it crossed ten minutes
+      expect(F.digest().groups.map((g) => `${g.glyph} ${g.text}`)).toEqual(["✗ 1 failed", "◐ 1 stalled", "✓ 2 sessions done"]);
+      F.noteScan([stuck, job], NOW + 2 * MIN, (id) => ({ job8: "done", job9: "failed" })[id]);
+      expect(F.newCount()).toBe(4); // each is reported once
+    } finally {
+      Object.assign(F.machine, procs);
+    }
+  });
+
+  test("with the mark in the past, the first scan dates things by their own timestamps", () => {
+    resetSeen(NOW - 18 * MIN); // as FLEET_SEEN does for a screenshot
+    const main = tailOf([reply(NOW - 25 * MIN, "Old."), reply(NOW - 7 * MIN, "Newer."), reply(NOW - 2 * MIN, "Newest.")]);
+    const s = sessionOf({ sid: "a", status: "idle", job: blocked, mains: [main], agents: [agentOf("old", thread(25), { done: true }), agentOf("new", thread(9), { done: true }), agentOf("busy", thread(1))] });
+    F.noteScan([s], NOW, noJobs);
+    expect(kinds().sort()).toEqual(["agentDone", "asked", "reply", "reply"]);
+    expect(main.says.map((x) => F.isNew(x.t))).toEqual([false, true, true]);
+    expect(F.digest().groups.map((g) => g.text)).toEqual(["1 asked", "1 agent done", "2 new replies"]);
+  });
+
+  test("the digest keeps the design's order and wording", () => {
+    const ev = (kind: F.EventKind, n: number): F.FleetEvent[] => Array.from({ length: n }, (_, i) => ({ kind, t: NOW + i, sid: "x", key: `${kind}${i}` }));
+    const all = [...ev("reply", 4), ...ev("agentDone", 3), ...ev("asked", 1), ...ev("stalled", 2), ...ev("failed", 1), ...ev("workflowDone", 2), ...ev("sessionDone", 1)];
+    const d = F.digest(all, NOW - 47 * MIN);
+    expect(d.groups.map((g) => `${g.glyph} ${g.text}`)).toEqual(["▲ 1 asked", "✗ 1 failed", "◐ 2 stalled", "✓ 1 session done", "✓ 2 workflows done", "✓ 3 agents done", "◆ 4 new replies"]);
+    expect(d.groups.reduce((n, g) => n + g.count, 0)).toBe(all.length);
+    expect(F.digest([...ev("asked", 1), ...ev("agentDone", 3), ...ev("reply", 4)], NOW).groups.map((g) => `${g.glyph} ${g.text}`).join("  ·  ")).toBe("▲ 1 asked  ·  ✓ 3 agents done  ·  ◆ 4 new replies");
+  });
+
+  test("the mark's place on the time axis", () => {
+    const win = F.timeWindow(NOW, 30 * MIN, 30);
+    resetSeen(NOW - 18 * MIN);
+    expect(F.seenCell(win)).toBe(F.barOf(NOW - 18 * MIN, win));
+    expect(F.seenCell(win)).toBeGreaterThanOrEqual(11);
+    expect(F.seenCell(win)).toBeLessThanOrEqual(12);
+    resetSeen(NOW);
+    expect(F.seenCell(win)).toBe(29); // just looked: the bar still filling
+    resetSeen(NOW - 47 * MIN);
+    expect(F.seenCell(win)).toBeUndefined(); // before the window
+  });
+
+  test("fleet counts put every session in exactly one tile", () => {
+    const busy = (sid: string, o: Partial<F.Session> = {}) => sessionOf({ sid, mains: [thread(0.2)], ...o });
+    const running = wfOf("running", [agentOf("w1", thread(0.2), { wf: "wf_1" }), agentOf("w2", thread(0.2), { wf: "wf_1", done: true })]);
+    const sessions = [
+      sessionOf({ sid: "asks", status: "idle", job: blocked, mains: [thread(6)] }),
+      busy("flaky", { workflows: [running], agents: [agentOf("s1", thread(0.5)), agentOf("old", thread(45))] }),
+      busy("docs"),
+      sessionOf({ sid: "done", status: "idle", job: { state: "done", detail: "merged", needs: "" }, mains: [thread(50)] }),
+      sessionOf({ sid: "turn", status: "idle", mains: [tailOf([prompt(NOW - 9 * MIN, "hi"), reply(NOW - 8 * MIN, "Hello.")])] }),
+      sessionOf({ sid: "idle-with-agent", status: "idle", agents: [agentOf("s2", thread(1))] }),
+    ];
+    const c = F.fleetCounts(sessions, NOW);
+    expect(c).toEqual({ sessions: 6, needs: 1, stalled: 0, working: 3, idle: 2, agents: 3, workflows: 1 });
+    expect(c.needs + c.stalled + c.working + c.idle).toBe(c.sessions);
+    const views = F.buildViews(sessions, NOW, 80);
+    expect(views.filter(F.isHidden).map((v) => v.s.sid).sort()).toEqual(["done", "turn"]);
+  });
+
+  test("the terminal title is the fleet's state in the screen's glyphs, written only when it changes", () => {
+    expect(F.titleFor({ needs: 1, stalled: 0, working: 2, workflows: 1 })).toBe("▲1 ●2 ≡1 Claude Fleet");
+    expect(F.titleFor({ needs: 0, stalled: 1, working: 12, workflows: 0 })).toBe("◐1 ●12 Claude Fleet");
+    expect(F.titleFor({ needs: 0, stalled: 0, working: 0, workflows: 0 })).toBe("Claude Fleet");
+    expect(F.titleSequence("▲1 Claude Fleet")).toBe("\x1b]2;▲1 Claude Fleet\x07");
+    expect(F.titleSequence("")).toBe("\x1b]2;\x07"); // cleared on exit
+    expect(F.titleChange("▲1 ●2 ≡1 Claude Fleet")).toBe("\x1b]2;▲1 ●2 ≡1 Claude Fleet\x07");
+    expect(F.titleChange("▲1 ●2 ≡1 Claude Fleet")).toBe(""); // unchanged: nothing is written
+    expect(F.titleChange("●3 ≡1 Claude Fleet")).toBe("\x1b]2;●3 ≡1 Claude Fleet\x07");
+  });
+
+  test("the buttons carry the hidden count and the count of new things", () => {
+    resetSeen(NOW);
+    expect(strip(F.buttonBar(150, 44, 1))).toContain(" a All · 1 idle ");
+    expect(strip(F.buttonBar(150, 44, 0))).toContain(" a All ");
+    expect(strip(F.buttonBar(150, 44))).toContain(" space Seen ");
+    F.seen.events.push(...Array.from({ length: 4 }, (_, i) => ({ kind: "reply" as F.EventKind, t: NOW + i, sid: "a", key: "k" })));
+    expect(strip(F.buttonBar(150, 44, 1))).toContain(" space Seen · 4 new ");
+    expect(strip(F.buttonBar(150, 44, 1))).not.toContain("Retry usage"); // only while a usage read is failing
+    for (const W of [80, 100, 110, 130, 150, 200]) expect(F.cells(F.buttonBar(W, 44, 3))).toBeLessThanOrEqual(W);
+    resetSeen(NOW);
+  });
+});
