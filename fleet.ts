@@ -661,9 +661,9 @@ export class Row {
     if (col >= 1 && w > 0 && col + w - 1 <= this.W) {
       for (let i = 0; i < w; i++) this.free(col - 1 + i);
       const split = ansiCells(ansi);
-      if (split && split.length <= w) split.forEach((c, i) => (this.cell[col - 1 + i] = c));
+      if (split) split.slice(0, w).forEach((c, i) => (this.cell[col - 1 + i] = c)); // never more cells than it was said to have
       else {
-        // Codes that are not ours, or a width that is not what was said: keep it whole.
+        // Codes that are not ours: keep it whole.
         this.cell[col - 1] = { ch: ansi, raw: true, span: w };
         for (let i = 1; i < w; i++) this.cell[col - 1 + i] = { ch: "" };
       }

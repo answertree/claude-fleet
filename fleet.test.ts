@@ -1601,6 +1601,11 @@ describe("a row never grows", () => {
     expect(strip(F.spark([1, 2, 3, 4, 5, 6, 7, 8], 8, ...F.RAMP.session))).toBe("▃▄▅▆▇▇██");
     expect(s.plain()).toBe("  ▃▄▅▼▇▇ab  ");
     expect(drawn(s.toString())).toBe(10);
+    // Told it is narrower than it is, a paste is cut to what it was told; told wider, it leaves the rest blank.
+    const t = new F.Row(10);
+    expect(t.paste(2, F.fg(F.C.green, "abcdef"), 3)).toBe(5);
+    t.paste(7, "xy", 4);
+    expect(t.plain()).toBe(" abc  xy  ");
   });
 
   test("a context bar keeps its own half-cell backgrounds on a tinted row, and the tint carries on after it", () => {
