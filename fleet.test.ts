@@ -1311,3 +1311,31 @@ describe("the login stays inside the process", () => {
     }
   }, 60_000);
 });
+
+/**
+ * Whether fleet.ts is looking at the throwaway home this file set up, and not at the real ~/.claude.
+ * Asked in a way that is harmless when the answer is no: a made-up job's state file exists only in the
+ * throwaway home, and the one thing read is that file's path under whichever home is in force.
+ */
+function homeIsScratch(): boolean {
+  const home = process.env.FLEET_HOME!;
+  if (!home.startsWith(SCRATCH)) return false;
+  fs.mkdirSync(path.join(home, "jobs", "probe-job"), { recursive: true });
+  fs.writeFileSync(path.join(home, "jobs", "probe-job", "state.json"), JSON.stringify({ state: "done" }));
+  const saved = { ...F.seen, events: [...F.seen.events], known: new Map(F.seen.known) };
+  Object.assign(F.seen, { at: NOW, events: [], known: new Map(), primed: false });
+  try {
+    const job = sessionOf({ sid: "probe", status: "idle", jobId: "probe-job", job: { state: "working", detail: "", needs: "" } });
+    F.noteScan([job], NOW); // with no reader passed, a job's state is read from the home
+    F.noteScan([], NOW + 2000); // the session has gone: how did its job end?
+    return F.seen.events.some((e) => e.kind === "sessionDone");
+  } finally {
+    Object.assign(F.seen, saved);
+  }
+}
+
+describe("the tests never look at the real home", () => {
+  test("FLEET_HOME is read when it is used, so pointing it at a throwaway directory after the import takes effect", () => {
+    expect(homeIsScratch()).toBe(true);
+  });
+});

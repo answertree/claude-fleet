@@ -15,11 +15,15 @@ import * as os from "node:os";
 import { StringDecoder } from "node:string_decoder";
 import { spawnSync } from "node:child_process";
 
-const CLAUDE = process.env.FLEET_HOME || process.env.AGENT_FLEET_HOME || path.join(os.homedir(), ".claude"); // the demo points this at made-up sessions
+/**
+ * Where Claude Code keeps its files; the demo and the tests point FLEET_HOME at made-up sessions. Read each
+ * time it is used, not once at import: a test sets FLEET_HOME after its import of this file has already run,
+ * and must never be left looking at the real sessions.
+ */
+const claudeHome = (): string => process.env.FLEET_HOME || process.env.AGENT_FLEET_HOME || path.join(os.homedir(), ".claude");
 /** The time. FLEET_NOW (test only) pins it, in milliseconds since 1970, so a frame can be reproduced exactly. */
 export const clock = (): number => Number(process.env.FLEET_NOW) || Date.now();
 const HIDE_TOP = process.env.FLEET_HIDE_PROCESSES === "1"; // leave other programs' names off the machine row
-const PROJECTS = path.join(CLAUDE, "projects");
 export const WINDOWS = [5, 15, 30, 60, 180];
 const TAIL_BYTES = 2 * 1024 * 1024;
 const ACTIVE_MS = 60_000;
@@ -1007,14 +1011,22 @@ function journal(file: string): Journal {
   return entry;
 }
 
+let projectsRoot = "";
 let projectDirs: string[] = [];
 let projectDirsAt = 0;
 const sessionDirCache = new Map<string, { at: number; dirs: string[]; mains: string[] }>();
 function locate(sid: string, now: number) {
+  const root = path.join(claudeHome(), "projects");
+  if (root !== projectsRoot) {
+    // The home has moved (a test did it): forget what was found under the old one.
+    projectsRoot = root;
+    projectDirsAt = 0;
+    sessionDirCache.clear();
+  }
   const hit = sessionDirCache.get(sid);
   if (hit && now - hit.at < 20_000) return hit;
   if (now - projectDirsAt > 20_000) {
-    projectDirs = ls(PROJECTS).map((d) => path.join(PROJECTS, d));
+    projectDirs = ls(root).map((d) => path.join(root, d));
     projectDirsAt = now;
   }
   const dirs: string[] = [];
@@ -1086,6 +1098,7 @@ function loadAgent(file: string, wf?: string, started?: any, done = false): Agen
 
 export function scan(now: number): Session[] {
   const sessions: Session[] = [];
+  const CLAUDE = claudeHome();
   for (const f of ls(path.join(CLAUDE, "sessions"))) {
     if (!f.endsWith(".json")) continue;
     const reg = readJson(path.join(CLAUDE, "sessions", f));
@@ -1423,7 +1436,7 @@ function readLogin(): { login: Login } | { reason: string } {
   let fromFile: Login | undefined;
   if (!fromKeychain) {
     try {
-      const parsed = parseLogin(fs.readFileSync(path.join(CLAUDE, ".credentials.json"), "utf8"));
+      const parsed = parseLogin(fs.readFileSync(path.join(claudeHome(), ".credentials.json"), "utf8"));
       f = parsed.parse === "empty" ? "not-json" : parsed.parse;
       fromFile = parsed.login;
     } catch (e: any) {
@@ -2094,7 +2107,7 @@ const jobFailed = (state: string) => /fail|error|crash/i.test(state);
  * The first scan only sets the baseline. `jobState` reads a background job's state after its session
  * has gone, so a job that finishes and exits between two scans is not missed.
  */
-export function noteScan(sessions: Session[], now: number, jobState: (jobId: string) => string | undefined = (id) => readJson(path.join(CLAUDE, "jobs", id, "state.json"))?.state) {
+export function noteScan(sessions: Session[], now: number, jobState: (jobId: string) => string | undefined = (id) => readJson(path.join(claudeHome(), "jobs", id, "state.json"))?.state) {
   const next = new Map<string, string>();
   const push = (kind: EventKind, sid: string, key: string, t: number) => {
     if (t > seen.at) seen.events.push({ kind, t, sid, key });
