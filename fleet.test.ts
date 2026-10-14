@@ -524,6 +524,110 @@ describe("workflow phase trail", () => {
     expect(F.wfOutcome(wfOf({ status: "failed" }))).toBe("failed");
     expect(F.wfOutcome(wfOf({ status: "stopped" }))).toBe("failed");
   });
+
+  test("a workflow that goes back to an earlier phase lists it again, so the current phase is always the last", () => {
+    const rows = [
+      ["started", "w1", "Reproduce"], ["result", "w1"], ["started", "w2", "Fix"], ["result", "w2"],
+      ["started", "w3", "Verify"], ["result", "w3"], ["started", "w4", "Fix"], // Verify sent the work back
+    ].map(([type, agentId, phase]) => JSON.stringify({ type, agentId, phase }));
+    const looped = F.readJournal(rows.join("\n"));
+    expect(looped.phases).toEqual(["Reproduce", "Fix", "Verify", "Fix"]);
+    const agentsHere = [...looped.started.values()].map((st) => agentOf(st.agentId, F.newTail(st.agentId), { wf: "wf_1", phase: st.phase, done: st.agentId !== "w4" }));
+    expect(F.currentPhase(looped.phases, agentsHere.filter((a) => !a.done))).toBe("Fix");
+    const wf = wfOf({ phase: "Fix", seen: looped.phases, agents: agentsHere });
+    expect(F.phaseTrail(wf)).toEqual([{ name: "Reproduce", state: "done" }, { name: "Fix", state: "done" }, { name: "Verify", state: "done" }, { name: "Fix", state: "now" }]);
+    // With the declared list known, the history still comes first and the phases not yet reached follow it.
+    expect(F.phaseTrail({ ...wf, phases: ["Reproduce", "Fix", "Verify", "Ship"] }).map((p) => `${p.state} ${p.name}`)).toEqual(["done Reproduce", "done Fix", "done Verify", "now Fix", "next Ship"]);
+    // Agents of one phase started while another phase's agents still run are the same visit, not a new one.
+    const parallel = F.readJournal([["started", "a1", "A"], ["started", "b1", "B"], ["started", "a2", "A"]].map(([type, agentId, phase]) => JSON.stringify({ type, agentId, phase })).join("\n"));
+    expect(parallel.phases).toEqual(["A", "B"]);
+  });
+
+  test("a trail too long for its row says that passed phases were left out", () => {
+    const names = ["Plan", "Research", "Reproduce", "Isolate", "Fix", "Verify", "Review"];
+    const rows = names.flatMap((phase, i) => [JSON.stringify({ type: "started", agentId: `p${i}`, phase }), ...(i < names.length - 1 ? [JSON.stringify({ type: "result", agentId: `p${i}` })] : [])]);
+    const jr = F.readJournal(rows.join("\n"));
+    const agentsHere = [...jr.started.values()].map((st) => agentOf(st.agentId, tailOf([toolCall(NOW - MIN)], st.agentId), { wf: "wf_long", phase: st.phase, done: st.agentId !== "p6" }));
+    const wf: F.Workflow = { id: "wf_long", name: "long-pipeline", status: "running", phase: "Review", phases: [], seen: jr.phases, started: NOW - 30 * MIN, finished: 0, agents: agentsHere, lastT: NOW };
+    const row = (W: number) => strip(F.detailView(F.buildViews([sessionOf({ sid: "long", workflows: [wf] })], NOW), W, 44, NOW).find((l) => l.includes("long-pipeline"))!);
+    expect(row(150)).toMatch(/long-pipeline +… ✓ \S+ .*◐ Review/);
+    expect(row(250)).toContain("✓ Plan  ✓ Research");
+    expect(row(250)).not.toContain("…");
+  });
+});
+
+describe("a workflow between its agents", () => {
+  // A workflow's state file is written when it ends. Until then the journal and the agents' transcripts are all there is,
+  // and there are moments (just launched, between two agents, after the last one reports) when no agent is running.
+  const home = path.join(SCRATCH, "wf-gap");
+  const sid = "wfgap000-0000-4000-8000-000000000001";
+  const dir = path.join(home, "projects", "-gap", sid);
+  const wfDir = path.join(dir, "subagents", "workflows", "wf_gap");
+  const put = (file: string, rows: object[], t: number) => {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    fs.utimesSync(file, new Date(t), new Date(t));
+  };
+  const setUp = () => {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.mkdirSync(path.join(home, "sessions"), { recursive: true });
+    fs.writeFileSync(path.join(home, "sessions", "1.json"), JSON.stringify({ pid: process.pid, sessionId: sid, name: "pipe", kind: "bg", status: "busy", cwd: "/work/shop", startedAt: NOW - 30 * MIN }));
+    put(dir + ".jsonl", [prompt(NOW - 20 * MIN, "run the pipeline")], NOW - 20 * MIN);
+    fs.mkdirSync(path.join(dir, "workflows", "scripts"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "workflows", "scripts", "pipe-and-fix-wf_gap.js"), "");
+  };
+  const journal = (rows: object[], t: number) => put(path.join(wfDir, "journal.jsonl"), [{ type: "launched" }, ...rows], t);
+  const agentFile = (id: string, end: number, final: boolean) => put(path.join(wfDir, `agent-${id}.jsonl`), [toolCall(end - 5000), toolResult(end - 4000), ...(final ? [toolCall(end - 1000, "StructuredOutput", {}), toolResult(end)] : [toolCall(end)])], end);
+  const statusAt = (now: number) => {
+    const s = F.scan(now).find((x) => x.sid === sid)!;
+    return { s, status: s.workflows[0].status };
+  };
+  const saved = { home: process.env.FLEET_HOME };
+  beforeAll(() => (process.env.FLEET_HOME = home));
+  afterAll(() => (process.env.FLEET_HOME = saved.home));
+
+  test("just launched, between two agents, or after the last one reports: still running, and nothing failed", () => {
+    setUp();
+    Object.assign(F.seen, { at: NOW - 30 * MIN, events: [], known: new Map(), primed: false });
+    let now = NOW - 10 * MIN;
+    const step = (body: () => void) => {
+      body();
+      const { s, status } = statusAt(now);
+      F.noteScan([s], now, () => undefined);
+      now += 2000;
+      return status;
+    };
+    expect(step(() => journal([], now - 1000))).toBe("running"); // launched, no agent yet
+    expect(step(() => (journal([{ type: "started", agentId: "a1", phase: "Pipe" }], now - 1000), agentFile("a1", now - 500, false)))).toBe("running");
+    expect(step(() => (agentFile("a1", now - 3000, true), journal([{ type: "started", agentId: "a1", phase: "Pipe" }, { type: "result", agentId: "a1" }], now - 2500)))).toBe("running"); // between the two
+    expect(step(() => (journal([{ type: "started", agentId: "a1", phase: "Pipe" }, { type: "result", agentId: "a1" }, { type: "started", agentId: "a2", phase: "Fix" }, { type: "result", agentId: "a2" }], now - 1000), agentFile("a2", now - 1500, true)))).toBe("running"); // the last has reported; the state file is not written yet
+    expect(F.seen.events.filter((e) => e.kind === "failed")).toEqual([]);
+    fs.writeFileSync(path.join(dir, "workflows", "wf_gap.json"), JSON.stringify({ workflowName: "pipe-and-fix", status: "completed", startTime: NOW - 11 * MIN, durationMs: 60_000 }));
+    expect(step(() => undefined)).toBe("completed");
+    expect(F.seen.events.map((e) => e.kind).filter((k) => k === "failed" || k === "workflowDone")).toEqual(["workflowDone"]);
+  });
+
+  test("a workflow silent for minutes with no agent running and no state file has stopped; if it starts again, that was not a failure", () => {
+    setUp();
+    Object.assign(F.seen, { at: NOW - 30 * MIN, events: [], known: new Map(), primed: false });
+    journal([{ type: "started", agentId: "a1", phase: "Pipe" }, { type: "result", agentId: "a1" }], NOW - 20 * MIN);
+    agentFile("a1", NOW - 20 * MIN, true);
+    const first = statusAt(NOW - 19 * MIN); // a minute after the last write: still between agents
+    expect(first.status).toBe("running");
+    F.noteScan([first.s], NOW - 19 * MIN, () => undefined);
+    const later = statusAt(NOW);
+    expect(later.status).toBe("stopped");
+    expect(F.wfOutcome(later.s.workflows[0])).toBe("failed");
+    F.noteScan([later.s], NOW, () => undefined);
+    expect(F.seen.events.filter((e) => e.kind === "failed").length).toBe(1);
+    // It was only waiting: a new agent starts. The stop was a guess, and the guess is withdrawn.
+    journal([{ type: "started", agentId: "a1", phase: "Pipe" }, { type: "result", agentId: "a1" }, { type: "started", agentId: "a2", phase: "Fix" }], NOW + 1000);
+    agentFile("a2", NOW + 1000, false);
+    const again = statusAt(NOW + 2000);
+    expect(again.status).toBe("running");
+    F.noteScan([again.s], NOW + 2000, () => undefined);
+    expect(F.seen.events.filter((e) => e.kind === "failed")).toEqual([]);
+  });
 });
 
 describe("usage read tells the truth", () => {

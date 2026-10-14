@@ -29,6 +29,7 @@ const HIDE_TOP = process.env.FLEET_HIDE_PROCESSES === "1"; // leave other progra
 export const WINDOWS = [5, 15, 30, 60, 180];
 const TAIL_BYTES = 2 * 1024 * 1024;
 const ACTIVE_MS = 60_000;
+const WF_QUIET_MS = 5 * 60_000; // a workflow with no state file that has written nothing for this long, with no agent running, has stopped
 const FINAL_TOOLS = new Set(["SubagentHandback", "StructuredOutput"]);
 const CTX_LOG_MS = 15 * 60_000; // how far back a session's context readings are kept, for the runway forecast
 
@@ -1060,13 +1061,19 @@ interface Journal {
   mtime: number;
   started: Map<string, any>; // agent id -> its "started" entry
   results: Set<string>; // agents that have reported a result
-  phases: string[]; // phases in the order their first agent started
+  phases: string[]; // the phases as they were visited, in order: one the workflow comes back to is listed again
 }
-/** Read a workflow journal's text: who started, in which phase, and who has finished. */
+/**
+ * Read a workflow journal's text: who started, in which phase, and who has finished. The phases are a
+ * history: a phase the workflow returns to (fix, verify, fix again) is listed again, so the current one is
+ * always last. Agents of a phase that start while that phase's earlier agents are still running belong to
+ * the same visit, so phases running side by side are not listed over and over.
+ */
 export function readJournal(text: string, mtime = 0): Journal {
   const started = new Map<string, any>();
   const results = new Set<string>();
   const phases: string[] = [];
+  const open = new Map<string, Set<string>>(); // each phase's agents that have not reported yet
   for (const line of text.split("\n")) {
     if (!line) continue;
     try {
@@ -1074,8 +1081,14 @@ export function readJournal(text: string, mtime = 0): Journal {
       if (o.type === "started") {
         started.set(o.agentId, o);
         const phase = safeLine(o.phase);
-        if (phase && !phases.includes(phase)) phases.push(phase);
-      } else if (o.type === "result") results.add(o.agentId);
+        if (!phase) continue;
+        if (phases[phases.length - 1] !== phase && !open.get(phase)?.size) phases.push(phase);
+        if (!open.has(phase)) open.set(phase, new Set());
+        open.get(phase)!.add(String(o.agentId));
+      } else if (o.type === "result") {
+        results.add(o.agentId);
+        for (const waiting of open.values()) waiting.delete(String(o.agentId));
+      }
     } catch {}
   }
   return { mtime, started, results, phases };
@@ -1135,7 +1148,7 @@ export function shortModel(m: unknown): string {
 
 /** The phase a workflow is in: the latest-started phase that still has an agent running, else the latest started. */
 export function currentPhase(seen: string[], running: Agent[]): string {
-  const live = running.map((a) => seen.indexOf(a.phase ?? "")).filter((i) => i >= 0);
+  const live = running.map((a) => seen.lastIndexOf(a.phase ?? "")).filter((i) => i >= 0);
   return seen[live.length ? Math.max(...live) : seen.length - 1] ?? "";
 }
 
@@ -1151,6 +1164,11 @@ export interface PhaseStep {
 export function phaseTrail(wf: Workflow): PhaseStep[] {
   const live = wf.status === "running";
   const busy = new Set(wf.agents.filter((a) => !a.done).map((a) => a.phase ?? ""));
+  if (new Set(wf.seen).size < wf.seen.length) {
+    // It has come back to a phase: the history as it happened (only a phase's latest visit can be current), then the declared phases not reached yet.
+    const now = (name: string, i: number) => live && wf.seen.lastIndexOf(name) === i && (name === wf.phase || busy.has(name));
+    return [...wf.seen.map((name, i): PhaseStep => ({ name, state: now(name, i) ? "now" : "done" })), ...wf.phases.filter((p) => !wf.seen.includes(p)).map((name): PhaseStep => ({ name, state: live ? "next" : "done" }))];
+  }
   const list = wf.phases.length ? [...wf.phases, ...wf.seen.filter((p) => !wf.phases.includes(p))] : wf.seen;
   const at = list.indexOf(wf.phase);
   return list.map((name, i) => {
@@ -1220,7 +1238,9 @@ export function scan(now: number): Session[] {
         workflows.push({
           id: wfId,
           name: safeLine(state?.workflowName || (script ? script.slice(0, -(wfId.length + 4)) : wfId)),
-          status: state?.status ? safeLine(state.status) : running.length ? "running" : "stopped",
+          // The state file is written when a workflow ends. Without it the workflow is still going, even at a moment when no agent
+          // is (just launched, between two agents, the last one just reported), unless it has written nothing for minutes.
+          status: state?.status ? safeLine(state.status) : running.length || now - lastT < WF_QUIET_MS ? "running" : "stopped",
           phase: currentPhase(j.phases, running),
           phases,
           seen: j.phases,
@@ -2284,7 +2304,12 @@ export function noteScan(sessions: Session[], now: number, jobState: (jobId: str
       const word = f.finished ? "done" : jobFailed(s.job.state) ? "failed" : "open";
       track(`job:${s.sid}`, `${word}|${s.jobId ?? ""}`, s.sid, word === "done" ? "sessionDone" : word === "failed" ? "failed" : undefined, f.main ? lastWriteOf(f.main) : 0);
     }
-    for (const wf of s.workflows) track(`wf:${s.sid}/${wf.id}`, wf.status, s.sid, wf.status === "running" ? undefined : wf.status === "completed" ? "workflowDone" : "failed", wf.finished || wf.lastT);
+    for (const wf of s.workflows) {
+      const key = `wf:${s.sid}/${wf.id}`;
+      // A stop is only inferred when a workflow goes quiet without a state file; if it carries on or completes after all, it did not fail.
+      if (wf.status === "running" || wf.status === "completed") seen.events = seen.events.filter((e) => !(e.kind === "failed" && e.key === key));
+      track(key, wf.status, s.sid, wf.status === "running" ? undefined : wf.status === "completed" ? "workflowDone" : "failed", wf.finished || wf.lastT);
+    }
     for (const [k, wrote] of stallMarks(s, f, stallOf(s, f, now))) {
       // A stall is known by when the thing last wrote, so the same silence seen again is not news again.
       next.set(`stall:${k}`, String(wrote));
@@ -3363,16 +3388,22 @@ function threadRow(b: Block, t: Thread, r: Row, p: Paint) {
       let trail: Seg[];
       if (!live) trail = outcome === "completed" ? [[`completed${wf.tokens !== undefined ? ` ${ICON.sep} ${human(wf.tokens)} tok` : ""}`, C.dim]] : [[wf.status || "failed", C.red]];
       else {
-        // The phase trail: ✓ passed, ◐ current, ○ later. Too long: passed phases go from the left. A narrow screen shows the current one only.
+        // The phase trail: ✓ passed, ◐ current, ○ later. Too long: passed phases go from the left, then later ones from the right, and a dim … says so. A narrow screen shows the current one only.
         const steps = phaseTrail(wf).filter((x) => g.wide || x.state === "now");
-        const span = () => steps.reduce((n, x) => n + 2 + width(x.name), 0) + 2 * Math.max(0, steps.length - 1);
-        while (steps.length > 1 && span() > room && steps[0].state === "done") steps.shift();
-        while (steps.length > 1 && span() > room && steps[steps.length - 1].state === "next") steps.pop();
-        while (steps.length > 1 && span() > room) steps.shift();
-        trail = steps.flatMap((x, i): Seg[] => [
-          ...(i ? [["  "] as Seg] : []),
-          ...((x.state === "done" ? [[ICON.done + " ", C.done], [x.name, C.dim]] : x.state === "now" ? [[ICON.progress + " ", C.white], [x.name, C.white, true]] : [[ICON.idle + " ", C.faint], [x.name, C.dim]]) as Seg[]),
-        ]);
+        let cutLeft = false;
+        let cutRight = false;
+        const span = () => (cutLeft ? 2 : 0) + (cutRight ? 3 : 0) + steps.reduce((n, x) => n + 2 + width(x.name), 0) + 2 * Math.max(0, steps.length - 1);
+        while (steps.length > 1 && span() > room && steps[0].state === "done") steps.shift(), (cutLeft = true);
+        while (steps.length > 1 && span() > room && steps[steps.length - 1].state === "next") steps.pop(), (cutRight = true);
+        while (steps.length > 1 && span() > room) steps.shift(), (cutLeft = true);
+        trail = [
+          ...(cutLeft ? [[ICON.cut + " ", C.dim] as Seg] : []),
+          ...steps.flatMap((x, i): Seg[] => [
+            ...(i ? [["  "] as Seg] : []),
+            ...((x.state === "done" ? [[ICON.done + " ", C.done], [x.name, C.dim]] : x.state === "now" ? [[ICON.progress + " ", C.white], [x.name, C.white, true]] : [[ICON.idle + " ", C.faint], [x.name, C.dim]]) as Seg[]),
+          ]),
+          ...(cutRight ? [["  " + ICON.cut, C.dim] as Seg] : []),
+        ];
       }
       r.segs(g.action, fitSegs(trail, room));
     }
