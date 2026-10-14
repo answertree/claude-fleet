@@ -27,9 +27,13 @@ alias fleet='bun ~/path/to/claude-fleet/fleet.ts --usage'
 
 **At the top**
 
-- Fleet totals: active sessions, running agents, workflows, tool calls in the window, and how many sessions need you.
-- The machine: CPU with a short history and one glyph per core, memory, load, and the busiest processes.
-- Your account (with `--usage`): how much of the 5-hour and weekly limits you have used, and when each resets.
+- **Counts:** how many sessions need you (the one amber thing on the row), how many are working, running agents and workflows, and how many idle or finished sessions are being kept off the screen. A red `◐ 1 stalled?` joins them while something looks stuck.
+- **The machine:** CPU with a short history, memory, one glyph per core, load, and the busiest processes.
+- **Your account** (with `--usage`): how much of the 5-hour and weekly limits you have used and when each resets, then extra usage. The white tick on each gauge is how far through that limit's window the clock is: a fill short of the tick is under pace, a fill past it is burning faster than the window refills. If a limit will be full before it resets, the reset time is replaced by `full in ~35m` in red. With extra usage off, that row shows the Opus and Sonnet weekly limits when Anthropic returns them. Without `--usage` this block lists the busiest processes instead.
+- **The fleet:** tool calls across the window as a chart, with the total, the output tokens and how long one bar is.
+- **The rule under it is the time axis** for every sparkline below: each sits in the same columns and counts the same bars. A white `▼` marks when you last pressed `space`, and while anything is new since then the left of the rule lists it (`since 23:04 · ▲ 1 asked · ✓ 3 agents done · ◆ 4 new replies`).
+
+The header is five rows on a terminal of 40 rows or more and three rows below that. Compact mode, and any terminal under 100 columns, keeps a plainer three-line header.
 
 **For each session**
 
@@ -38,9 +42,11 @@ alias fleet='bun ~/path/to/claude-fleet/fleet.ts --usage'
 - **Context:** the window split by category (system prompt, tools, MCP tools, agents, memory files, skills, messages).
 - **Now:** a one-line summary of what it is doing.
 - **Conversation:** your last prompt and Claude's most recent messages, using whatever rows are spare.
-- **Tasks and workflows:** one glyph per step (`●` done, `◐` in progress, `○` not started), the current phase, and each running agent with what it is doing right now.
+- **Tasks and workflows:** one glyph per step (`✓` done, `◐` in progress, `○` not started), the current phase, and each running agent with what it is doing right now.
 
-Only sessions that are working or waiting on you are shown. Idle and finished ones collapse into one line at the bottom; press `a` to bring them back.
+Only sessions that are working or waiting on you are shown. Idle and finished ones are counted on the top row and on the `a` button; press `a` to bring them back.
+
+The screen uses one small set of marks and no word labels. Press `?` for a one-screen legend of every mark and key.
 
 ## View modes
 
@@ -68,6 +74,7 @@ Every control is a button on the bottom row, and each has a key.
 | `b` | Ring the terminal bell when a session starts waiting on you |
 | `u` | Retry the usage read now (the button appears only while it is failing) |
 | `space` | Seen it. The button counts what is new since you last pressed it: sessions that started waiting on you, things that failed, stalled or finished, and new replies |
+| `?` | Legend: what every mark and key means. Any key closes it |
 | `esc` | Leave focus (or quit) |
 | `q` | Quit |
 
@@ -92,13 +99,15 @@ Without `--usage`, Claude Fleet makes no network requests at all.
 - run `security unlock-keychain ~/Library/Keychains/login.keychain-db` in the remote session, or
 - run Claude Fleet inside a tmux that was started on the Mac itself.
 
+While the read is failing for this reason, the screen prints these on one dim line under the account figures.
+
 **Shared figures.** So that a dashboard in a remote terminal can still show usage, a dashboard that reads the figures successfully saves them to `${XDG_CACHE_HOME:-~/.cache}/claude-fleet/usage.json` (readable only by you). It holds Anthropic's figures and the time they were fetched, and never the login. This is the one file Claude Fleet ever writes. A dashboard whose own read fails shows the figures from that file, or failing that the ones Claude Code itself last cached (the `cachedUsageUtilization` entry of `~/.claude.json`; no other key is read). Figures under ten minutes old are shown as current. Older ones are shown dim with the time they date from and the reason the read is failing. Figures more than a day old are not shown.
 
 ## Things to know
 
 - **It reads Claude Code's on-disk files, which are not a documented interface.** It was written against Claude Code 2.1.296 on macOS. Another version may move things, and parts of the screen will then come up empty. Linux should work but has not been tried.
 - **"Stalled?" is a question, not a finding.** A thread is marked when it has had a tool call outstanding and written nothing for ten minutes (`--stall <minutes>`; 0 turns it off) while the session's whole process tree is under 1% CPU. A tool that is waiting on another machine looks exactly the same. Only a session that is working can be marked.
-- **Agent status is inferred.** A spinner means the agent wrote to its transcript in the last minute. A yellow dot means a tool call has been outstanding longer than that. A grey circle means quiet with nothing outstanding.
+- **Agent status is inferred.** A spinner means the agent wrote to its transcript in the last minute. A white `◐` means a tool call has been outstanding longer than that (red, with `stalled?`, once the stall watch marks it). A grey circle means quiet with nothing outstanding.
 - **Context categories are estimates (marked `≈`).** They are sized from the length of the prompt, tool definitions, memory files and skill listing recorded in the transcript, with the rest counted as messages. They will not match `/context` exactly, and small categories are drawn slightly larger than scale so they stay visible.
 - **The window size is assumed:** 1M tokens for Opus, Sonnet and Fable 5 models, or anything already past 200k; otherwise 200k.
 - **The summary and the question are not generated here.** They come from the status a background session records about itself, or from a pending question in the transcript. Sessions that record neither show no summary.

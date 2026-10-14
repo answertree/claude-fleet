@@ -2368,8 +2368,8 @@ export function fitViews(views: View[], avail: number): { views: View[]; gaps: b
 // holding the machine, the account and the fleet chart; and the rule, which is also the time axis of
 // every sparkline below it), three rows under that. Compact mode and terminals under 100 columns keep
 // the older header. The height follows the terminal's rows, never the number of sessions, so the
-// header does not jump. The one exception is a remedy line, which is there only while a failing usage
-// read has something you can do about it.
+// header does not jump. The one exception is a remedy line, which is there for as long as the usage
+// read is failing for a reason you can do something about.
 
 export type HeaderKind = "tall" | "medium" | "old";
 export const headerKind = (W: number, rows: number, mode: Mode = opt.mode): HeaderKind => (mode === "compact" || W < 100 ? "old" : rows >= 40 ? "tall" : "medium");
@@ -2377,9 +2377,9 @@ export const headerKind = (W: number, rows: number, mode: Mode = opt.mode): Head
 type Seg = [text: string, color?: RGB, bold?: boolean];
 const segsWidth = (parts: Seg[]) => parts.reduce((n, p) => n + width(p[0]), 0);
 /** `text` when it fits in `w` cells; cut with … when enough of it would be left to mean something; else nothing. */
-const fitOrDrop = (text: string, w: number): string => (width(text) <= w ? text : w >= 8 ? fit(text, w, "l", true).trimEnd() : "");
-/** The first wording that fits in `w` cells, else the last one cut with …. */
-const firstFit = (wordings: string[], w: number): string => wordings.find((x) => width(x) <= w) ?? fitOrDrop(wordings[wordings.length - 1], w);
+const fitOrDrop = (text: string, w: number): string => (width(text) <= w ? text : w >= 8 ? fit(text, w, "l", true).replace(/\s+…$/, "…") : "");
+/** The first wording that fits in `w` cells, else the fullest one cut with …. */
+const firstFit = (wordings: string[], w: number): string => wordings.find((x) => width(x) <= w) ?? fitOrDrop(wordings[0], w);
 
 /**
  * A limit's gauge, `w` cells: ━ for the part used, in the limit rule's colour, then a faint track. `tick`
@@ -2625,7 +2625,8 @@ function accountBlock(rows: Row[], g: Grid, a: AccountView | undefined, now: num
   };
   limitRow(rows[0], "5h", five);
   limitRow(rows[1], "7d", week);
-  if (stale) return void failLine(rows[2], [`as of ${hhmm(a.asOf)}${a.reason ? ` ${ICON.sep} ${a.reason}` : ""}`]);
+  // Where "as of" does not fit beside the reason, the time alone still says the figures are old.
+  if (stale) return void failLine(rows[2], a.reason ? [`as of ${hhmm(a.asOf)} ${ICON.sep} ${a.reason}`, `${hhmm(a.asOf)} ${ICON.sep} ${a.reason}`] : [`as of ${hhmm(a.asOf)}`]);
 
   const x = a.extra;
   const opus = limitOf("seven_day_opus");
@@ -2754,8 +2755,9 @@ export function header(sessions: Session[], W: number, rows: number, now: number
   const tailsHere = sessions.flatMap(tailsOf);
   const counts = bucketsIn(tailsHere.map((t) => t.tools), win);
   const a = opt.usage ? accountView(now) : undefined;
-  // A reading you can do something about brings its remedy, on one dim line under the blocks. Current figures need none.
-  const remedy = a && a.kind !== "current" ? usageRemedy(a.reason, g.textEnd - 1) : "";
+  // A failing read you can do something about brings its remedy, on one dim line under the blocks. The line is there for as long
+  // as the reason is, whether or not somebody else's figures are filling the block, so the header does not change height as those come and go.
+  const remedy = a ? usageRemedy(a.reason, g.textEnd - 1) : "";
   const body = Array.from({ length: (kind === "tall" ? 3 : 1) + (remedy ? 1 : 0) }, () => new Row(W));
   if (kind === "tall") {
     machineBlock(body, g);
@@ -3254,7 +3256,7 @@ export function legend(cols: number, rows: number): string[] {
     key("q", "quit"),
   ];
   const two = W >= 78;
-  const colW = two ? Math.floor((W - 4) / 2) : W - 2;
+  const colW = two ? Math.min(44, Math.floor((W - 4) / 2)) : W - 2; // on a wide screen the two columns stay together
   const body: [Line, Line][] = two ? Array.from({ length: Math.max(left.length, right.length) }, (_, i) => [left[i] ?? [], right[i] ?? []]) : [...left, [], ...right].map((line) => [line, []]);
   const out: string[] = [];
   const title = new Row(W);

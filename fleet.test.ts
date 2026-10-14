@@ -1346,7 +1346,7 @@ describe("header and chrome", () => {
     expect(block(150, "sonnetWeek")[2]).toBe("sonn… ━━━━━━━┿────  64%  resets Fri 09:00");
     // 110 columns: the same block on narrower columns, with reasons cut rather than spilling under the lane.
     expect(block(110, "none")).toEqual(["5h    ╌╌╌╌╌╌╌╌   --  no reading yet", "7d    ╌╌╌╌╌╌╌╌   --  next try 23:56", "✗ keychain: no answer in 5s"]);
-    expect(block(110, "stale")[2]).toBe("✗ as of 23:12 · Anthropic answered …");
+    expect(block(110, "stale")[2]).toBe("✗ 23:12 · Anthropic answered 429"); // the status is worth more than the words "as of"
     expect(block(110, "off")).toEqual(["top   ━━━━━━━━ 212%  bun", "      ━━━━━━━─  88%  node", "      ━━━─────  41%  tsc"]);
   });
 
@@ -1394,9 +1394,14 @@ describe("header and chrome", () => {
     expect(remote[4].slice(106, 136)).toMatch(/^[▁▂▃▄▅▆▇█]{30}$/); // the chart's bottom row, directly above the axis
     expect(remote[5]).toBe(TALL_150[4]);
     expect(raw(150, 44, "remote")[4]).toContain(F.fg(F.C.dim, "run: security unlock-keychain ~/Library/Keychains/login.keychain-db · or use a tmux started on the Mac"));
-    // Stale figures and a closed keychain: the same line. Fresh figures from another dashboard: nothing is wrong on screen, so no line.
+    // The line is there for as long as the reason is: with stale figures, and with fresh ones another reader fetched.
+    // (Those come and go as that reader does, and the header must not change height each time.)
     expect(head(150, 44, "staleRemote").length).toBe(6);
-    expect(head(150, 44, "shared")).toEqual(TALL_150);
+    expect(block(150, "staleRemote")[2]).toBe("✗ as of 23:12 · keychain: closed to remote…");
+    const shared = head(150, 44, "shared");
+    expect(shared.length).toBe(6);
+    expect(block(150, "shared")).toEqual(block(150, "current")); // the figures are current, so the block shows them as usual
+    expect(shared[4].slice(0, 104)).toBe(remote[4].slice(0, 104));
     // Other reasons have no remedy, so no line.
     expect([head(150, 44, "none").length, head(150, 44, "stale").length]).toEqual([5, 5]);
     // Medium: one more row, with the chart two rows tall. Narrow: the command is the last thing to be cut.
@@ -1465,7 +1470,7 @@ describe("header and chrome", () => {
         for (const account of Object.keys(ACCOUNT)) {
           const lines = head(W, rows, account, fleets[g.laneW as 20 | 30]);
           const where = `${W}x${rows} ${account}`;
-          const remedy = account === "remote" || account === "staleRemote" ? 1 : 0;
+          const remedy = account === "remote" || account === "staleRemote" || account === "shared" ? 1 : 0;
           expect([where, lines.length]).toEqual([where, (rows >= 40 ? 5 : 3) + remedy]);
           for (const line of lines) expect([where, F.width(line) <= W - 1]).toEqual([where, true]); // column W stays blank
           for (const line of lines.slice(1, -1)) {
