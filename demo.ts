@@ -187,6 +187,37 @@ function taskHistory(steps: TaskStep[], used: number | ((msAgo: number) => numbe
     },
   }));
 }
+/**
+ * What the busy session does beside the conversation: two pull requests linked, two background
+ * commands still running, two tool calls that failed, files edited, and one compaction.
+ */
+function sideHistory(used: number | ((msAgo: number) => number)): unknown[] {
+  // Context readings on the same curve as the rest of the transcript, so --runway's forecast still holds.
+  const ctx = (msAgo: number) => Math.round(typeof used === "function" ? used(msAgo) : used);
+  const tool = (msAgo: number, id: string, name: string, input: Record<string, unknown>) => ({ type: "assistant", timestamp: iso(msAgo), message: { id: `side-${id}`, model: "claude-opus-5-5", content: [{ type: "tool_use", id, name, input }], usage: { input_tokens: 4, cache_read_input_tokens: ctx(msAgo), output_tokens: 40 } } });
+  const result = (msAgo: number, id: string, content: string, isError = false) => ({ type: "user", timestamp: iso(msAgo), message: { content: [{ type: "tool_result", tool_use_id: id, content, ...(isError ? { is_error: true } : {}) }] } });
+  const link = (msAgo: number, n: number) => ({ type: "pr-link", timestamp: iso(msAgo), prNumber: n, prRepository: "shop/payments", prUrl: `https://github.com/shop/payments/pull/${n}`, sessionId: "demo" });
+  const edit = (msAgo: number, id: string, file: string) => tool(msAgo, id, "Edit", { file_path: `/work/shop/src/payments/${file}`, old_string: "a", new_string: "b" });
+  return [
+    { type: "system", subtype: "compact_boundary", timestamp: iso(27 * MIN), content: "Conversation compacted" },
+    link(24 * MIN, 412),
+    edit(17 * MIN, "e1", "refund.ts"),
+    edit(15 * MIN, "e2", "clock.ts"),
+    edit(13 * MIN, "e3", "refund.test.ts"),
+    edit(8 * MIN, "e4", "retry.ts"),
+    edit(7 * MIN, "e5", "retry.test.ts"),
+    link(7 * MIN, 413),
+    tool(6 * MIN, "bg1", "Bash", { command: "gh run watch", description: "Watch CI on #413", run_in_background: true }),
+    result(6 * MIN - 1000, "bg1", "Command running in background with ID: bwatch413. Output is being written to: /tmp/watch.log"),
+    tool(5 * MIN, "f1", "Bash", { command: "bun test refund", description: "Run the refund tests" }),
+    result(5 * MIN - 3000, "f1", "Exit code 1\nFAIL refund.test.ts > rounds half up when the clock ticks over", true),
+    tool(4 * MIN, "f2", "Bash", { command: "bun test refund", description: "Run the refund tests" }),
+    result(4 * MIN - 3000, "f2", "<tool_use_error>Exit code 1\nFAIL refund.test.ts > rounds half up when the clock ticks over</tool_use_error>", true),
+    tool(3 * MIN, "bg2", "Bash", { command: "bun test --repeat 200", description: "Run the refund tests 200 times", run_in_background: true }),
+    result(3 * MIN - 1000, "bg2", "Command running in background with ID: brepeat. Output is being written to: /tmp/repeat.log"),
+  ];
+}
+
 /** Transcript rows in the order they were written. */
 const byTime = (rows: unknown[]): unknown[] =>
   rows.map((r, i) => [r, i] as const).sort(([a, i], [b, j]) => Date.parse((a as any).timestamp) - Date.parse((b as any).timestamp) || i - j).map(([r]) => r);
@@ -197,8 +228,8 @@ function busyJob(n: number, o: { sid: string; name: string; cwd: string; branch:
   const used = o.growing ? (msAgo: number) => 611_000 - 12_200 * Math.max(0, Math.min(msAgo / MIN, 12) - 2) : 611_000;
   const dir = session(n, {
     sid: o.sid, name: o.name, kind: "bg", status: "busy", cwd: o.cwd, upMin: o.upMin, branch: o.branch, mem: 0.4, cpu: o.quietReviewer ? 0.2 : 3,
-    job: { state: "working", detail: "bisecting the three payment tests that fail one run in twenty" },
-    main: [...loaded(118_000, 30_000), ...byTime([...taskHistory(o.manyTasks ? MANY_TASK_STEPS : TASK_STEPS, used), ...transcript({ calls: 30, endAgo: 2 * MIN, ask: "find out why the payment tests are flaky and fix them", used, pending: ["Workflow", { description: "Bisect and fix the flaky payment tests" }],
+    job: { state: "working", detail: "bisecting the three payment tests that fail one run in twenty", tokens: 2_400_000 } as Record<string, unknown> as Record<string, string>,
+    main: [...loaded(118_000, 30_000), ...byTime([...taskHistory(o.manyTasks ? MANY_TASK_STEPS : TASK_STEPS, used), ...sideHistory(used), ...transcript({ calls: 30, endAgo: 2 * MIN, ask: "find out why the payment tests are flaky and fix them", used, pending: ["Workflow", { description: "Bisect and fix the flaky payment tests" }],
       says: ["Three tests fail intermittently, all in the payments suite. I'm running each two hundred times under load to find which ones share a cause.", "Two of the three share a cause: both read the clock twice and assume the same second. The third is separate. I've started a workflow with one agent per test, and a reviewer to confirm each fix."] })])],
   });
   const task = (id: number, subject: string, status: string, more: Record<string, unknown> = {}) => write(path.join(home, "tasks", o.sid, `${id}.json`), JSON.stringify({ id: String(id), subject, status, description: "", blocks: [], blockedBy: [], ...more }));
@@ -341,6 +372,15 @@ if (account) {
   if (!argv.includes("--usage")) argv.push("--usage");
 }
 if (seenMin) env.FLEET_SEEN = String(now - Number(seenMin) * MIN);
+// The checkout's git state and the pull requests' CI, as git and gh would report them, so the demo needs neither.
+write(path.join(home, "git-fixture.json"), JSON.stringify({ "/work/shop": "## fix/flaky-payments...origin/fix/flaky-payments [ahead 2]\n M src/payments/refund.ts\n M src/payments/retry.ts\n?? notes.md\n" }));
+write(path.join(home, "pr-fixture.json"), JSON.stringify({
+  "shop/payments#412": { state: "MERGED", isDraft: false, statusCheckRollup: [] },
+  "shop/payments#413": { state: "OPEN", isDraft: false, statusCheckRollup: [...Array(14)].map(() => ({ conclusion: "SUCCESS" })).concat([...Array(6)].map(() => ({ status: "IN_PROGRESS", conclusion: "" }))) },
+}));
+env.FLEET_GIT_FIXTURE = path.join(home, "git-fixture.json");
+env.FLEET_PR_FIXTURE = path.join(home, "pr-fixture.json");
+if (!argv.includes("--prs")) argv.push("--prs");
 if (focus) env.FLEET_FOCUS = "bbbbbbbb-0000-4000-8000-000000000002";
 
 const fleet = path.join(import.meta.dir, "fleet.ts");

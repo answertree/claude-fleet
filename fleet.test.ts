@@ -2505,7 +2505,8 @@ describe("the detail view", () => {
       expect(at(rows[4], " out")).toBeGreaterThan(107);
       expect(rows[6].length).toBe(104); // nothing beside the fourth row of the stack
       // A promoted prompt is the subheading, with ▸ and its age, and is not repeated below.
-      expect(rows[12]).toBe(" ██ D O C S   S I T E   S E A R C H                              work/docs @ main · interactive cccccccc                   ● W O R K I N G  ·  up 22m");
+      // The place carries the session's totals when there is room: here, the agents it has run.
+      expect(rows[12]).toBe(" ██ D O C S   S I T E   S E A R C H                   work/docs @ main · interactive cccccccc · 3 agents                   ● W O R K I N G  ·  up 22m");
       expect(rows[13].slice(0, 104)).toBe(" ██ ▸ why does search miss pages added this week?".padEnd(101) + "29m");
       expect(rows.filter((r) => r.includes("why does search miss")).length).toBe(1);
       // Roster: label 7-48, action from 51, type and model ending at 104, age ending at 149.
@@ -2517,7 +2518,7 @@ describe("the detail view", () => {
       expect(rows[19]).toBe(" ▌  ✓ 1 agent finished in the last 30m  ·  d lists them");
       for (const r of rows.slice(16, 19)) expect(F.width(r)).toBe(149);
       // The busy block: tasks row, main thread on a tool (its action runs to 104), workflow with trail and strip, agents indented 2.
-      expect(rows[21]).toBe(" ██ F L A K Y   T E S T   H U N T                           work/shop @ fix/flaky-payments · bg bbbbbbbb                  ● W O R K I N G  ·  up 1h04");
+      expect(rows[21]).toBe(" ██ F L A K Y   T E S T   H U N T                work/shop @ fix/flaky-payments · bg bbbbbbbb · 5 agents                  ● W O R K I N G  ·  up 1h04");
       expect(rows[22].slice(0, 66)).toBe(" ██ bisecting the three payment tests that fail one run in twenty ");
       expect(rows[29]).toBe(" ▌  ✓ ✓ ◐ ○ ○ ○  2/6  Fixing the clock-dependent tests");
       expect(rows[30].slice(0, 98)).toBe(" ▌  ◐ main thread                                 Workflow  Bisect and fix the flaky payment tests".padEnd(98));
@@ -3007,6 +3008,80 @@ describe("the detail view", () => {
     });
   });
 
+  // ── the rows beside the conversation ──
+
+  /** The busy session doing things beside the conversation, with what git and gh would say. */
+  function sided(now = NOW): F.Session {
+    const s = busy(now);
+    s.side = {
+      prs: [{ repo: "o/r", number: 413, url: "", t: now - 7 * MIN }, { repo: "o/r", number: 412, url: "", t: now - 24 * MIN }],
+      bg: [{ id: "a", desc: "Watch CI on #413", started: now - 6 * MIN }, { id: "b", desc: "Run the refund tests 200 times", started: now - 3 * MIN }],
+      fails: [{ t: now - 5 * MIN, tool: "Bash", text: "FAIL refund.test.ts" }, { t: now - 4 * MIN, tool: "Bash", text: "FAIL refund.test.ts > rounds half up" }],
+      edits: [{ path: "/w/retry.ts", t: now - 2 * MIN }, { path: "/w/clock.ts", t: now - 9 * MIN }, { path: "/w/refund.ts", t: now - 12 * MIN }, { path: "/w/totals.ts", t: now - 15 * MIN }],
+      compactions: 2,
+      cwd: "/w",
+    };
+    return s;
+  }
+  const withSideState = <T>(run: () => T): T => {
+    F.gitState.set("/w", { at: NOW, state: { branch: "fix", dirty: 3, ahead: 2, behind: 0 } });
+    F.prState.set("o/r#413", { at: NOW, state: { state: "OPEN", draft: false, pass: 14, fail: 0, pending: 6 } });
+    F.prState.set("o/r#412", { at: NOW, state: { state: "MERGED", draft: false, pass: 0, fail: 0, pending: 0 } });
+    try {
+      return run();
+    } finally {
+      F.gitState.delete("/w");
+      F.prState.delete("o/r#413");
+      F.prState.delete("o/r#412");
+    }
+  };
+
+  test("under the subheading, while there is room: failures, background commands, pull requests with their CI, and what it has changed", () => {
+    quietly(() =>
+      withSideState(() => {
+        const rows = draw([sided()], 150, 60).map((r) => r.slice(0, 104).trimEnd());
+        const at = rows.findIndex((r) => r.includes("failed in 10m"));
+        expect(rows.slice(at, at + 4).map((r) => r.replace(/ {2,}(\S+)$/, " … $1"))).toEqual([
+          " ▌  ✗ 2 failed in 10m  ·  Bash: FAIL refund.test.ts > rounds half up … 4m",
+          " ▌  ↻ 2 running  ·  Watch CI on #413 6m  ·  Run the refund tests 200 times 3m",
+          " ▌  ⇡ #413 ◐ CI 14/20  ·  #412 ✓ merged",
+          " ▌  ± 4 files changed  ·  3 uncommitted · 2 ahead  ·  retry.ts clock.ts refund.ts +1 … 2m",
+        ]);
+        // They sit under the subheading, above the conversation.
+        expect(rows[at - 1]).toContain("bisecting the three payment tests");
+        // Without --prs (nothing from GitHub) a pull request is its number alone.
+        F.prState.delete("o/r#413");
+        F.prState.delete("o/r#412");
+        expect(draw([sided()], 150, 60).find((r) => r.includes("⇡"))!.slice(0, 104).trimEnd()).toBe(" ▌  ⇡ #413  ·  #412");
+      }),
+    );
+  });
+
+  test("the side rows give way in order: what it has changed first, then pull requests and background commands after the earlier replies, and failures late", () => {
+    quietly(() =>
+      withSideState(() => {
+        const at: Record<string, number> = {};
+        for (let avail = plan([sided()], 150, 200).heights[0]; avail >= 2; avail--) {
+          const k = plan([sided()], 150, avail).blocks[0].keep;
+          const now: Record<string, boolean> = { changes: !k.changes, earlier: k.earlier.every((n) => n === 0), prs: !k.prs, bg: !k.bgRow, reply1: k.reply <= 1, trouble: !k.trouble };
+          for (const [what, cut] of Object.entries(now)) if (cut && at[what] === undefined) at[what] = avail;
+        }
+        const order = ["changes", "earlier", "prs", "bg", "reply1", "trouble"];
+        for (let i = 1; i < order.length; i++) expect([order[i - 1], order[i], at[order[i - 1]] > at[order[i]]]).toEqual([order[i - 1], order[i], true]);
+      }),
+    );
+  });
+
+  test("the title's place carries the session's totals when there is room: tokens, agents and compactions", () => {
+    quietly(() => {
+      const s = sided();
+      s.job = { ...s.job!, tokens: 2_400_000 };
+      const title = draw([s], 200, 60)[0];
+      expect(title).toContain("work/shop @ fix/flaky-payments · bg bbbbbbbb · 2.4M tok · 5 agents · compacted 2×");
+      expect(draw([s], 150, 60)[0]).not.toContain("2.4M tok"); // too long here: the totals go first
+    });
+  });
+
   // ── the line under each task ──
 
   /** The busy session with four tasks: two in progress (one whose latest message is a reply already shown above), two still to start. */
@@ -3395,6 +3470,60 @@ describe("the detail view", () => {
               }
             }
     });
+  });
+});
+
+describe("what a session is doing beside the conversation", () => {
+  const use = (at: number, id: string, name: string, input: object) => ({ type: "assistant", timestamp: iso(at), cwd: "/work/shop", message: { id: `m${id}`, content: [{ type: "tool_use", id, name, input }] } });
+  const res = (at: number, id: string, content: string, isError = false) => ({ type: "user", timestamp: iso(at), message: { content: [{ type: "tool_result", tool_use_id: id, content, ...(isError ? { is_error: true } : {}) }] } });
+  const link = (at: number, n: number, repo = "o/r") => ({ type: "pr-link", timestamp: iso(at), prNumber: n, prRepository: repo, prUrl: `https://github.com/${repo}/pull/${n}` });
+
+  test("pull requests linked, background commands started and ended, failed tool calls, files edited, compactions and the folder it works in", () => {
+    const t = F.newTail("/nowhere/side.jsonl");
+    for (const line of [
+      link(NOW - 30 * MIN, 7),
+      link(NOW - 29 * MIN, 8, "o/r; rm -rf /"), // not a repository's name: left out
+      { type: "system", subtype: "compact_boundary", timestamp: iso(NOW - 28 * MIN) },
+      use(NOW - 27 * MIN, "e1", "Edit", { file_path: "/w/a.ts" }),
+      use(NOW - 26 * MIN, "e2", "Write", { file_path: "/w/b.ts" }),
+      use(NOW - 25 * MIN, "e3", "Edit", { file_path: "/w/a.ts" }), // edited again: the latest
+      use(NOW - 20 * MIN, "b1", "Bash", { description: "Watch CI", run_in_background: true }),
+      res(NOW - 20 * MIN + 1000, "b1", "Command running in background with ID: shell1. Output is being written to: /tmp/x"),
+      use(NOW - 19 * MIN, "b2", "Bash", { description: "Long build", run_in_background: true }),
+      res(NOW - 19 * MIN + 1000, "b2", "Command running in background with ID: shell2."),
+      use(NOW - 18 * MIN, "b3", "Bash", { description: "Doomed", run_in_background: true }),
+      res(NOW - 18 * MIN + 1000, "b3", "Command running in background with ID: shell3."),
+      { type: "user", timestamp: iso(NOW - 10 * MIN), message: { content: "<task-notification>\n<task-id>shell1</task-id>\n<status>completed</status>\n</task-notification>" } },
+      use(NOW - 9 * MIN, "k1", "TaskStop", { task_id: "shell3" }),
+      use(NOW - 5 * MIN, "x1", "Bash", { description: "Run the tests" }),
+      res(NOW - 5 * MIN + 500, "x1", "<tool_use_error>Exit code 1\nFAIL a.test.ts</tool_use_error>", true),
+    ])
+      F.ingest(t, JSON.stringify(line));
+    expect([[...t.prs.keys()], t.compactions, [...t.edits], t.cwd]).toEqual([["o/r#7"], 1, [["/w/b.ts", NOW - 26 * MIN], ["/w/a.ts", NOW - 25 * MIN]], "/work/shop"]);
+    expect([...t.bg].map(([id, b]) => [id, b.desc, b.status ?? "running"])).toEqual([["shell1", "Watch CI", "completed"], ["shell2", "Long build", "running"], ["shell3", "Doomed", "stopped"]]);
+    expect(t.fails).toEqual([{ t: NOW - 5 * MIN + 500, tool: "Bash", text: "FAIL a.test.ts" }]); // past the bare exit code, tags taken off
+    const side = F.sideOf([t], NOW);
+    expect([side.bg.map((b) => b.id), side.fails.length, side.prs.map((p) => p.number), side.edits.map((e) => e.path), side.cwd]).toEqual([["shell2"], 1, [7], ["/w/a.ts", "/w/b.ts"], "/work/shop"]);
+    expect(F.sideOf([t], NOW + 6 * MIN).fails).toEqual([]); // failures older than ten minutes are not trouble now
+  });
+
+  test("the search before the tail also finds pull requests, edits and compactions", () => {
+    const file = path.join(SCRATCH, "side-early.jsonl");
+    const lines = [link(NOW - 50 * MIN, 41), { type: "system", subtype: "compact_boundary", timestamp: iso(NOW - 49 * MIN) }, use(NOW - 48 * MIN, "e1", "Write", { file_path: "/w/early.ts" })];
+    fs.writeFileSync(file, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+    const upTo = fs.statSync(file).size;
+    const t = F.newTail(file, upTo);
+    F.scanTaskUpdates(t, upTo);
+    expect([[...t.prs.keys()], t.compactions, [...t.edits.keys()]]).toEqual([["o/r#41"], 1, ["/w/early.ts"]]);
+  });
+
+  test("git's short status and gh's checks are read into what the rows need", () => {
+    expect(F.parseGitStatus("## main...origin/main [ahead 2, behind 1]\n M a.ts\n?? b.ts\n")).toEqual({ branch: "main", dirty: 2, ahead: 2, behind: 1 });
+    expect(F.parseGitStatus("## No commits yet on main\n")).toEqual({ branch: "main", dirty: 0, ahead: 0, behind: 0 });
+    expect(F.parseGitStatus("fatal: not a git repository")).toBeUndefined();
+    const checks = [{ conclusion: "SUCCESS" }, { conclusion: "SKIPPED" }, { conclusion: "FAILURE" }, { status: "IN_PROGRESS", conclusion: "" }, { state: "PENDING" }, { state: "SUCCESS" }];
+    expect(F.summarizePr({ state: "OPEN", isDraft: true, statusCheckRollup: checks })).toEqual({ state: "OPEN", draft: true, pass: 3, fail: 1, pending: 2 });
+    expect(F.summarizePr({ nope: 1 })).toBeUndefined();
   });
 });
 
@@ -3802,7 +3931,7 @@ describe("demo", () => {
     expect(many).toMatch(/… \d+ more tasks/);
     expect(many).not.toContain("Quarantine the flaky tests"); // deleted
     expect(strip(demo(["--many-tasks"], 200, 60))).toContain("○ Обновить тексты ошибок оплаты в русской версии сайта");
-    const focus = strip(demo(["--focus", "--many-tasks"], 150, 44));
+    const focus = strip(demo(["--focus", "--many-tasks"], 150, 60)); // tall enough for every task beside the busy session's side rows
     expect(focus).toContain("✓ Reproduce each failure under load on the build machine");
     expect(focus).toContain("○ Close the three flaky-test tickets · blocked");
     expect(focus).not.toContain("C H E C K O U T");

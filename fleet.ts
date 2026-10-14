@@ -15,7 +15,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { StringDecoder } from "node:string_decoder";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 /**
  * Where Claude Code keeps its files; the demo and the tests point FLEET_HOME at made-up sessions. Read each
@@ -49,6 +49,8 @@ Usage: bun fleet.ts [minutes] [options]
                  \${XDG_CACHE_HOME:-~/.cache}/claude-fleet/usage.json (the one
                  file it writes), and when its own read fails shows the
                  figures in that file or in Claude Code's ~/.claude.json
+  --prs          show the CI state of each session's pull requests (asks GitHub
+                 through your gh command, every two minutes per pull request)
   --bell         ring the terminal bell when a session starts waiting on you,
                  or when something stalls
   --stall <min>  mark a thread "stalled?" after this many minutes sitting on a
@@ -76,6 +78,7 @@ export const opt = {
   showAll: false,
   bell: false,
   usage: false,
+  prs: false, // --prs: ask GitHub (through gh) for the state of each session's pull requests
   mouse: true,
   once: false,
   plainGlyphs: false, // --plain-glyphs: fallbacks for fonts that lack ≡ ┿ ╌ ◇
@@ -98,6 +101,7 @@ export function parseArgs(argv: string[]): "help" | "glyphs" | undefined {
   opt.bell = argv.includes("--bell");
   opt.usage = argv.includes("--usage") || process.env.FLEET_USAGE === "1";
   opt.mouse = !argv.includes("--no-mouse");
+  opt.prs = argv.includes("--prs");
   const stall = valueOf("--stall");
   if (stall !== undefined && /^\d+(\.\d+)?$/.test(stall)) opt.stallMin = Number(stall);
   return undefined;
@@ -417,6 +421,9 @@ export const GLYPHS = {
   done: { g: "✓", is: "done" },
   failed: { g: "✗", is: "failed, stopped or unavailable" },
   workflow: { g: "≡", plain: "◇", is: "workflow" },
+  pr: { g: "⇡", is: "the session's pull requests and their CI" },
+  background: { g: "↻", is: "commands it has running in the background" },
+  changes: { g: "±", is: "files it has changed, and the state of its git checkout" },
   railThick: { g: "██", is: "state rail on a session's head rows" },
   railThin: { g: "▌", is: "state rail on body rows" },
   gaugeFill: { g: "━", is: "gauge: filled" },
@@ -781,6 +788,14 @@ export interface Tail {
   says: { text: string; t: number }[]; // its last few messages, oldest first
   taskLog: Map<string, TaskTrace>; // each task its updates started or finished, by task id
   taskFocus: string[]; // the tasks in progress, in the order they were started: the last is the task in hand
+  prs: Map<string, PrLink>; // the pull requests it has linked, by "repo#number", oldest link first
+  bg: Map<string, { desc: string; started: number; ended?: number; status?: string }>; // its background commands, by shell id
+  bgAsked: Map<string, { desc: string; t: number }>; // background commands asked for, until their result names the shell
+  toolNames: Map<string, string>; // recent tool calls' names by id, so a failure can say which tool failed
+  fails: { t: number; tool: string; text: string }[]; // its recent failed tool calls, oldest first
+  edits: Map<string, number>; // files it has edited or written, by path, with when (last edited last)
+  compactions: number; // times its context was compacted
+  cwd?: string; // where it is working, from its own lines
   sayTs: number[]; // when each of its replies in the window was written, for "new since you looked"
   summary?: string; // the session's own "while you were away" summary
   summaryT?: number; // when it was written, so it can be compared with the last prompt
@@ -863,6 +878,67 @@ export function traceTask(t: Tail, input: any, ts: number) {
     t.taskFocus.push(id);
   } else e.finished = ts;
 }
+export interface PrLink {
+  repo: string;
+  number: number;
+  url: string;
+  t: number;
+}
+const EDIT_TOOLS = new Set(["Edit", "Write", "NotebookEdit", "MultiEdit"]);
+/** Keep a map to `max` entries, letting the oldest go. */
+const capMap = <K, V>(m: Map<K, V>, max: number) => {
+  while (m.size > max) m.delete(m.keys().next().value as K);
+};
+/** What a line says beside the conversation: a pull request linked, a compaction, where the session works. */
+export function absorbSide(t: Tail, o: any, ts: number) {
+  if (typeof o?.cwd === "string" && o.cwd.startsWith("/") && !o.isSidechain) t.cwd = o.cwd;
+  if (o?.type === "pr-link") {
+    const repo = String(o.prRepository ?? "");
+    const number = Number(o.prNumber);
+    if (!/^[\w.-]+\/[\w.-]+$/.test(repo) || !Number.isInteger(number) || number <= 0) return;
+    const key = `${repo}#${number}`;
+    t.prs.delete(key); // a link again moves it to the end, as the latest
+    t.prs.set(key, { repo, number, url: typeof o.prUrl === "string" ? safeLine(capText(o.prUrl, 300)) : "", t: ts });
+    capMap(t.prs, 50);
+  } else if (o?.type === "system" && o.subtype === "compact_boundary" && !o.isSidechain) t.compactions++;
+}
+function noteEdit(t: Tail, input: any, ts: number) {
+  const file = input?.file_path ?? input?.notebook_path;
+  if (typeof file !== "string" || !file) return;
+  t.edits.delete(file);
+  t.edits.set(file, ts);
+  capMap(t.edits, 500);
+}
+/** A tool result's text, whether it came as a string or as blocks. */
+const resultText = (c: unknown): string => (typeof c === "string" ? c : Array.isArray(c) ? c.map((x: any) => (x?.type === "text" && typeof x.text === "string" ? x.text : "")).join("\n") : "");
+/** A tool call's result: a background command's shell id, or a failure to remember. */
+function noteResult(t: Tail, item: any, ts: number) {
+  const id = typeof item?.tool_use_id === "string" ? item.tool_use_id : "";
+  const asked = id ? t.bgAsked.get(id) : undefined;
+  if (asked) {
+    const shell = /running in background with ID: ([\w-]+)/.exec(resultText(item.content).slice(0, 2000))?.[1];
+    if (shell) {
+      t.bg.set(shell, { desc: asked.desc, started: ts });
+      capMap(t.bg, 100);
+    }
+    t.bgAsked.delete(id);
+  }
+  if (item?.is_error === true) {
+    // The line that says what went wrong: past a bare "Exit code 1" when something follows it.
+    const lines = resultText(item.content).slice(0, 4000).replace(/<\/?[a-z_]+>/g, "").split("\n").map((x) => x.trim()).filter(Boolean);
+    const first = lines.find((x) => !/^exit code \d+$/i.test(x)) ?? lines[0] ?? "";
+    t.fails.push({ t: ts, tool: safeLine(capText(t.toolNames.get(id) ?? "", 100)), text: safeLine(capText(first, 300)) });
+    if (t.fails.length > 30) t.fails.shift();
+  }
+}
+/** Notices that background commands ended: each names its task id and how it ended. */
+function noteNotices(t: Tail, text: string, ts: number) {
+  for (const m of text.matchAll(/<task-id>([\w-]+)<\/task-id>[\s\S]*?<status>([a-z]+)<\/status>/g)) {
+    const b = t.bg.get(m[1]);
+    if (b && !b.ended) Object.assign(b, { ended: ts, status: m[2] });
+  }
+}
+
 /** A message from Claude belongs to the task in hand when it was written: the one started last of those in progress. */
 function noteTaskSay(t: Tail, text: string, ts: number) {
   const id = t.taskFocus[t.taskFocus.length - 1];
@@ -904,6 +980,7 @@ export function ingest(t: Tail, line: string) {
     t.summary = safeText(capText(o.content, NOTE_KEEP));
     t.summaryT = ts;
   }
+  absorbSide(t, o, ts);
   if (o.type !== "assistant" && o.type !== "user") return;
   t.lastT = Math.max(t.lastT, ts);
   if (typeof o.gitBranch === "string" && o.gitBranch) t.branch = safeLine(o.gitBranch);
@@ -915,6 +992,21 @@ export function ingest(t: Tail, line: string) {
           t.tools.push(ts);
           t.lastTool = { name: safeLine(capText(String(item.name ?? ""), 200)), hint: safeLine(capText(hintFor(item.name, item.input), NOTE_KEEP)), t: ts };
           if (!o.isSidechain && item.name === "TaskUpdate") traceTask(t, item.input, ts);
+          if (!o.isSidechain) {
+            if (typeof item.id === "string") {
+              t.toolNames.set(item.id, String(item.name ?? ""));
+              capMap(t.toolNames, 300);
+            }
+            if (EDIT_TOOLS.has(item.name)) noteEdit(t, item.input, ts);
+            if (item.name === "Bash" && item.input?.run_in_background === true && typeof item.id === "string") {
+              t.bgAsked.set(item.id, { desc: safeLine(capText(hintFor(item.name, item.input) || "a background command", 200)), t: ts });
+              capMap(t.bgAsked, 100);
+            }
+            if (item.name === "TaskStop" || item.name === "KillShell") {
+              const b = t.bg.get(String(item.input?.task_id ?? item.input?.shell_id ?? ""));
+              if (b && !b.ended) Object.assign(b, { ended: ts, status: "stopped" });
+            }
+          }
         }
       }
     }
@@ -940,9 +1032,11 @@ export function ingest(t: Tail, line: string) {
     }
   } else if (Array.isArray(content) && content.some((i: any) => i?.type === "tool_result")) {
     t.lastResultT = Math.max(t.lastResultT, ts);
+    if (!o.isSidechain) for (const item of content) if (item?.type === "tool_result") noteResult(t, item, ts);
   } else if (!o.isMeta && !o.isSidechain) {
-    // Something the person typed. Harness-injected turns start with a tag; skip those.
+    // Something the person typed. Harness-injected turns start with a tag; skip those, though a notice that a background command ended is noted.
     const texts: string[] = typeof content === "string" ? [content] : Array.isArray(content) ? content.filter((i: any) => i?.type === "text").map((i: any) => String(i.text ?? "")) : [];
+    for (const text of texts) if (text.includes("<task-notification>")) noteNotices(t, text, ts);
     const typed = texts.map((x) => x.trim()).find((x) => x && !x.startsWith("<"));
     if (typed) t.ask = { text: safeText(capText(typed, PROMPT_KEEP)), t: ts };
   }
@@ -988,6 +1082,13 @@ export function newTail(file: string, start = 0, birth = 0): Tail {
     says: [],
     taskLog: new Map(),
     taskFocus: [],
+    prs: new Map(),
+    bg: new Map(),
+    bgAsked: new Map(),
+    toolNames: new Map(),
+    fails: [],
+    edits: new Map(),
+    compactions: 0,
     sayTs: [],
     ctxLog: [],
     tokens: new Map(),
@@ -1006,7 +1107,7 @@ const pendingOf = (t: Tail) => (t.lastTool && t.lastTool.t > t.lastResultT ? t.l
 const pendingTool = (t: Tail) => !!pendingOf(t);
 
 /** What the search before the tail looks for: task updates, and Claude's messages (a text block). */
-const TASK_MARKS = [Buffer.from('"name":"TaskUpdate"'), Buffer.from('"type":"text"')];
+const TASK_MARKS = ['"name":"TaskUpdate"', '"type":"text"', '"type":"pr-link"', '"subtype":"compact_boundary"', '"name":"Edit"', '"name":"Write"'].map((m) => Buffer.from(m));
 const TASK_LINE_MAX = 256 * 1024; // longer lines are tool results, not messages or task updates
 /**
  * The task updates and Claude's messages written before the part pump() tails, read once, so that a
@@ -1050,9 +1151,12 @@ export function scanTaskUpdates(t: Tail, upTo: number) {
           continue;
         }
         const ts = Date.parse(o?.timestamp);
-        if (o?.type !== "assistant" || o.isSidechain || Number.isNaN(ts) || !Array.isArray(o.message?.content)) continue;
+        if (Number.isNaN(ts)) continue;
+        absorbSide(t, o, ts);
+        if (o?.type !== "assistant" || o.isSidechain || !Array.isArray(o.message?.content)) continue;
         for (const item of o.message.content) {
           if (item?.type === "tool_use" && item.name === "TaskUpdate") traceTask(t, item.input, ts);
+          else if (item?.type === "tool_use" && EDIT_TOOLS.has(item.name)) noteEdit(t, item.input, ts);
           else if (item?.type === "text" && typeof item.text === "string" && item.text.trim()) noteTaskSay(t, safeText(capText(item.text, TASK_SAY_KEEP)), ts);
         }
       }
@@ -1167,6 +1271,149 @@ const taskOrder = (a: TaskItem, b: TaskItem): number => {
   const n = (id: string) => (/^\d+$/.test(id) ? Number(id) : Infinity);
   return n(a.id) - n(b.id) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 };
+/** What a session is doing beside the conversation, gathered from its transcripts. */
+export interface Side {
+  prs: PrLink[]; // newest link first
+  bg: { id: string; desc: string; started: number }[]; // background commands still running, oldest first
+  fails: { t: number; tool: string; text: string }[]; // tool calls that failed in the last ten minutes, oldest first
+  edits: { path: string; t: number }[]; // files it has changed, last changed first
+  compactions: number;
+  cwd?: string; // where it works, for its git state
+}
+const FAIL_WINDOW_MS = 10 * 60_000;
+const BG_MAX_MS = 24 * 3600_000; // a background command not heard of for a day is taken to have ended unseen
+/** A session's git checkout: its branch, files not committed, and commits ahead of and behind its upstream. */
+export interface GitState {
+  branch: string;
+  dirty: number;
+  ahead: number;
+  behind: number;
+}
+export function parseGitStatus(text: string): GitState | undefined {
+  const lines = text.split("\n");
+  if (!lines[0]?.startsWith("## ")) return undefined;
+  const head = lines[0].slice(3);
+  return {
+    branch: safeLine(head.split("...")[0].replace(/^No commits yet on /, "")),
+    dirty: lines.slice(1).filter((l) => l.trim()).length,
+    ahead: Number(/ahead (\d+)/.exec(head)?.[1] ?? 0),
+    behind: Number(/behind (\d+)/.exec(head)?.[1] ?? 0),
+  };
+}
+/** A pull request's state and its checks: passed, failed, still running. */
+export interface PrState {
+  state: string; // OPEN, MERGED or CLOSED
+  draft: boolean;
+  pass: number;
+  fail: number;
+  pending: number;
+}
+const CHECK_PASS = ["SUCCESS", "NEUTRAL", "SKIPPED"];
+const CHECK_FAIL = ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"];
+export function summarizePr(j: any): PrState | undefined {
+  if (!j || typeof j.state !== "string") return undefined;
+  const out: PrState = { state: j.state.toUpperCase(), draft: j.isDraft === true, pass: 0, fail: 0, pending: 0 };
+  for (const c of Array.isArray(j.statusCheckRollup) ? j.statusCheckRollup : []) {
+    const v = String(c?.conclusion || c?.state || c?.status || "").toUpperCase();
+    if (CHECK_PASS.includes(v)) out.pass++;
+    else if (CHECK_FAIL.includes(v)) out.fail++;
+    else out.pending++;
+  }
+  return out;
+}
+/** Read in the background and kept: git state by folder, pull request state by "repo#number". */
+export const gitState = new Map<string, { at: number; state?: GitState; busy?: boolean }>();
+export const prState = new Map<string, { at: number; state?: PrState; busy?: boolean }>();
+const GIT_EVERY_MS = 30_000;
+const PR_EVERY_MS = 120_000;
+const PR_DONE_EVERY_MS = 15 * 60_000; // merged or closed: it will not change much
+export const PR_SHOWN = 3; // pull requests on a session's row, newest linked first
+const fixture = (name: string): Record<string, unknown> | undefined => {
+  const file = process.env[name];
+  if (!file) return undefined;
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return {};
+  }
+};
+/**
+ * Run a command with a fixed program and argument list (never a shell), and hand its output to `done`:
+ * at once with `sync` (one frame, --once), else in the background, killed after five seconds.
+ */
+function runFor(cmd: string, args: string[], sync: boolean, done: (out: string | undefined) => void) {
+  if (sync) {
+    const r = spawnSync(cmd, args, { encoding: "utf8", timeout: 5000, maxBuffer: 4 << 20 });
+    return done(r.status === 0 ? r.stdout : undefined);
+  }
+  let out = "";
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(cmd, args, { stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    return done(undefined);
+  }
+  const timer = setTimeout(() => child.kill(), 5000);
+  child.stdout?.on("data", (d) => {
+    if (out.length < 4 << 20) out += d;
+  });
+  child.on("error", () => (clearTimeout(timer), done(undefined)));
+  child.on("close", (code) => (clearTimeout(timer), done(code === 0 ? out : undefined)));
+}
+/** Ask git for a folder's state, at most every 30 seconds. --no-optional-locks keeps it from taking the index lock a session may need. */
+export function pollGit(cwd: string, now: number, sync = false) {
+  if (!cwd.startsWith("/")) return;
+  const e = gitState.get(cwd);
+  if (e && (e.busy || now - e.at < GIT_EVERY_MS)) return;
+  const fx = fixture("FLEET_GIT_FIXTURE");
+  if (fx) return void gitState.set(cwd, { at: now, state: typeof fx[cwd] === "string" ? parseGitStatus(fx[cwd] as string) : undefined });
+  gitState.set(cwd, { at: e?.at ?? 0, state: e?.state, busy: true });
+  runFor("git", ["--no-optional-locks", "-C", cwd, "status", "--porcelain=v1", "-b"], sync, (out) => gitState.set(cwd, { at: clock(), state: out === undefined ? undefined : parseGitStatus(out) }));
+}
+/** Ask GitHub, through gh, for a pull request's state: every two minutes while it is open, every 15 once it is merged or closed. */
+export function pollPr(pr: PrLink, now: number, sync = false) {
+  const key = `${pr.repo}#${pr.number}`;
+  const e = prState.get(key);
+  const every = e?.state && e.state.state !== "OPEN" ? PR_DONE_EVERY_MS : PR_EVERY_MS;
+  if (e && (e.busy || now - e.at < every)) return;
+  const fx = fixture("FLEET_PR_FIXTURE");
+  if (fx) return void prState.set(key, { at: now, state: summarizePr(fx[key]) });
+  prState.set(key, { at: e?.at ?? 0, state: e?.state, busy: true });
+  runFor("gh", ["pr", "view", String(pr.number), "--repo", pr.repo, "--json", "state,isDraft,statusCheckRollup"], sync, (out) => {
+    let state: PrState | undefined;
+    try {
+      state = out === undefined ? undefined : summarizePr(JSON.parse(out));
+    } catch {}
+    prState.set(key, { at: clock(), state: state ?? e?.state });
+  });
+}
+/** Start the reads a frame will want: each session's git state, and with --prs its newest pull requests. */
+export function pollSides(sessions: Session[], now: number, sync = false) {
+  for (const s of sessions) {
+    if (!s.side) continue;
+    pollGit(s.side.cwd ?? s.cwd, now, sync);
+    if (opt.prs) for (const pr of s.side.prs.slice(0, PR_SHOWN)) pollPr(pr, now, sync);
+  }
+}
+const gitOf = (s: Session): GitState | undefined => gitState.get(s.side?.cwd ?? s.cwd)?.state;
+
+/** The side facts across a session's transcripts. */
+export function sideOf(mains: Tail[], now: number): Side {
+  const byFresh = [...mains].sort((p, q) => q.mtime - p.mtime);
+  const prs = new Map<string, PrLink>();
+  for (const m of mains) for (const [k, v] of m.prs) if (!prs.has(k) || prs.get(k)!.t < v.t) prs.set(k, v);
+  const edits = new Map<string, number>();
+  for (const m of mains) for (const [k, v] of m.edits) edits.set(k, Math.max(v, edits.get(k) ?? 0));
+  return {
+    prs: [...prs.values()].sort((p, q) => q.t - p.t),
+    bg: mains.flatMap((m) => [...m.bg].filter(([, b]) => !b.ended && now - b.started < BG_MAX_MS).map(([id, b]) => ({ id, desc: b.desc, started: b.started }))).sort((p, q) => p.started - q.started),
+    fails: mains.flatMap((m) => m.fails.filter((f) => now - f.t < FAIL_WINDOW_MS && f.t <= now)).sort((p, q) => p.t - q.t),
+    edits: [...edits].map(([path, t]) => ({ path, t })).sort((p, q) => q.t - p.t),
+    compactions: mains.reduce((n, m) => n + m.compactions, 0),
+    cwd: byFresh.map((m) => m.cwd).find(Boolean),
+  };
+}
+
 export interface Session {
   sid: string;
   pid: number;
@@ -1179,7 +1426,8 @@ export interface Session {
   agents: Agent[];
   workflows: Workflow[];
   tasks?: { done: number; doing: number; total: number; active: string; items: TaskItem[] }; // items: every task not deleted, in task order
-  job?: { state: string; detail: string; needs: string; since?: number }; // since: when a blocked job began waiting
+  job?: { state: string; detail: string; needs: string; since?: number; tokens?: number }; // since: when a blocked job began waiting; tokens: all it has used
+  side?: Side; // what it is doing beside the conversation
   jobId?: string;
 }
 
@@ -1488,7 +1736,7 @@ export function scan(now: number): Session[] {
       let job: Session["job"];
       if (reg.jobId && /^[\w-]+$/.test(String(reg.jobId))) {
         const st = readJson(path.join(CLAUDE, "jobs", String(reg.jobId), "state.json"));
-        if (st) job = { state: safeLine(st.state), detail: typeof st.detail === "string" ? safeText(capText(st.detail, NOTE_KEEP)) : "", needs: typeof st.needs === "string" ? safeText(capText(st.needs, NOTE_KEEP)) : "" };
+        if (st) job = { state: safeLine(st.state), detail: typeof st.detail === "string" ? safeText(capText(st.detail, NOTE_KEEP)) : "", needs: typeof st.needs === "string" ? safeText(capText(st.needs, NOTE_KEEP)) : "", tokens: typeof st.tokens === "number" && Number.isFinite(st.tokens) && st.tokens >= 0 ? st.tokens : undefined };
       }
       // A blocked job's wait starts when it began waiting on this question, and is not moved by later writes to its transcript (an
       // away summary, a title). Seen to change while the dashboard watched: its state file's time, written when it asked. Already
@@ -1525,6 +1773,7 @@ export function scan(now: number): Session[] {
         tasks,
         job,
         jobId: job ? String(reg.jobId) : undefined,
+        side: sideOf(mains, now),
       });
     } catch {}
   }
@@ -3194,6 +3443,10 @@ export interface Keep {
   taskScope: "all" | "open" | "doing"; // the tasks it lists: every one (focus), those not done, or only those in progress
   taskWrap: boolean; // each task's text on as many rows as it takes (focus), rather than one row cut with …
   taskDetail: "all" | "doing" | "none"; // the line under each listed task: under every one, under those in progress only, or under none
+  trouble: boolean; // the row of tool calls that failed in the last ten minutes
+  bgRow: boolean; // the row of background commands still running
+  prs: boolean; // the row of its pull requests
+  changes: boolean; // the row of files changed and the git checkout's state
   ctx: boolean; // the context row, where it has a row to itself
   main: boolean; // the main-thread row
   done: boolean; // the "n agents finished" line
@@ -3268,6 +3521,10 @@ export function blockOf(v: View, g: Grid, now: number, win: Win, focus = false):
       taskScope: focus ? "all" : "open",
       taskWrap: focus,
       taskDetail: "all",
+      trouble: body,
+      bgRow: body,
+      prs: body,
+      changes: body,
       ctx: body,
       main: body && v.showMain && !!m,
       done: body && v.doneCount > 0,
@@ -3300,6 +3557,7 @@ function stackOf(b: Block, g: Grid, now: number): StackRow[] {
   const k = b.keep;
   const rows: StackRow[] = [];
   if (k.now && b.nowLine) rows.push({ at: g.icon, segs: [[cutTo(b.nowLine, g.textEnd - g.icon + 1), C.dim]] });
+  rows.push(...sideRows(b, g, now));
   const said: { t: number; rows: StackRow[] }[] = [];
   if (k.prompt > 0 && b.prompt) {
     const p = b.prompt;
@@ -3356,6 +3614,82 @@ function stackOf(b: Block, g: Grid, now: number): StackRow[] {
     if (list.more) rows.push({ at: g.childIcon, segs: [[`${ICON.cut} ${list.more} more task${list.more === 1 ? "" : "s"}`, C.dim]] });
   }
   return rows;
+}
+
+// ── what a session is doing beside the conversation ──
+
+const sep = (): Seg => [`  ${ICON.sep}  `, C.faint];
+/** "4 failed in 10m · Bash: bun test exited 1": how many tool calls failed lately, and what the last one said. */
+export function troubleSegs(fails: Side["fails"]): Seg[] {
+  const last = fails[fails.length - 1];
+  return [[`${fails.length} failed in 10m`, C.red], sep(), [last.tool ? `${last.tool}: ` : "", C.dim], [last.text || "no message", C.dim]];
+}
+/** "2 running · Watch CI 6m · Full test suite 2m": background commands still going, oldest first, each with how long. */
+export function bgSegs(bg: Side["bg"], now: number): Seg[] {
+  return [[`${bg.length} running`, C.text], ...bg.flatMap((x): Seg[] => [sep(), [`${x.desc} `, C.dim], [ago(now - x.started), C.text]])];
+}
+/** "#1229 ✓ merged · #1231 ◐ CI 14/20 · #1232 ✗ 2 failing": each pull request with what GitHub says of it (with --prs), else its number. */
+export function prSegs(prs: PrLink[]): Seg[] {
+  return prs.flatMap((pr, i): Seg[] => {
+    const st = prState.get(`${pr.repo}#${pr.number}`)?.state;
+    const head: Seg[] = [...(i ? [sep()] : []), [`#${pr.number}`, C.text]];
+    if (!st) return head;
+    const checks = st.pass + st.fail + st.pending;
+    const tail: Seg[] =
+      st.state === "MERGED" ? [[` ${ICON.done} merged`, C.green]]
+      : st.state === "CLOSED" ? [[` ${ICON.failed} closed`, C.dim]]
+      : st.fail ? [[` ${ICON.failed} ${st.fail} failing`, C.red]]
+      : st.pending ? [[` ${ICON.progress} CI ${st.pass}/${checks}`, C.white]]
+      : checks ? [[` ${ICON.done} CI green`, C.green]]
+      : [[" open", C.dim]];
+    return [...head, ...(st.draft && st.state === "OPEN" ? ([[" draft", C.dim]] as Seg[]) : []), ...tail];
+  });
+}
+/** "14 files changed · 3 uncommitted · 2 ahead · fleet.ts demo.ts README.md +11": what it has changed, its checkout, then the newest file names, which are cut first. */
+export function changeSegs(edits: Side["edits"], git: GitState | undefined): Seg[] {
+  const out: Seg[] = [];
+  if (edits.length) out.push([`${edits.length} file${edits.length === 1 ? "" : "s"} changed`, C.text]);
+  if (git) {
+    const parts = [git.dirty ? `${git.dirty} uncommitted` : "", git.ahead ? `${git.ahead} ahead` : "", git.behind ? `${git.behind} behind` : ""].filter(Boolean);
+    if (parts.length) out.push(...(out.length ? [sep()] : []), [parts.join(` ${ICON.sep} `), git.behind ? C.amber : C.dim]);
+    else if (out.length) out.push(sep(), ["all committed", C.dim]);
+  }
+  if (edits.length) {
+    out.push(sep(), [edits.slice(0, 3).map((e) => safeLine(path.basename(e.path))).join(" "), C.dim]);
+    if (edits.length > 3) out.push([` +${edits.length - 3}`, C.dim]);
+  }
+  return out;
+}
+type SideKey = "trouble" | "bgRow" | "prs" | "changes";
+/** Which of the side rows a block has something for. */
+function sideHas(b: Block): Record<SideKey, boolean> {
+  const side = b.v.s.side;
+  const git = gitOf(b.v.s);
+  return {
+    trouble: !!side?.fails.length,
+    bgRow: !!side?.bg.length,
+    prs: !!side?.prs.length,
+    changes: !!side && (side.edits.length > 0 || !!(git && (git.dirty || git.ahead || git.behind))),
+  };
+}
+/** The side rows, under the head rows and above the conversation: failures, background commands, pull requests, changes. One row each, as the block keeps them. */
+function sideRows(b: Block, g: Grid, now: number): StackRow[] {
+  const side = b.v.s.side;
+  if (!side || !b.body) return [];
+  const k = b.keep;
+  const has = sideHas(b);
+  const fit = (segs: Seg[]) => fitSegs(segs, g.measure);
+  const rows: StackRow[] = [];
+  if (k.trouble && has.trouble) rows.push({ icon: [ICON.failed, C.red], segs: fit(troubleSegs(side.fails)), age: [ago(now - side.fails[side.fails.length - 1].t), C.dim] });
+  if (k.bgRow && has.bgRow) rows.push({ icon: [ICON.background, C.cyan], segs: fit(bgSegs(side.bg, now)) });
+  if (k.prs && has.prs) rows.push({ icon: [ICON.pr, C.text], segs: fit(prSegs(side.prs.slice(0, PR_SHOWN))) });
+  if (k.changes && has.changes) rows.push({ icon: [ICON.changes, C.dim], segs: fit(changeSegs(side.edits, gitOf(b.v.s))), age: side.edits.length ? [ago(now - side.edits[0].t), C.dim] : undefined });
+  return rows;
+}
+/** Take one side row away, when the block is showing it. */
+function sideOff(b: Block, key: SideKey): Change | undefined {
+  if (!b.keep[key] || !sideHas(b)[key]) return undefined;
+  return change(() => (b.keep[key] = false), () => (b.keep[key] = true), () => !b.keep[key]);
 }
 
 /** The replies the block has to show, by when they were written: a task's latest message that is one of them is not repeated under the task. */
@@ -3624,8 +3958,11 @@ const LADDER: { step: number; cut: "gaps" | ((b: Block) => Change | undefined) }
   { step: 0, cut: (b) => (b.focus ? taskScopeTo(b, "open") : undefined) }, // the done tasks leave the list; the strip still counts them
   { step: 0.5, cut: (b) => taskDetailTo(b, "doing") }, // the lines under tasks still to start: what each is for
   { step: 0.7, cut: (b) => taskDetailTo(b, "none") }, // the latest message under each task in progress
+  { step: 0.8, cut: (b) => sideOff(b, "changes") }, // the row of files changed and the checkout's state
   { step: 1, cut: (b) => earlierTo(b, 1) }, // earlier replies shrink to one line each
   { step: 2, cut: (b) => earlierTo(b, 0) }, // …and are removed, oldest first
+  { step: 2.2, cut: (b) => sideOff(b, "prs") }, // the pull requests row
+  { step: 2.3, cut: (b) => sideOff(b, "bgRow") }, // the background commands row
   { step: 2.5, cut: (b) => taskListTo(b, 5) }, // the task list is cut to 5 rows, the last "… n more tasks"
   { step: 3, cut: (b) => turnOff(b, "done") }, // the "n agents finished" line
   { step: 3.5, cut: (b) => taskListTo(b, 3) }, // the task list is cut to 3 rows, before any reply is: a waiting session's reply is the evidence for your answer
@@ -3638,6 +3975,7 @@ const LADDER: { step: number; cut: "gaps" | ((b: Block) => Change | undefined) }
   { step: 8, cut: (b) => (needsYou(b) ? undefined : promptOff(b)) }, // your prompt
   { step: 9, cut: (b) => (needsYou(b) ? undefined : replyTo(b, 1)) }, // the newest reply shrinks to one line
   { step: 9.5, cut: (b) => taskScopeTo(b, "doing") }, // the task list keeps only the tasks in progress: none when there is one, which the tasks row names
+  { step: 9.6, cut: (b) => sideOff(b, "trouble") }, // the failed tool calls row
   { step: 10, cut: (b) => turnOff(b, "main") }, // the main-thread row
   { step: 11, cut: (b) => (b.groups.some((x) => (x.wf ? x.rows.length > 0 : x.rows.length > 1)) ? foldAgents(b) : undefined) }, // agents fold: a workflow's into its own row, standalone ones into one line
   { step: 12, cut: (b) => (needsYou(b) ? promptOff(b) : undefined) }, // sessions that need you: the prompt,
@@ -3787,7 +4125,12 @@ function headRows(b: Block, p: Paint): Row[] {
   const where = folders.slice(-2).join("/") + at;
   const kind = `${s.kind || "cli"} ${s.sid.slice(0, 8)}`;
   // 'folder/folder @ branch · kind id' loses the kind and id first, then the parent folder, then goes. Under 100 columns it is not drawn.
-  const places: Seg[][] = where ? [[[where, dim], [` ${ICON.sep} `, needs ? C.warmDim : C.faint], [kind, dim]], [[where, dim]], [[folders.slice(-1).join("") + at, dim]]] : [[[kind, dim]]];
+  // The session's totals go first when room is short: all the tokens it has used, the agents it has run, how often its context was compacted.
+  const agentCount = s.agents.length + s.workflows.reduce((n, w) => n + w.agents.length, 0);
+  const totals = [s.job?.tokens ? `${human(s.job.tokens)} tok` : "", agentCount ? `${agentCount} agent${agentCount === 1 ? "" : "s"}` : "", s.side?.compactions ? `compacted ${s.side.compactions}×` : ""].filter(Boolean).join(` ${ICON.sep} `);
+  const dot: Seg = [` ${ICON.sep} `, needs ? C.warmDim : C.faint];
+  const withTotals = (x: Seg[]): Seg[][] => (totals ? [[...x, dot, [totals, dim]], x] : [x]);
+  const places: Seg[][] = where ? [...withTotals([[where, dim], dot, [kind, dim]]), [[where, dim]], [[folders.slice(-1).join("") + at, dim]]] : withTotals([[kind, dim]]);
   const place = g.small ? undefined : places.find((x) => g.icon + width(title) + 3 + segsWidth(x) - 1 <= limit);
   if (place) r1.segsr(limit, place);
   r1.segs(stateAt, stateSegs);
@@ -5074,6 +5417,7 @@ function refresh() {
   prune(now);
   sampleMachine();
   holdStalls(sessions, now);
+  pollSides(sessions, now, opt.once);
   steadyClock(now);
   if (opt.usage && !opt.once) tickUsage(now); // --once has already made its one read
   // Ring once when a session starts waiting on the person, and once for each thing that newly stalls.

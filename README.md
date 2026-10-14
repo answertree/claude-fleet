@@ -4,7 +4,7 @@ Every live Claude Code session on one terminal screen: what each one is doing, w
 
 ![Claude Fleet in detail mode](docs/screenshot.svg)
 
-It is one TypeScript file with no dependencies. It reads the files Claude Code already keeps under `~/.claude`. The only thing it ever writes is one small file of usage figures, and only with `--usage` (see [Account usage and your login](#account-usage-and-your-login)).
+It is one TypeScript file with no dependencies. It reads the files Claude Code already keeps under `~/.claude`. The only thing it ever writes is one small file of usage figures, and only with `--usage` (see [Account usage and your login](#account-usage-and-your-login)). Every 30 seconds it asks `git` for the state of each session's checkout; with `--prs` it also asks GitHub, through your `gh` command, about each session's pull requests.
 
 ## Try it
 
@@ -38,6 +38,12 @@ The header is five rows on a terminal of 40 rows or more and three rows below th
 **For each session** (detail mode)
 
 - **Two head rows:** a rail in the colour of the session's state, its name, its folder and branch, and the state with how long it has been so: `▲ NEEDS YOU`, `◐ STALLED?`, `● WORKING`, `▸ YOUR TURN`, `○ IDLE` or `✓ FINISHED`. Under that, one line saying what it is doing, a sparkline of its tool calls and their count. When the session needs you the line is the question itself, on up to three rows of an amber band (all of it when you focus the session); those sessions sort to the top.
+- **Beside the conversation, under the head rows, one row each while there is room:**
+  - `✗ 2 failed in 10m · Bash: FAIL refund.test.ts > …`: tool calls that failed in the last ten minutes, and what the last one said (past a bare `Exit code 1`), with its age.
+  - `↻ 2 running · Watch CI on #413 6m · Run the refund tests 200 times 3m`: background commands it started that have not reported back, each with how long it has been going.
+  - `⇡ #413 ◐ CI 14/20 · #412 ✓ merged`: the pull requests it has linked, newest first, three at most. With `--prs` each says what GitHub says: merged, closed, failing checks, checks still running, or green; without it, the numbers alone.
+  - `± 6 files changed · 3 uncommitted · 2 ahead · retry.ts clock.ts refund.ts +3`: how many files it has edited or written this session, its checkout's state from `git status`, then the newest of those files (cut first when the row is short), with when it last changed a file.
+- **Totals on the title row**, when the row has room for them: all the tokens a background session has used, the agents it has run, and how many times its context was compacted.
 - **Conversation:** `▸` your prompt, `◇` Claude's earlier replies (dimmed) and `◆` its newest reply with its bullets, code and tables kept, each with its age in a column of its own. A long reply is cut in the middle, never at the end: its closing paragraph stays (up to three rows of it) and `… +5 lines` says how much is hidden.
 - **Beside the conversation:** the context window split by category (system prompt, tools, MCP tools, agents, memory files, skills, messages), then output tokens and the CPU and memory of the session's processes. Below 130 columns these become one row under the head.
 - **Tasks:** one glyph per task (`✓` done, `◐` in progress, `○` not started) and how many are done, then the open tasks listed one a row under it, indented: those in progress first (`◐`, what each is doing), then the ones still to start (`○`, dimmed, `· blocked` after any that wait on an unfinished task). Done tasks are counted, not listed. The task in progress has a row of its own in the list; it is named after the count instead when the list has no row for it: when it is the only open task, when the line under the title already names it, or once the list is cut away. When rows run short the list shortens in stages, to five rows, then three, ending `… 5 more tasks`, then only the tasks in progress (none, when there is one), then none. Focus a session to list every task in full, done ones included.
@@ -45,7 +51,7 @@ The header is five rows on a terminal of 40 rows or more and three rows below th
   While there is room, each listed task gets one more line under it. A task in progress shows how long it has been running, and under it the latest thing Claude wrote while it was the task in hand (`◇`, with its age), unless that message is already one of the replies shown above. Otherwise, and for tasks still to start, the line says what the task is for, from its description. A message counts towards the task started most recently of those in progress when it was written; `fleet` learns this from each task's start and finish in the session's transcript, searching the whole file once so that tasks started long ago are known too. These lines are the first thing to go when rows run short. In focus, done tasks get theirs too, and a long one takes up to three rows.
 - **Threads:** the main thread, each workflow (`≡`, the phases it has been through in order, a phase it comes back to listed again, with a `…` in front when the earliest do not fit; then one glyph per agent) and each agent: a spinner if it wrote in the last minute, `◐` with the tool and what it is for if it is waiting on one, `○` if it is quiet.
 
-When the screen is too short for all of that, sessions give rows up in a fixed order, from the bottom session upward: the lines under each task (first what each task not yet started is for, then the latest message under those in progress), earlier replies, each task list down to five rows, the finished-agents line, each task list down to three, most of each newest reply, the blank rows between sessions, prompts, the tasks still to start, main-thread rows, then per-agent rows. A session that needs you always keeps its question (up to three rows) and two lines of the reply. Sessions that still do not fit become one line, `… 2 more: name, name`. Rows left over are handed back in the reverse order, top session first.
+When the screen is too short for all of that, sessions give rows up in a fixed order, from the bottom session upward: the lines under each task (first what each task not yet started is for, then the latest message under those in progress), the files-changed row, earlier replies, the pull-request and background-command rows, each task list down to five rows, the finished-agents line, each task list down to three, most of each newest reply, the blank rows between sessions, prompts, the tasks still to start, the failures row, main-thread rows, then per-agent rows. A session that needs you always keeps its question (up to three rows) and two lines of the reply. Sessions that still do not fit become one line, `… 2 more: name, name`. Rows left over are handed back in the reverse order, top session first.
 
 Only sessions that are working or waiting on you are shown. Idle and finished ones are counted on the top row and on the `a` button (`a All · 1 idle`); press `a` to bring them back (in detail mode, as two rows each).
 
@@ -113,6 +119,7 @@ Every control has a key, and all but `tab` and `esc` are also buttons on the bot
 | `--mode detail\|compact\|far` | Start in that view |
 | `--all` | Start with idle and finished sessions shown |
 | `--usage` | Show your account's usage limits (see below) |
+| `--prs` | Show the CI state of each session's pull requests, asking GitHub through `gh` every two minutes per open pull request (every 15 once merged or closed) |
 | `--bell` | Start with the bell on |
 | `--stall <minutes>` | How long a thread may sit on a tool call in silence before it is marked `stalled?` (default 10; 0 turns the watch off) |
 | `--glyphs` | Print the glyph test card and exit |
@@ -144,7 +151,7 @@ Each stays silent until it has something to say.
 
 Usage figures are off unless you pass `--usage` (or set `FLEET_USAGE=1` in the environment, which means the same). With it, Claude Fleet reads the Claude Code login already stored on your machine (the macOS keychain item `Claude Code-credentials`, or `~/.claude/.credentials.json`) and asks `api.anthropic.com/api/oauth/usage` for your figures every five minutes. The token is sent only to that address (a redirect is refused, not followed) and is held in memory for that one request. It is never written, logged or printed, and never refreshed or changed. That endpoint is the one Claude Code's own `/usage` screen relies on, and it is not a documented public interface.
 
-Without `--usage` or `FLEET_USAGE=1`, Claude Fleet makes no network requests at all and does not ask the keychain for anything.
+Without `--usage` or `FLEET_USAGE=1`, Claude Fleet does not ask the keychain for anything, and makes no network requests of its own; with `--prs`, the `gh` command it runs talks to GitHub with your own `gh` login. The `git status` it runs for each checkout is local, and uses `--no-optional-locks` so it never takes a lock a session might need.
 
 **When the read fails, the screen says exactly why:** `keychain: item not found`, `keychain: no answer in 5s`, `keychain: exit N`, `keychain: entry is not JSON`, `keychain: no claude.ai login in entry`, `keychain: closed to remote sessions (ssh/mosh)`, `login file: not found`, `login file: no claude.ai login in it`, `token expired · any Claude Code session renews it`, `Anthropic answered 401` (or whatever status it gave), `network: timed out`. It says `no Claude Code login found` only when the keychain and the login file both answered "not found". It tries again by itself, a minute after a failure and then less often (every five minutes while the keychain is closed or not answering), and `u` retries at once.
 
@@ -222,6 +229,8 @@ These environment variables exist for tests and screenshots only:
 | `FLEET_USAGE_FIXTURE` | Take the usage figures from this JSON file instead of reading the login and asking Anthropic. A `fetchedAt` in the file sets their age. Figures from a fixture are never saved to the shared file. |
 | `FLEET_SEEN` | Start the "seen" mark at this time (milliseconds since 1970) instead of at launch, so a single frame can show things as new. |
 | `FLEET_FOCUS` | Start focused on the session with this id, so a single frame can show focus (the demo's `--focus`). |
+| `FLEET_GIT_FIXTURE` | Take each checkout's `git status --porcelain -b` output from this JSON file (folder to text) instead of running git. |
+| `FLEET_PR_FIXTURE` | Take each pull request's `gh pr view --json state,isDraft,statusCheckRollup` answer from this JSON file ("owner/repo#number" to the answer) instead of running gh. |
 | `FLEET_USAGE_FAIL` | Make the usage read fail with this reason. With `FLEET_USAGE_FIXTURE` also set, the fixture stands in for the shared file, which shows the "as of" state. |
 
 ## Licence
