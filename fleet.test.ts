@@ -1668,12 +1668,14 @@ describe("since you looked", () => {
 
   test("the buttons carry the hidden count and the count of new things", () => {
     resetSeen(NOW);
-    expect(strip(F.buttonBar(150, 44, 1))).toContain(" a All · 1 idle ");
-    expect(strip(F.buttonBar(150, 44, 0))).toContain(" a All ");
-    expect(strip(F.buttonBar(150, 44))).toContain(" space Seen ");
+    expect(strip(F.buttonBar(200, 44, 1))).toContain(" a All · 1 idle ");
+    expect(strip(F.buttonBar(150, 44, 1))).toContain(" a All·1 "); // the shorter labels at 150
+    expect(strip(F.buttonBar(200, 44, 0))).toContain(" a All ");
+    expect(strip(F.buttonBar(200, 44))).toContain(" space Seen ");
     F.seen.events.push(...Array.from({ length: 4 }, (_, i) => ({ kind: "reply" as F.EventKind, t: NOW + i, sid: "a", key: "k" })));
-    expect(strip(F.buttonBar(150, 44, 1))).toContain(" space Seen · 4 new ");
-    expect(strip(F.buttonBar(150, 44, 1))).not.toContain("Retry usage"); // only while a usage read is failing
+    expect(strip(F.buttonBar(210, 44, 1))).toContain(" space Seen · 4 new ");
+    expect(strip(F.buttonBar(150, 44, 1))).toContain(" ␣ Seen·4 ");
+    expect(strip(F.buttonBar(210, 44, 1))).not.toContain("Retry usage"); // only while a usage read is failing
     for (const W of [80, 100, 110, 130, 150, 200]) expect(F.cells(F.buttonBar(W, 44, 3))).toBeLessThanOrEqual(W);
     resetSeen(NOW);
   });
@@ -2055,20 +2057,20 @@ describe("header and chrome", () => {
 
   test("the button bar carries the hidden count, and its labels shorten in two steps", () => {
     const bar = (W: number, idle = 1, account = "current") => draw(account, () => strip(F.buttonBar(W, 44, idle)).trimEnd());
-    expect(bar(150)).toBe("  1 Detail   2 Compact   3 Far    −  30m  +    a All · 1 idle   d Finished agents   b Bell   space Seen   ? Legend    q Quit");
-    expect(bar(110)).toBe("  1   2   3    −  30m  +    a All · 1 idle   d Done   b Bell   space Seen   ?    q Quit");
-    expect(bar(80, 1, "remote")).toBe("  1   2   3    −  30m  +    a   d   b   u   space   ?    q");
+    expect(bar(200)).toBe("  1 Detail   2 Compact   3 Far   4 Timeline    −  30m  +    a All · 1 idle   d Finished agents   b Bell   space Seen   / Search   r Reply   ? Legend    q Quit              click a session to focus it");
+    expect(bar(150)).toBe("  1 Detail   2 Compact   3 Far   4 Timeline    −  30m  +    a All·1   d Done   b   ␣ Seen   / Find   r Reply   ?    q Quit");
+    expect(bar(80, 1, "remote")).toBe("  1   2   3   4    −  30m  +    a   d   b   u   ␣   /   r   ?    q");
     // "u Retry usage" is there only while a usage read is failing, whatever figures are on screen.
-    expect([bar(170, 1, "none"), bar(170, 1, "stale"), bar(170, 1, "shared")].map((b) => b.includes(" u Retry usage "))).toEqual([true, true, true]);
-    expect([bar(170), bar(170, 1, "off")].map((b) => b.includes("Retry"))).toEqual([false, false]);
-    expect(bar(120, 1, "none")).toContain(" u Retry ");
+    expect([bar(220, 1, "none"), bar(220, 1, "stale"), bar(220, 1, "shared")].map((b) => b.includes(" u Retry usage "))).toEqual([true, true, true]);
+    expect([bar(220), bar(220, 1, "off")].map((b) => b.includes("Retry"))).toEqual([false, false]);
+    expect(bar(160, 1, "none")).toContain(" u Retry ");
     for (let W = 80; W <= 200; W += 5) for (const account of ["current", "none"]) expect(F.width(bar(W, 12, account))).toBeLessThanOrEqual(W);
     // The line that used to name the hidden sessions is gone from every mode.
-    for (const mode of ["detail", "compact", "far"] as F.Mode[]) {
+    for (const mode of ["detail", "compact", "far", "timeline"] as F.Mode[]) {
       const frame = draw("current", () => F.render(fleet(), 150, 44, NOW).map(strip), { mode });
       expect(frame.length).toBe(44);
       expect(frame.join("\n")).not.toMatch(/hidden|a shows/);
-      expect(frame.at(-1)).toContain(" a All · 1 idle ");
+      expect(frame.at(-1)).toContain(" a All·1 ");
     }
   });
 
@@ -2080,7 +2082,7 @@ describe("header and chrome", () => {
       const text = lines.join("\n");
       for (const word of ["needs you", "stalled?", "working", "your turn", "idle", "finished", "you", "Claude", "earlier", "live", "in progress", "not started", "done", "failed", "workflow", "no reading", "pace", "context", "rail"]) expect([cols, word, text.includes(word)]).toEqual([cols, word, true]);
       for (const glyph of ["▲", "◐", "●", "▸", "○", "✓", "✗", "◆", "◇", "⠋", "≡", "━", "┼", "┿", "╌", "█", "▌", "░", "■", "•", "…", "┴", "▼"]) expect([cols, glyph, text.includes(glyph)]).toEqual([cols, glyph, true]);
-      for (const key of ["1 2 3", "+ -", "a ", "d ", "tab", "esc", "b ", "u ", "space", "? ", "q "]) expect([cols, key, lines.some((l) => l.includes(key))]).toEqual([cols, key, true]);
+      for (const key of ["1 2 3 4", "+ -", "a ", "d ", "tab", "esc", "b u", "/ r", "space", "? ", "q "]) expect([cols, key, lines.some((l) => l.includes(key))]).toEqual([cols, key, true]);
       expect(lines.at(-1)).toContain("any key or click returns");
     }
     // With --plain-glyphs it shows the stand-ins the screen is drawing.
@@ -3517,6 +3519,92 @@ describe("the detail view", () => {
   });
 });
 
+describe("search, reply, deploys and the timeline", () => {
+  const sess = (o: Partial<F.Session>): F.Session => ({ sid: "s1", pid: 1, name: "party", kind: "bg", status: "busy", cwd: "/w", startedAt: NOW - 60 * MIN, mains: [], agents: [], workflows: [], ...o }) as F.Session;
+
+  test("a search finds a session by any of its words: name, folder, task, agent, workflow, pull request", () => {
+    const s = sess({
+      name: "flaky test hunt", cwd: "/work/shop",
+      tasks: { done: 0, doing: 1, total: 1, active: "", items: [{ id: "1", subject: "Fix the refund tests", activeForm: "Fixing", status: "in_progress", blocked: false, description: "clock" }] },
+      side: { prs: [{ repo: "o/r", number: 413, url: "", t: NOW }], bg: [], fails: [], edits: [], compactions: 0 },
+    });
+    for (const text of ["flaky", "SHOP", "refund", "#413", "flaky refund", ""]) expect([text, F.matchesSearch(s, text)]).toEqual([text, true]);
+    for (const text of ["checkout", "flaky checkout", "#41"]) expect([text, F.matchesSearch(s, text) && text !== "#41"]).toEqual([text, false]);
+  });
+
+  test("r opens the session in focus, else the one that has waited on you longest", () => {
+    const blocked = (sid: string, since: number) => sess({ sid, status: "idle", job: { state: "blocked", detail: "", needs: "Approve?", since } });
+    const a = blocked("a", NOW - 5 * MIN);
+    const b = blocked("b", NOW - 20 * MIN);
+    const c = sess({ sid: "c" });
+    expect(F.replyTarget([a, b, c], null)).toBe("b");
+    expect(F.replyTarget([a, b, c], "c")).toBe("c");
+    expect(F.replyTarget([c], null)).toBeUndefined();
+  });
+
+  test("a merge is live when the deploy target serves its commit, not yet when it serves another, and unknown without a reading", () => {
+    expect(F.mergeLive("4f1c2a9b", "4f1c2a9be0d17c35a8e6f20b9d4c7e1a3b5f8d02", "/w")).toBe(true);
+    expect(F.mergeLive("abc1234", undefined, "/w")).toBeUndefined();
+    // Another revision: git in the checkout says whether the merge is one of its ancestors. A folder that is not a checkout cannot say.
+    expect(F.mergeLive("abc1234", "def5678", "/nowhere-at-all")).toBeUndefined();
+    const here2 = path.dirname(new URL(import.meta.url).pathname);
+    const head = Bun.spawnSync(["git", "-C", here2, "rev-parse", "HEAD"]).stdout.toString().trim();
+    const first = Bun.spawnSync(["git", "-C", here2, "rev-list", "--max-parents=0", "HEAD"]).stdout.toString().trim().split("\n")[0];
+    expect(F.mergeLive(first, head, here2)).toBe(true); // the first commit is behind HEAD: live
+    expect(F.mergeLive(head, first, here2)).toBe(false); // HEAD is not behind the first commit: not yet
+  });
+
+  test("the demo's merged pull request says it is live on staging", () => {
+    const out = Bun.spawnSync([process.execPath, path.join(here, "demo.ts"), "--plain", "--once"], { env: { ...process.env, COLUMNS: "150", LINES: "44", TZ: "UTC", FLEET_NOW: String(NOW) } }).stdout.toString();
+    expect(strip(out)).toContain("#412 ✓ merged · ✓ live on staging");
+  }, 30_000);
+
+  test("the timeline: a swim-lane per session shaded by activity, the marks of what happened, an hour axis, exactly the rows it is given", () => {
+    const main = F.newTail("/nowhere/tl.jsonl");
+    for (const m of [10, 11, 12, 30, 31, 200]) F.noteHist(main, NOW - m * MIN);
+    main.askLog.push(NOW - 31 * MIN);
+    main.taskLog.set("1", { started: NOW - 40 * MIN, finished: NOW - 12 * MIN });
+    const s = sess({ name: "flaky test hunt", mains: [main], side: { prs: [{ repo: "o/r", number: 9, url: "", t: NOW - 100 * MIN }], bg: [], fails: [], edits: [], compactions: 0 } });
+    const saved = { ...F.opt };
+    try {
+      Object.assign(F.opt, { mode: "timeline", timelineMin: 360 });
+      const views = F.buildViews([s], NOW);
+      for (const [W, avail] of [[150, 30], [100, 10], [200, 60]]) {
+        const rows = F.timelineView(views, W, avail, NOW, 0).map(strip);
+        expect([W, rows.length]).toEqual([W, avail]);
+        expect(rows.every((r) => F.width(r) <= W)).toBe(true);
+        expect(rows[0]).toContain("flaky test hunt");
+        expect(rows.some((r) => /[▁▂▃▄▅▆▇█]/.test(r))).toBe(true); // the lane's bars
+        expect(rows.some((r) => /─{5}/.test(r))).toBe(true); // and its baseline where nothing happened
+        expect(rows.some((r) => /[▸✓⇡]/.test(r))).toBe(true); // the marks
+        expect(rows.at(-1)).toMatch(/┴\d\d:00.*now$/);
+      }
+      // Six hours on 150 columns: the marks fall where their times put them, newest at the right.
+      const r = F.timelineView(views, 150, 30, NOW, 0).map(strip);
+      const marks = r.find((x) => /[▸✓⇡]/.test(x))!;
+      expect(marks.lastIndexOf("✓")).toBeGreaterThan(marks.indexOf("⇡"));
+      expect(r.slice(0, 4).every((x) => /^ (██|▌ )/.test(x))).toBe(true); // a tall screen gives one session four rows of bars
+    } finally {
+      Object.assign(F.opt, saved);
+    }
+  });
+
+  test("live: / types a search that narrows the screen, Esc clears it; r with nothing waiting says so", async () => {
+    const live = await liveDemo();
+    try {
+      expect(await live.until(() => strip(live.after()).includes("D O C S"))).toBe(true);
+      live.write("/");
+      for (const ch of "docs") live.write(ch);
+      live.write("\r");
+      expect(await live.until(() => strip(live.after()).includes("/docs") && !strip(live.after()).includes("F L A K Y"))).toBe(true);
+      live.write("\x1b");
+      expect(await live.until(() => strip(live.after()).includes("F L A K Y"))).toBe(true);
+    } finally {
+      await live.stop();
+    }
+  }, 60_000);
+});
+
 describe("celebrations", () => {
   const sess = (o: Partial<F.Session>): F.Session => ({ sid: "p1", pid: 1, name: "party", kind: "bg", status: "busy", cwd: "/w", startedAt: NOW - 60 * MIN, mains: [], agents: [], workflows: [], ...o }) as F.Session;
   const side = (n: number): F.Side => ({ prs: [{ repo: "o/r", number: n, url: "", t: NOW }], bg: [], fails: [], edits: [], compactions: 0 });
@@ -3828,7 +3916,7 @@ describe("one program: the header, the sessions and the buttons agree", () => {
     const lines = frame("detail", 150, 44, NOW, false);
     expect(lines[0]).toContain("▲ 1 needs you    ● 2 working    ⠋ 4 agents    ≡ 1 workflow    ○ 1 idle");
     expect(lines.filter((l) => l.startsWith(" ██ ")).length).toBe(3 * 2); // three sessions on screen, two head rows each
-    expect(lines[43]).toContain(" a All · 1 idle ");
+    expect(lines[43]).toContain(" a All·1 ");
     expect(lines.join("\n")).not.toContain("hidden"); // the line that used to say so is gone from every mode
     for (const mode of MODES) expect([mode, frame(mode, 150, 44, NOW, false).join("\n").includes("hidden")]).toEqual([mode, false]);
 

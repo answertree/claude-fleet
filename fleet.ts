@@ -40,7 +40,8 @@ const HELP = `Claude Fleet: every live Claude Code session on one screen.
 Usage: bun fleet.ts [minutes] [options]
 
   minutes        width of the sparkline window (default 30)
-  --mode <m>     detail (default), compact, or far (big, readable from a distance)
+  --mode <m>     detail (default), compact, far (big, readable from a distance),
+                 or timeline (each session's last hours as a swim-lane)
   --all          also show idle and finished sessions
   --no-usage     do not show your Claude account usage limits. By default it
                  reads the stored Claude Code login and asks api.anthropic.com
@@ -61,15 +62,17 @@ Usage: bun fleet.ts [minutes] [options]
                  your terminal draws each one a single cell wide, and exit
   --plain-glyphs use fallbacks for glyphs some fonts lack (≡ ┿ ╌ ◇)
 
-Keys: 1 2 3 view mode · + - window · a all sessions · d finished agents
+Keys: 1 2 3 4 view mode (4: timeline) · / search · r open the session waiting
+      on you (or the focused one) to reply · + - window · a all sessions · d finished agents
       tab focus next session · b bell · u retry the usage read
       space seen it (marks what is new from now on) · esc leave focus (with
       nothing focused, quit) · q quit
       ? what every mark and key means (any key closes it)
 `;
 
-export type Mode = "detail" | "compact" | "far";
-const MODES: Mode[] = ["detail", "compact", "far"];
+export type Mode = "detail" | "compact" | "far" | "timeline";
+const MODES: Mode[] = ["detail", "compact", "far", "timeline"];
+export const TIMELINE_SPANS = [60, 180, 360, 720, 1440]; // the timeline's window, in minutes
 /** Everything the command line and the keys can change. These are the defaults; parseArgs() fills them in when fleet.ts is run as a program. */
 export const opt = {
   mode: "detail" as Mode,
@@ -82,6 +85,7 @@ export const opt = {
   mouse: true,
   once: false,
   plainGlyphs: false, // --plain-glyphs: fallbacks for fonts that lack ≡ ┿ ╌ ◇
+  timelineMin: 360, // the timeline's window: six hours unless + and - change it
   stallMin: 10, // --stall <minutes>: how long a thread may sit on a tool call in silence; 0 turns the stall watch off
 };
 
@@ -110,6 +114,20 @@ export function parseArgs(argv: string[]): "help" | "glyphs" | undefined {
 
 let focusSid: string | null = null;
 let frame = 0;
+/** Key /: what you are searching for, and whether you are still typing it. */
+export const search = { text: "", typing: false };
+/** Everything a session could be found by: its name, folder, branch, what it is doing and asking, its tasks, agents, workflows and pull requests. */
+export function searchable(s: Session): string {
+  return [
+    s.name, s.sid, s.cwd, ...s.mains.map((m) => m.branch ?? ""), s.job?.detail ?? "", s.job?.needs ?? "",
+    ...(s.tasks?.items ?? []).flatMap((t) => [t.subject, t.activeForm, t.description]),
+    ...s.agents.map((a) => a.label), ...s.workflows.flatMap((w) => [w.name, ...w.agents.map((a) => a.label)]),
+    ...(s.side?.prs ?? []).map((p) => `#${p.number}`),
+  ].join("\n").toLowerCase();
+}
+export const matchesSearch = (s: Session, text = search.text): boolean => !text.trim() || text.toLowerCase().trim().split(/\s+/).every((w) => searchable(s).includes(w));
+/** A word on the bottom row for a few seconds: what a key could not do. */
+export const notice = { text: "", until: 0 };
 export const FPS = 4; // frames a second
 /** Once-a-second beats, for what should blink slowly however fast the frames come: a waiting session's rail. */
 const beat = () => Math.floor(frame / FPS);
@@ -800,6 +818,9 @@ export interface Tail {
   fails: { t: number; tool: string; text: string }[]; // its recent failed tool calls, oldest first
   edits: Map<string, number>; // files it has edited or written, by path, with when (last edited last)
   compactions: number; // times its context was compacted
+  compactLog: number[]; // when, for the timeline
+  hist: Map<number, number>; // lines written per minute (minute = ms / 60000), for the timeline: the last day
+  askLog: number[]; // when you typed to it, for the timeline
   cwd?: string; // where it is working, from its own lines
   sayTs: number[]; // when each of its replies in the window was written, for "new since you looked"
   summary?: string; // the session's own "while you were away" summary
@@ -905,7 +926,11 @@ export function absorbSide(t: Tail, o: any, ts: number) {
     t.prs.delete(key); // a link again moves it to the end, as the latest
     t.prs.set(key, { repo, number, url: typeof o.prUrl === "string" ? safeLine(capText(o.prUrl, 300)) : "", t: ts });
     capMap(t.prs, 50);
-  } else if (o?.type === "system" && o.subtype === "compact_boundary" && !o.isSidechain) t.compactions++;
+  } else if (o?.type === "system" && o.subtype === "compact_boundary" && !o.isSidechain) {
+    t.compactions++;
+    t.compactLog.push(ts);
+    if (t.compactLog.length > 100) t.compactLog.shift();
+  }
 }
 function noteEdit(t: Tail, input: any, ts: number) {
   const file = input?.file_path ?? input?.notebook_path;
@@ -988,6 +1013,7 @@ export function ingest(t: Tail, line: string) {
   absorbSide(t, o, ts);
   if (o.type !== "assistant" && o.type !== "user") return;
   t.lastT = Math.max(t.lastT, ts);
+  noteHist(t, ts);
   if (typeof o.gitBranch === "string" && o.gitBranch) t.branch = safeLine(o.gitBranch);
   const content = o.message?.content;
   if (o.type === "assistant") {
@@ -1043,7 +1069,11 @@ export function ingest(t: Tail, line: string) {
     const texts: string[] = typeof content === "string" ? [content] : Array.isArray(content) ? content.filter((i: any) => i?.type === "text").map((i: any) => String(i.text ?? "")) : [];
     for (const text of texts) if (text.includes("<task-notification>")) noteNotices(t, text, ts);
     const typed = texts.map((x) => x.trim()).find((x) => x && !x.startsWith("<"));
-    if (typed) t.ask = { text: safeText(capText(typed, PROMPT_KEEP)), t: ts };
+    if (typed) {
+      t.ask = { text: safeText(capText(typed, PROMPT_KEEP)), t: ts };
+      t.askLog.push(ts);
+      if (t.askLog.length > 300) t.askLog.shift();
+    }
   }
 }
 
@@ -1094,6 +1124,9 @@ export function newTail(file: string, start = 0, birth = 0): Tail {
     fails: [],
     edits: new Map(),
     compactions: 0,
+    compactLog: [],
+    hist: new Map(),
+    askLog: [],
     sayTs: [],
     ctxLog: [],
     tokens: new Map(),
@@ -1137,6 +1170,15 @@ export function scanTaskUpdates(t: Tail, upTo: number) {
       const n = fs.readSync(fd, buf, 0, Math.min(TASK_SCAN_CHUNK + TASK_SCAN_OVERLAP, limit - pos), pos);
       if (n <= 0) break;
       const view = buf.subarray(0, n);
+      // The timeline's history: when each line before the tail was written, from its timestamp alone.
+      const text = view.toString("latin1");
+      const since = clock() - HIST_MS;
+      for (const m of text.matchAll(/^\{[^\n]{0,400}?"timestamp":"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)/gm)) {
+        if (pos + (m.index ?? 0) >= upTo || (pos > 0 && (m.index ?? 0) < TASK_SCAN_OVERLAP && read.has(-1 - (pos + (m.index ?? 0))))) continue;
+        const ts = Date.parse(m[1] + "Z");
+        if (ts >= since) noteHist(t, ts);
+        read.add(-1 - (pos + (m.index ?? 0)));
+      }
       const lines = new Map<number, [number, number]>(); // where a line starts in the file -> its bounds in this chunk
       for (const mark of TASK_MARKS)
         for (let at = view.indexOf(mark); at !== -1; at = view.indexOf(mark, at + mark.length)) {
@@ -1308,6 +1350,7 @@ export function parseGitStatus(text: string): GitState | undefined {
 }
 /** A pull request's state and its checks: passed, failed, still running. */
 export interface PrState {
+  mergeSha?: string; // the merge commit, once merged
   state: string; // OPEN, MERGED or CLOSED
   draft: boolean;
   pass: number;
@@ -1319,6 +1362,8 @@ const CHECK_FAIL = ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIR
 export function summarizePr(j: any): PrState | undefined {
   if (!j || typeof j.state !== "string") return undefined;
   const out: PrState = { state: j.state.toUpperCase(), draft: j.isDraft === true, pass: 0, fail: 0, pending: 0 };
+  const sha = j.mergeCommit?.oid;
+  if (typeof sha === "string" && /^[0-9a-f]{7,40}$/.test(sha)) out.mergeSha = sha;
   for (const c of Array.isArray(j.statusCheckRollup) ? j.statusCheckRollup : []) {
     const v = String(c?.conclusion || c?.state || c?.status || "").toUpperCase();
     if (CHECK_PASS.includes(v)) out.pass++;
@@ -1333,7 +1378,17 @@ export const prState = new Map<string, { at: number; state?: PrState; busy?: boo
 const GIT_EVERY_MS = 30_000;
 const PR_EVERY_MS = 120_000;
 const PR_DONE_EVERY_MS = 15 * 60_000; // merged or closed: it will not change much
-export const PR_SHOWN = 3; // pull requests on a session's row, newest linked first
+export const PR_SHOWN = 3;
+const HIST_MS = 24 * 3600_000;
+/** One more line written at `ts`, counted by the minute for the timeline; minutes over a day old are let go. */
+export function noteHist(t: Tail, ts: number) {
+  const m = Math.floor(ts / 60_000);
+  t.hist.set(m, (t.hist.get(m) ?? 0) + 1);
+  if (t.hist.size > 1600) {
+    const oldest = Math.floor((clock() - HIST_MS) / 60_000);
+    for (const k of t.hist.keys()) if (k < oldest) t.hist.delete(k);
+  }
+} // pull requests on a session's row, newest linked first
 const fixture = (name: string): Record<string, unknown> | undefined => {
   const file = process.env[name];
   if (!file) return undefined;
@@ -1385,7 +1440,7 @@ export function pollPr(pr: PrLink, now: number, sync = false) {
   const fx = fixture("FLEET_PR_FIXTURE");
   if (fx) return void prState.set(key, { at: now, state: summarizePr(fx[key]) });
   prState.set(key, { at: e?.at ?? 0, state: e?.state, busy: true });
-  runFor("gh", ["pr", "view", String(pr.number), "--repo", pr.repo, "--json", "state,isDraft,statusCheckRollup"], sync, (out) => {
+  runFor("gh", ["pr", "view", String(pr.number), "--repo", pr.repo, "--json", "state,isDraft,statusCheckRollup,mergeCommit"], sync, (out) => {
     let state: PrState | undefined;
     try {
       state = out === undefined ? undefined : summarizePr(JSON.parse(out));
@@ -1393,6 +1448,89 @@ export function pollPr(pr: PrLink, now: number, sync = false) {
     prState.set(key, { at: clock(), state: state ?? e?.state });
   });
 }
+/** Where a repository's merges go live: a URL whose JSON names the revision deployed there. */
+export interface Deploy {
+  repo: string; // "owner/name", as pull requests name it
+  name: string; // what to call it on screen: "staging"
+  url: string;
+  field: string; // the JSON field holding the revision (default "revision")
+}
+/** Deploy targets from ${XDG_CONFIG_HOME:-~/.config}/claude-fleet/deploys.json, read once a minute. */
+export function deploys(): Deploy[] {
+  const file = process.env.FLEET_DEPLOYS_FILE || path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "claude-fleet", "deploys.json");
+  const at = deployCache.file === file && clock() - deployCache.at < 60_000 ? deployCache.list : undefined;
+  if (at) return at;
+  let list: Deploy[] = [];
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+    list = (Array.isArray(raw) ? raw : [])
+      .filter((d: any) => typeof d?.repo === "string" && /^[\w.-]+\/[\w.-]+$/.test(d.repo) && typeof d.url === "string" && /^https?:\/\//.test(d.url))
+      .map((d: any) => ({ repo: d.repo, name: safeLine(String(d.name ?? "deploy")).slice(0, 20), url: d.url, field: typeof d.field === "string" ? d.field : "revision" }));
+  } catch {}
+  Object.assign(deployCache, { file, at: clock(), list });
+  return list;
+}
+const deployCache: { file?: string; at: number; list: Deploy[] } = { at: 0, list: [] };
+/** The revision each deploy target reports, read every minute in the background. */
+export const deployState = new Map<string, { at: number; revision?: string; busy?: boolean }>();
+export function pollDeploys(now: number, sync = false) {
+  const fx = fixture("FLEET_DEPLOY_FIXTURE");
+  for (const d of deploys()) {
+    const e = deployState.get(d.url);
+    if (e && (e.busy || now - e.at < 60_000)) continue;
+    if (fx) {
+      deployState.set(d.url, { at: now, revision: typeof fx[d.url] === "string" ? (fx[d.url] as string) : undefined });
+      continue;
+    }
+    const done = (j: any) => {
+      const rev = j?.[d.field];
+      deployState.set(d.url, { at: clock(), revision: typeof rev === "string" && /^[0-9a-f]{7,40}$/.test(rev) ? rev : e?.revision });
+    };
+    if (sync) {
+      const r = spawnSync("curl", ["-fsS", "-m", "8", d.url], { encoding: "utf8", timeout: 10_000 });
+      try {
+        done(JSON.parse(r.stdout));
+      } catch {
+        done(undefined);
+      }
+      continue;
+    }
+    deployState.set(d.url, { at: e?.at ?? 0, revision: e?.revision, busy: true });
+    fetch(d.url, { signal: AbortSignal.timeout(8000), redirect: "error" })
+      .then((r) => r.json())
+      .then(done, () => done(undefined));
+  }
+}
+const ancestry = new Map<string, boolean | undefined>();
+/**
+ * Whether a merge is live on a deploy target: its commit is the revision deployed, or one of its
+ * ancestors (asked of git in the session's checkout, which may not have the deployed commit yet:
+ * then it cannot say). Undefined when it cannot tell.
+ */
+export function mergeLive(mergeSha: string, revision: string | undefined, cwd: string, repo = ""): boolean | undefined {
+  if (!revision) return undefined;
+  if (revision.startsWith(mergeSha) || mergeSha.startsWith(revision)) return true;
+  const key = `${mergeSha} ${revision}`;
+  if (ancestry.get(key) !== undefined) return ancestry.get(key);
+  if (fixture("FLEET_DEPLOY_FIXTURE")) return undefined;
+  if (!ancestry.has(key) && cwd.startsWith("/")) {
+    const r = spawnSync("git", ["--no-optional-locks", "-C", cwd, "merge-base", "--is-ancestor", mergeSha, revision], { timeout: 3000 });
+    ancestry.set(key, r.status === 0 ? true : r.status === 1 ? false : undefined);
+    if (ancestry.size > 500) ancestry.delete(ancestry.keys().next().value as string);
+    if (ancestry.get(key) !== undefined) return ancestry.get(key);
+  }
+  // The checkout does not have the deployed commit: ask GitHub to compare the two, once.
+  if (repo && /^[\w.-]+\/[\w.-]+$/.test(repo) && /^[0-9a-f]{7,40}$/.test(mergeSha) && /^[0-9a-f]{7,40}$/.test(revision) && !comparing.has(key)) {
+    comparing.add(key);
+    runFor("gh", ["api", `repos/${repo}/compare/${mergeSha}...${revision}`, "--jq", ".status"], opt.once, (out) => {
+      const status = out?.trim();
+      ancestry.set(key, status === "ahead" || status === "identical" ? true : status === "behind" || status === "diverged" ? false : undefined);
+    });
+  }
+  return ancestry.get(key);
+}
+const comparing = new Set<string>();
+
 /** Start the reads a frame will want: each session's git state, and with --prs its newest pull requests. */
 export function pollSides(sessions: Session[], now: number, sync = false) {
   for (const s of sessions) {
@@ -1400,6 +1538,7 @@ export function pollSides(sessions: Session[], now: number, sync = false) {
     pollGit(s.side.cwd ?? s.cwd, now, sync);
     if (opt.prs) for (const pr of s.side.prs.slice(0, PR_SHOWN)) pollPr(pr, now, sync);
   }
+  if (opt.prs) pollDeploys(now, sync);
 }
 const gitOf = (s: Session): GitState | undefined => gitState.get(s.side?.cwd ?? s.cwd)?.state;
 
@@ -3695,14 +3834,14 @@ export function bgSegs(bg: Side["bg"], now: number): Seg[] {
   return [[`${bg.length} running`, C.text], ...bg.flatMap((x): Seg[] => [sep(), [`${x.desc} `, C.dim], [ago(now - x.started), C.text]])];
 }
 /** "#1229 ✓ merged · #1231 ◐ CI 14/20 · #1232 ✗ 2 failing": each pull request with what GitHub says of it (with --prs), else its number. */
-export function prSegs(prs: PrLink[]): Seg[] {
+export function prSegs(prs: PrLink[], cwd = ""): Seg[] {
   return prs.flatMap((pr, i): Seg[] => {
     const st = prState.get(`${pr.repo}#${pr.number}`)?.state;
     const head: Seg[] = [...(i ? [sep()] : []), [`#${pr.number}`, C.text]];
     if (!st) return head;
     const checks = st.pass + st.fail + st.pending;
     const tail: Seg[] =
-      st.state === "MERGED" ? [[` ${ICON.done} merged`, C.green]]
+      st.state === "MERGED" ? [[` ${ICON.done} merged`, C.green], ...deploySegs(pr, st, cwd)]
       : st.state === "CLOSED" ? [[` ${ICON.failed} closed`, C.dim]]
       : st.fail ? [[` ${ICON.failed} ${st.fail} failing`, C.red]]
       : st.pending ? [[` ${ICON.progress} CI ${st.pass}/${checks}`, C.white]]
@@ -3710,6 +3849,13 @@ export function prSegs(prs: PrLink[]): Seg[] {
       : [[" open", C.dim]];
     return [...head, ...(st.draft && st.state === "OPEN" ? ([[" draft", C.dim]] as Seg[]) : []), ...tail];
   });
+}
+/** For a merged pull request whose repository has a deploy target: " · ✓ live on staging" or " · ◐ not on staging yet". */
+function deploySegs(pr: PrLink, st: PrState, cwd: string): Seg[] {
+  const d = deploys().find((x) => x.repo === pr.repo);
+  if (!d || !st.mergeSha) return [];
+  const live = mergeLive(st.mergeSha, deployState.get(d.url)?.revision, cwd, pr.repo);
+  return live === undefined ? [] : live ? [[` ${ICON.sep} ${ICON.done} live on ${d.name}`, C.green]] : [[` ${ICON.sep} ${ICON.progress} not on ${d.name} yet`, C.white]];
 }
 /** "14 files changed · 3 uncommitted · 2 ahead · fleet.ts demo.ts README.md +11": what it has changed, its checkout, then the newest file names, which are cut first. */
 export function changeSegs(edits: Side["edits"], git: GitState | undefined, tight = false): Seg[] {
@@ -3751,7 +3897,7 @@ function sideRows(b: Block, g: Grid, now: number): StackRow[] {
   const rows: StackRow[] = [];
   if (k.trouble && has.trouble) rows.push({ icon: [ICON.failed, C.red], segs: fit(troubleSegs(side.fails)), age: [ago(now - side.fails[side.fails.length - 1].t), C.dim] });
   if (k.bgRow && has.bgRow) rows.push({ icon: [ICON.background, C.cyan], segs: fit(bgSegs(side.bg, now)) });
-  if (k.prs && has.prs) rows.push({ icon: [ICON.pr, C.text], segs: fit(prSegs(side.prs.slice(0, PR_SHOWN))) });
+  if (k.prs && has.prs) rows.push({ icon: [ICON.pr, C.text], segs: fit(prSegs(side.prs.slice(0, PR_SHOWN), side.cwd ?? b.v.s.cwd)) });
   if (k.changes && has.changes) rows.push({ icon: [ICON.changes, C.dim], segs: fit(changeSegs(side.edits, gitOf(b.v.s))), age: side.edits.length ? [ago(now - side.edits[0].t), C.dim] : undefined });
   return rows;
 }
@@ -3852,7 +3998,7 @@ function sideItems(b: Block, now: number): SideItem[] {
     out.push({ side: "trouble", icon: [ICON.failed, C.red], segs: [[`${side.fails.length} failed`, C.red], [` ${ICON.sep} `, C.faint], [`${last.tool ? last.tool + ": " : ""}${last.text}`, C.dim]], age: [ago(now - last.t), C.dim] });
   }
   if (k.bgRow && has.bgRow) for (const x of side.bg) out.push({ side: "bgRow", icon: [ICON.background, C.cyan], segs: [[x.desc, C.dim]], age: [ago(now - x.started), C.text] });
-  if (k.prs && has.prs) for (const pr of side.prs.slice(0, PR_SHOWN)) out.push({ side: "prs", icon: [ICON.pr, C.text], segs: prSegs([pr]) });
+  if (k.prs && has.prs) for (const pr of side.prs.slice(0, PR_SHOWN)) out.push({ side: "prs", icon: [ICON.pr, C.text], segs: prSegs([pr], side.cwd ?? b.v.s.cwd) });
   if (k.changes && has.changes) out.push({ side: "changes", icon: [ICON.changes, C.dim], segs: changeSegs(side.edits, gitOf(b.v.s), true), age: side.edits.length ? [ago(now - side.edits[0].t), C.dim] : undefined });
   return out;
 }
@@ -5015,7 +5161,8 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
 
   const all = buildViews(sessions, now, since);
   if (focusSid && !all.some((v) => v.s.sid === focusSid)) focusSid = null;
-  const shown = all.filter((v) => (focusSid ? v.s.sid === focusSid : opt.showAll || !isHidden(v)));
+  // A search looks through every session, idle and finished ones too.
+  const shown = all.filter((v) => (focusSid ? v.s.sid === focusSid : search.text.trim() ? matchesSearch(v.s) : opt.showAll || !isHidden(v)));
   const hidden = all.filter((v) => !shown.includes(v));
 
   // The header: tall or medium in detail and far mode, the older lines in compact mode and under 100 columns.
@@ -5025,7 +5172,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
   if (gap) out.push("");
 
   if (!shown.length) {
-    out.push(...(gap ? [] : [""]), fg(C.dim, all.length ? "   Nothing active and nothing waiting on you." : "   No live Claude Code sessions found in ~/.claude/sessions."));
+    out.push(...(gap ? [] : [""]), fg(C.dim, search.text.trim() ? `   No session matches "${safeLine(search.text)}".` : all.length ? "   Nothing active and nothing waiting on you." : "   No live Claude Code sessions found in ~/.claude/sessions."));
   }
 
   // Compact rows share these scales, so they can be compared with each other. Taken before rows are folded away to fit
@@ -5039,6 +5186,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
   const { views, gaps, cut } = opt.mode !== "compact" ? { views: [] as View[], gaps: false, cut: 0 } : fitViews(shown, avail);
   // Detail mode draws its sessions with its own renderer (the detail view, above). The tree further down is compact mode's.
   if (opt.mode === "detail") out.push(...detailView(shown, W, avail, now, out.length));
+  if (opt.mode === "timeline") out.push(...timelineView(shown, W, avail + 1, now, out.length));
 
   // Compact rows' columns.
   const ACT = W >= 150 ? 40 : W >= 120 ? 28 : W >= 100 ? 18 : 0; // "what it is doing" column
@@ -5340,21 +5488,24 @@ export function buttonBar(W: number, row: number, idle = 0): string {
       line += fg(C.dim, text);
       x += width(text);
     };
-    add("1 Detail", "1", "1", "mode:detail", opt.mode === "detail");
-    add("2 Compact", "2", "2", "mode:compact", opt.mode === "compact");
-    add("3 Far", "3", "3", "mode:far", opt.mode === "far");
+    add("1 Detail", "1 Detail", "1", "mode:detail", opt.mode === "detail");
+    add("2 Compact", "2 Compact", "2", "mode:compact", opt.mode === "compact");
+    add("3 Far", "3 Far", "3", "mode:far", opt.mode === "far");
+    add("4 Timeline", "4 Timeline", "4", "mode:timeline", opt.mode === "timeline");
     plain(" ");
     add("−", "−", "−", "win-");
-    plain(`${opt.windowMin}m `);
+    plain(opt.mode === "timeline" ? `${opt.timelineMin / 60}h ` : `${opt.windowMin}m `);
     add("+", "+", "+", "win+");
     plain(" ");
     const all = idle ? `a All · ${idle} idle` : "a All";
-    add(all, all, "a", "all", opt.showAll);
+    add(all, idle ? `a All·${idle}` : "a All", "a", "all", opt.showAll);
     add("d Finished agents", "d Done", "d", "done", opt.showDone);
-    add("b Bell", "b Bell", "b", "bell", opt.bell);
+    add("b Bell", "b", "b", "bell", opt.bell);
     if (opt.usage && usage.reason) add("u Retry usage", "u Retry", "u", "usage"); // only while a usage read is failing
     const seenIt = newCount() ? `space Seen · ${newCount()} new` : "space Seen";
-    add(seenIt, seenIt, "space", "seen");
+    add(seenIt, newCount() ? `␣ Seen·${newCount()}` : "␣ Seen", "␣", "seen");
+    add("/ Search", "/ Find", "/", "search", search.typing || !!search.text);
+    add("r Reply", "r Reply", "r", "reply");
     add("? Legend", "?", "?", "legend");
     plain(" ");
     add("q Quit", "q Quit", "q", "quit");
@@ -5364,8 +5515,129 @@ export function buttonBar(W: number, row: number, idle = 0): string {
   if (bar.used > W) bar = build(1);
   if (bar.used > W) bar = build(2);
   hits.push(...bar.found);
+  // The hint: what you are typing into the search, a notice, or how to focus a session.
+  const room = W - bar.used - 2;
+  if (search.typing || search.text) {
+    const said = `/${safeLine(search.text)}${search.typing ? "▏" : ""}${search.typing ? "  enter keeps · esc clears" : "  esc clears"}`;
+    return bar.line + " " + fg(C.white, fit(said, Math.max(0, room)));
+  }
+  if (notice.text && clock() < notice.until) return bar.line + " " + fg(C.amber, fit(notice.text, Math.max(0, room), "r"));
   const hint = "click a session to focus it";
   return bar.line + (W - bar.used > width(hint) + 2 ? fg(C.faint, fit(hint, W - bar.used, "r")) : "");
+}
+
+/** Whom key r opens: the session in focus, else the one that has waited on you longest. */
+export function replyTarget(sessions: Session[], focus: string | null): string | undefined {
+  if (focus && sessions.some((s) => s.sid === focus)) return focus;
+  const waiting = sessions.map((s) => ({ s, f: factsOf(s) })).filter((x) => x.f.needs);
+  return waiting.sort((a, b) => stateSince(a.s, a.f, "needs") - stateSince(b.s, b.f, "needs"))[0]?.s.sid;
+}
+
+// ───────────────────────── timeline ─────────────────────────
+
+/**
+ * Key 4: each session's last hours as a swim-lane. On its first row, how busy it was (lines written per
+ * stretch of time, shaded); amber from when it began waiting on you, red from when it stalled. On its
+ * second, what happened: ▸ you typed to it, ⇡ it linked a pull request, ≡ a workflow started, ✓ a task
+ * was finished. One axis under all of them, with the hours.
+ */
+export function timelineView(views: View[], W: number, avail: number, now: number, top: number): string[] {
+  const out: string[] = [];
+  if (!views.length) return out;
+  const NAME = Math.min(26, Math.max(12, Math.floor(W * 0.18)));
+  const lane0 = 4 + NAME + 2; // where the lanes start (1-based)
+  const LW = Math.max(10, W - lane0 - 9);
+  const span = opt.timelineMin * 60_000;
+  const bar = span / LW;
+  const end = Math.ceil(now / bar) * bar; // clock-aligned, as every other strip
+  const start = end - LW * bar;
+  const col = (t: number) => Math.floor((t - start) / bar);
+  const lanes = views.map((v) => {
+    const counts = new Array(LW).fill(0);
+    const add = (t: number, n = 1) => {
+      const i = col(t);
+      if (i >= 0 && i < LW) counts[i] += n;
+    };
+    for (const m of v.s.mains) for (const [minute, n] of m.hist) add(minute * 60_000, n);
+    for (const a of [...v.s.agents, ...v.s.workflows.flatMap((w) => w.agents)]) for (const t of a.tail.tools) add(t);
+    return counts;
+  });
+  const max = Math.max(1, ...lanes.flat());
+  // Each lane is as tall as the screen allows, one to six rows of bars, plus its row of marks; a blank row between sessions when there is room.
+  const n = views.length;
+  const laneH = Math.max(1, Math.min(6, Math.floor((avail - 1 - (n - 1)) / n) - 1));
+  const gapRow = n * (laneH + 1) + (n - 1) <= avail - 1;
+  const per = laneH + 1 + (gapRow ? 1 : 0);
+  const fits = Math.max(1, Math.min(n, Math.floor((avail - 1 + (gapRow ? 1 : 0)) / per)));
+  views.slice(0, fits).forEach((v, vi) => {
+    const s = v.s;
+    const f = v.facts;
+    const waitFrom = v.state === "needs" ? stateSince(s, f, "needs") : undefined;
+    const stallFrom = v.state === "stalled" ? v.stall.since : undefined;
+    // The lane: bars rising from a baseline, laneH rows tall, each column in the colour of the session's state at that time.
+    const chart = Array.from({ length: laneH }, (_, r) => {
+      const row = new Row(W);
+      row.put(2, r === 0 ? ICON.railThick : ICON.railThin, railTone(v.state, r === 0, beat()));
+      return row;
+    });
+    chart[0].put(5, cutTo(s.name, NAME), isReceded(v.state) ? C.text : C.white, true);
+    const stateLine = cutTo(`${STATE[v.state].word.toLowerCase()} · ${stateTime(s, f, v.state, now, v.stall.since) || "—"}`, NAME);
+    if (laneH > 1) chart[1].put(5, stateLine, C.dim);
+    hits.push({ row: top + out.length + 1, x0: 1, x1: lane0 - 2, act: "focus:" + s.sid });
+    lanes[vi].forEach((count, i) => {
+      const t = start + i * bar;
+      const tone = stallFrom && t + bar > stallFrom ? C.red : waitFrom && t + bar > waitFrom ? C.amber : RAMP.session[1];
+      const level = count > 0 ? Math.sqrt(count / max) : 0;
+      const eighths = Math.round(level * laneH * 8);
+      for (let r = 0; r < laneH; r++) {
+        const fill = eighths - (laneH - 1 - r) * 8; // eighths of this row's cell filled, from its bottom
+        if (fill > 0) chart[r].put(lane0 + i, BARS[Math.min(7, fill - 1)], mix(C.faint, tone, 0.45 + level * 0.55));
+        else if (r === laneH - 1) chart[r].put(lane0 + i, "─", waitFrom && t + bar > waitFrom ? C.amber : C.faint);
+      }
+    });
+    chart[0].putr(W - 1, human(sum(lanes[vi])), C.dim);
+    const r2 = new Row(W);
+    r2.put(2, ICON.railThin, railTone(v.state, false));
+    if (laneH === 1) r2.put(5, stateLine, C.dim);
+    // What happened, by when: the weightiest mark wins a shared cell.
+    const marks: [number, number, string, RGB][] = [];
+    for (const m of s.mains) for (const t of m.askLog) marks.push([t, 1, ICON.you, C.blue]);
+    for (const p of s.side?.prs ?? []) marks.push([p.t, 2, ICON.pr, C.text]);
+    for (const w of s.workflows) marks.push([w.started, 3, ICON.workflow, C.purple]);
+    for (const m of s.mains) for (const tr of m.taskLog.values()) if (tr.finished) marks.push([tr.finished, 4, ICON.done, C.green]);
+    const cell = new Map<number, [number, string, RGB]>();
+    for (const [t, weight, glyph, color] of marks) {
+      const i = col(t);
+      if (i < 0 || i >= LW) continue;
+      if (!cell.has(i) || cell.get(i)![0] < weight) cell.set(i, [weight, glyph, color]);
+    }
+    for (const [i, [, glyph, color]] of cell) r2.put(lane0 + i, glyph, color);
+    out.push(...chart.map(String), r2.toString());
+    if (gapRow && vi < fits - 1) out.push("");
+  });
+  if (views.length > fits) out.push(fg(C.dim, `   … ${views.length - fits} more: ${views.slice(fits).map((v) => v.s.name).join(", ")}`));
+  // The axis: a tick and a label at each hour (or at each few, when the window is long), "now" at the right.
+  const axis = new Row(W);
+  for (let i = 0; i < LW; i++) axis.put(lane0 + i, "─", C.faint);
+  const hour = 3600_000;
+  const stepH = opt.timelineMin <= 180 ? 1 : opt.timelineMin <= 720 ? 2 : 4;
+  let lastEnd = 0;
+  for (let t = Math.ceil(start / hour) * hour; t < end; t += hour) {
+    const i = col(t);
+    const label = new Date(t).toTimeString().slice(0, 5);
+    if (new Date(t).getHours() % stepH) continue;
+    axis.put(lane0 + i, "┴", C.dim);
+    if (lane0 + i + 1 > lastEnd && i + 1 + label.length < LW - 4) {
+      axis.put(lane0 + i + 1, label, C.dim);
+      lastEnd = lane0 + i + 1 + label.length;
+    }
+  }
+  axis.putr(W - 1, "now", C.dim);
+  axis.put(5, `${opt.timelineMin >= 120 ? opt.timelineMin / 60 + "h" : opt.timelineMin + "m"} · + −`, C.faint);
+  while (out.length < avail - 1) out.push("");
+  out.length = Math.max(0, avail - 1);
+  out.push(axis.toString());
+  return out;
 }
 
 // ───────────────────────── legend ─────────────────────────
@@ -5420,14 +5692,14 @@ export function legend(cols: number, rows: number): string[] {
     sample([[ICON.railThick, C.green], [" ", C.dim], [ICON.railThin, mix(C.green, C.faint, 0.45)]], 5, "rail: the session's state colour"),
     [],
     head("KEYS"),
-    key("1 2 3", "detail, compact, far"),
+    key("1 2 3 4", "detail, compact, far, timeline"),
     key("+ -", "window: 5 15 30 60 180 minutes"),
     key("a", "idle and finished sessions too"),
     key("d", "list finished agents"),
     key("tab", "focus the next session"),
-    key("esc", "leave focus; with none, quit"),
-    key("b", "bell for needs-you and stalls"),
-    key("u", "retry the usage read now"),
+    key("esc", "clear search; leave focus; quit"),
+    key("/ r", "search; open one waiting on you"),
+    key("b u", "bell on/off; retry usage now"),
     key("space", "seen it: clears the new marks"),
     key("?", "this legend"),
     key("q", "quit"),
@@ -5615,8 +5887,12 @@ if (import.meta.main) {
   const act = (name: string) => {
     if (name === "quit") return quit();
     if (name.startsWith("mode:")) opt.mode = name.slice(5) as Mode;
+    else if (name === "win+" && opt.mode === "timeline") opt.timelineMin = TIMELINE_SPANS[Math.min(TIMELINE_SPANS.length - 1, TIMELINE_SPANS.indexOf(opt.timelineMin) + 1)] ?? 360;
+    else if (name === "win-" && opt.mode === "timeline") opt.timelineMin = TIMELINE_SPANS[Math.max(0, TIMELINE_SPANS.indexOf(opt.timelineMin) - 1)] ?? 360;
     else if (name === "win+") opt.windowMin = stepWindow(opt.windowMin, 1);
     else if (name === "win-") opt.windowMin = stepWindow(opt.windowMin, -1);
+    else if (name === "search") search.typing = true;
+    else if (name === "reply") return reply();
     else if (name === "done") opt.showDone = !opt.showDone;
     else if (name === "all") opt.showAll = !opt.showAll;
     else if (name === "bell") opt.bell = !opt.bell;
@@ -5627,10 +5903,35 @@ if (import.meta.main) {
     } else if (name.startsWith("focus:")) focusSid = focusSid === name.slice(6) ? null : name.slice(6);
     else if (name === "next") focusSid = nextFocus(sessions, clock(), out.columns || 140, focusSid);
     else if (name === "back") {
-      if (!focusSid) return quit();
-      focusSid = null;
+      if (search.text) search.text = ""; // Esc clears a search first, then leaves focus, then quits
+      else if (!focusSid) return quit();
+      else focusSid = null;
     }
     clear();
+    draw();
+  };
+
+  /**
+   * Key r: open the session that is waiting on you (or the one in focus) to answer it. Claude Code has no
+   * way to put a line into a running session from outside, so this steps aside for `claude attach`, and
+   * comes back when you leave it (← or Ctrl+Z).
+   */
+  const reply = () => {
+    const sid = replyTarget(sessions, focusSid);
+    const s = sessions.find((x) => x.sid === sid);
+    if (!s) return say("nothing is waiting on you: focus a session (tab or click) to open it");
+    if (!s.jobId) return say(`${s.name} is not a background session: switch to its own terminal to answer it`);
+    restore();
+    const r = spawnSync(process.env.FLEET_ATTACH_CMD || "claude", ["attach", s.jobId], { stdio: "inherit" });
+    out.write(enterScreen(opt.mouse));
+    if (process.stdin.isTTY) process.stdin.setRawMode(true);
+    if (r.status !== 0) say(`could not open ${s.name}: claude attach ${r.error ? "did not start" : `exited ${r.status}`}`);
+    refresh();
+    clear();
+    draw();
+  };
+  const say = (text: string) => {
+    Object.assign(notice, { text, until: clock() + 5000 });
     draw();
   };
 
@@ -5657,7 +5958,7 @@ if (import.meta.main) {
 
   const KEYS: Record<string, string> = {
     q: "quit", "\x03": "quit", "\x1b": "back", "\t": "next",
-    "1": "mode:detail", "2": "mode:compact", "3": "mode:far",
+    "1": "mode:detail", "2": "mode:compact", "3": "mode:far", "4": "mode:timeline", "/": "search", r: "reply",
     "+": "win+", "=": "win+", "-": "win-", _: "win-",
     d: "done", a: "all", b: "bell", u: "usage", " ": "seen", "?": "legend",
   };
@@ -5668,6 +5969,16 @@ if (import.meta.main) {
       const keys = events.filter((e) => e.kind === "key");
       if (keys.some((e) => e.kind === "key" && e.key === "\x03")) return quit(); // Ctrl-C quits from anywhere in a read
       for (const e of events) {
+        // Typing a search: keys are its letters until Enter keeps it or Esc clears it.
+        if (search.typing && e.kind === "key") {
+          if (e.key === "\r" || e.key === "\n") search.typing = false;
+          else if (e.key === "\x1b") Object.assign(search, { text: "", typing: false });
+          else if (e.key === "\x7f" || e.key === "\b") search.text = search.text.slice(0, -1);
+          else if (e.key.length === 1 && e.key >= " " && search.text.length < 60) search.text += e.key;
+          clear();
+          draw();
+          continue;
+        }
         if (e.kind === "other" || (e.kind === "key" && keys.length > PASTE_KEYS)) continue;
         // The legend is closed by a key or a click, which then does nothing else. A button's release is not a click, so the click that opened it does not close it.
         if (legendOn) {

@@ -95,6 +95,12 @@ One rule for colour: warm means you. Amber is spent only where you are needed an
 
 Click a session, or press `tab`, to focus on it alone; it then gets the whole screen, with its whole question, every reply it still holds in full and every agent. `tab` again moves to the next session and `esc` goes back.
 
+**4, Timeline.** Each session's last hours as a swim-lane: how busy it was (shaded, brighter for more), amber from when it began waiting on you, red from when it stalled; under it what happened, `▸` when you typed to it, `⇡` a pull request linked, `≡` a workflow started, `✓` a task finished. One hour axis for all of them. `+` and `-` change its window: 1, 3, 6 (the default), 12 or 24 hours.
+
+**Search.** `/` and type: the screen narrows to the sessions whose name, folder, branch, tasks, agents, workflows or pull requests match every word, idle and finished ones included. Enter keeps the search, Esc clears it.
+
+**Reply.** `r` opens the session that has waited on you longest (or the one in focus) with `claude attach`, so you can answer it; leave it with `←` or Ctrl+Z and the dashboard comes back. Claude Code has no way to put a line into a running session from outside, so this is the shortest way in.
+
 ## Controls
 
 Every control has a key, and all but `tab` and `esc` are also buttons on the bottom row (a click on a session does what `tab` does for it).
@@ -130,6 +136,16 @@ Every control has a key, and all but `tab` and `esc` are also buttons on the bot
 `bun fleet.ts --help` prints the same list. Setting `FLEET_HIDE_PROCESSES=1` in the environment leaves other programs' names off the screen.
 
 Capturing clicks means a plain drag no longer selects text. Hold Shift (Option in iTerm2 and Terminal.app) while dragging, or start with `--no-mouse`.
+
+## Deploys
+
+A merged pull request can say whether it is live yet. List each repository's deploy target in `~/.config/claude-fleet/deploys.json` (or under `$XDG_CONFIG_HOME`):
+
+```json
+[{ "repo": "owner/name", "name": "staging", "url": "https://staging.example.com/healthz", "field": "revision" }]
+```
+
+The dashboard reads that URL once a minute; `field` names the JSON field that holds the deployed commit. A merged pull request then reads `✓ merged · ✓ live on staging`, or `◐ not on staging yet` while its merge commit is not the deployed one or behind it (asked of git in the session's checkout; if the checkout does not have the deployed commit, it says nothing). Without the file, nothing is asked.
 
 ## Four things it watches for you
 
@@ -232,6 +248,9 @@ These environment variables exist for tests and screenshots only:
 | `FLEET_MACHINE_FIXTURE` | Take CPU, memory, load and the process list from this JSON file instead of sampling the machine. Processes listed in it count as alive. |
 | `FLEET_USAGE_FIXTURE` | Take the usage figures from this JSON file instead of reading the login and asking Anthropic. A `fetchedAt` in the file sets their age. Figures from a fixture are never saved to the shared file. |
 | `FLEET_SEEN` | Start the "seen" mark at this time (milliseconds since 1970) instead of at launch, so a single frame can show things as new. |
+| `FLEET_DEPLOYS_FILE` | Read deploy targets from this file instead of `~/.config/claude-fleet/deploys.json`. |
+| `FLEET_DEPLOY_FIXTURE` | Take each deploy target's revision from this JSON file (URL to revision) instead of asking the URL. |
+| `FLEET_ATTACH_CMD` | Run this instead of `claude` when `r` opens a session (tests use `true`). |
 | `FLEET_PARTY` | Start a celebration at launch, as `session id=what it finished`, so a single frame can show one (the demo's `--party`). |
 | `FLEET_FOCUS` | Start focused on the session with this id, so a single frame can show focus (the demo's `--focus`). |
 | `FLEET_GIT_FIXTURE` | Take each checkout's `git status --porcelain -b` output from this JSON file (folder to text) instead of running git. |

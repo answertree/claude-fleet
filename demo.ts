@@ -383,10 +383,15 @@ if (!account && !argv.includes("--no-usage")) argv.push("--no-usage");
 // The checkout's git state and the pull requests' CI, as git and gh would report them, so the demo needs neither.
 write(path.join(home, "git-fixture.json"), JSON.stringify({ "/work/shop": "## fix/flaky-payments...origin/fix/flaky-payments [ahead 2]\n M src/payments/refund.ts\n M src/payments/retry.ts\n?? notes.md\n" }));
 write(path.join(home, "pr-fixture.json"), JSON.stringify({
-  "shop/payments#412": { state: "MERGED", isDraft: false, statusCheckRollup: [] },
+  "shop/payments#412": { state: "MERGED", isDraft: false, statusCheckRollup: [], mergeCommit: { oid: "4f1c2a9be0d17c35a8e6f20b9d4c7e1a3b5f8d02" } },
   "shop/payments#413": { state: "OPEN", isDraft: false, statusCheckRollup: [...Array(14)].map(() => ({ conclusion: "SUCCESS" })).concat([...Array(6)].map(() => ({ status: "IN_PROGRESS", conclusion: "" }))) },
 }));
 env.FLEET_GIT_FIXTURE = path.join(home, "git-fixture.json");
+// A staging target for the shop's repository, already serving #412's merge commit.
+write(path.join(home, "deploys.json"), JSON.stringify([{ repo: "shop/payments", name: "staging", url: "https://staging.shop.example/healthz", field: "revision" }]));
+write(path.join(home, "deploy-fixture.json"), JSON.stringify({ "https://staging.shop.example/healthz": "4f1c2a9be0d17c35a8e6f20b9d4c7e1a3b5f8d02" }));
+env.FLEET_DEPLOYS_FILE = path.join(home, "deploys.json");
+env.FLEET_DEPLOY_FIXTURE = path.join(home, "deploy-fixture.json");
 env.FLEET_PR_FIXTURE = path.join(home, "pr-fixture.json");
 if (!argv.includes("--prs")) argv.push("--prs");
 if (focus) env.FLEET_FOCUS = "bbbbbbbb-0000-4000-8000-000000000002";
