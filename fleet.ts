@@ -1467,9 +1467,26 @@ export const REASON = {
  */
 export function usageRemedy(reason: string, w = Infinity): string {
   if (reason !== REASON.keychainRemote) return "";
-  const unlock = "run: security unlock-keychain ~/Library/Keychains/login.keychain-db";
-  const wordings = [`${unlock}  ·  or start fleet in a tmux begun on the Mac itself`, `${unlock} · or use a tmux started on the Mac`, unlock];
-  return wordings.find((x) => width(x) <= w) ?? fit(unlock, w, "l", true).trimEnd();
+  const wordings = [`${UNLOCK}  ·  or start fleet in a tmux begun on the Mac itself`, `${UNLOCK} · or use a tmux started on the Mac`, UNLOCK, UNLOCK.replace(/^run: /, "")];
+  return wordings.find((x) => width(x) <= w) ?? fit(UNLOCK, w, "l", true).trimEnd();
+}
+const UNLOCK = "run: security unlock-keychain ~/Library/Keychains/login.keychain-db";
+/** A reason in its exact wording, then shorter ones that say the same, for a block too narrow for it: never cut mid-word. */
+export const reasonForms = (reason: string): string[] => (reason === REASON.keychainRemote ? [reason, "keychain: closed over ssh/mosh", "keychain closed over ssh"] : [reason]);
+/**
+ * The dim line under the account block while the usage read fails for a reason you can do something
+ * about (the line stays as long as the reason does, so the header keeps its height as figures come and
+ * go). With somebody else's current figures in the block it says whose they are and why, and no command:
+ * that arrangement is working. Otherwise it gives the remedy, led by the reason when the block above has
+ * no room to say it; where both do not fit, the reason wins and the line ends "u retries".
+ */
+export function usageNote(a: AccountView, w: number, reasonShown: boolean): string {
+  if (!usageRemedy(a.reason)) return "";
+  const forms = reasonForms(a.reason);
+  const sep = ` ${ICON.sep} `;
+  if (a.kind === "current") return firstFit([...forms.map((f) => `shared figures${sep}${f}${sep}u retries`), ...forms.map((f) => `shared figures${sep}${f}`)], w);
+  if (reasonShown) return usageRemedy(a.reason, w);
+  return firstFit([`${forms[0]}${sep}${UNLOCK} · or use a tmux started on the Mac`, ...forms.map((f) => `${f}${sep}${UNLOCK}`), ...forms.map((f) => `${f}${sep}${UNLOCK.replace(/^run: /, "")}`), ...forms.map((f) => `${f}${sep}u retries`)], w);
 }
 
 /** What a stored login looked like when parsed: usable, JSON without a claude.ai login, not JSON, or nothing at all. */
@@ -1836,7 +1853,7 @@ function usageRow(W: number, now: number): string {
   const lead = fg(C.dim, " account ");
   const a = accountView(now);
   if (a.kind === "none") {
-    const why = a.reason ? `no reading yet: ${a.reason} · next try ${hhmm(a.nextTry)} · u retries` : a.busy || !usage.at ? "fetching usage…" : "no reading yet";
+    const why = a.reason ? firstFit(reasonForms(a.reason).map((f) => `no reading yet: ${f} · next try ${hhmm(a.nextTry)} · u retries`), W - 10) : a.busy || !usage.at ? "fetching usage…" : "no reading yet";
     return lead + fg(C.dim, fit(why, W - 10));
   }
   const stale = a.kind === "stale";
@@ -1856,7 +1873,8 @@ function usageRow(W: number, now: number): string {
   }
   // While a read is failing, say so before anything else that is optional.
   if (stale || a.reason) {
-    const why = fit(`(${stale ? `as of ${hhmm(a.asOf)}` : "shared figures"}${a.reason ? " · " + a.reason : ""})`, Math.min(W - 1 - used - 3, 70)).trimEnd();
+    const lead = stale ? `as of ${hhmm(a.asOf)}` : "shared figures";
+    const why = firstFit([...(a.reason ? reasonForms(a.reason).map((f) => `(${lead} · ${f})`) : []), `(${lead})`], Math.min(W - 1 - used - 3, 70)).trimEnd();
     line += "   " + fg(C.dim, why);
     used += 3 + width(why);
   }
@@ -3798,7 +3816,7 @@ function machineBlock(rows: Row[], g: Grid) {
  * - no figures: ╌ gauges, when the next try is, and the exact reason.
  * - without --usage (`a` undefined): the busiest processes on the same columns, one full core to a full gauge.
  */
-function accountBlock(rows: Row[], g: Grid, a: AccountView | undefined, now: number) {
+function accountBlock(rows: Row[], g: Grid, a: AccountView | undefined, now: number): boolean {
   const GW = g.gaugeW;
   const label = g.account;
   const gaugeAt = label + 6;
@@ -3806,7 +3824,13 @@ function accountBlock(rows: Row[], g: Grid, a: AccountView | undefined, now: num
   const detail = valueEnd + 3;
   const room = g.accountEnd - detail + 1; // cells the detail may use
   /** One line that owns the block's whole width: a red ✗, then the first wording that fits. */
-  const failLine = (r: Row, wordings: string[]) => r.segs(label, [[`${ICON.failed} `, C.red], [firstFit(wordings, g.accountEnd - label - 1), C.dim]]);
+  /** Draw the first wording that fits behind a red ✗, and say which it was. */
+  const failLine = (r: Row, wordings: string[]): string => {
+    const text = firstFit(wordings, g.accountEnd - label - 1);
+    r.segs(label, [[`${ICON.failed} `, C.red], [text, C.dim]]);
+    return text;
+  };
+  const whyForms = a ? reasonForms(a.reason) : [];
 
   if (!a) {
     const top = topProcs(3);
@@ -3817,7 +3841,7 @@ function accountBlock(rows: Row[], g: Grid, a: AccountView | undefined, now: num
       rows[i].putr(valueEnd, `${Math.round(p.cpu)}%`, C.text);
       rows[i].put(detail, fitOrDrop(shortProc(p), room), C.text);
     });
-    return;
+    return false;
   }
 
   if (a.kind === "none") {
@@ -3828,8 +3852,8 @@ function accountBlock(rows: Row[], g: Grid, a: AccountView | undefined, now: num
       rows[i].putr(valueEnd, "--", C.dim);
       rows[i].put(detail, fitOrDrop(notes[i], room), C.dim);
     });
-    if (a.reason) failLine(rows[2], [`${a.reason} ${ICON.sep} u retries`, a.reason]);
-    return;
+    const wordings = whyForms.flatMap((f) => [`${f} ${ICON.sep} u retries`, f]);
+    return !!a.reason && wordings.includes(failLine(rows[2], wordings));
   }
 
   const stale = a.kind === "stale";
@@ -3856,7 +3880,11 @@ function accountBlock(rows: Row[], g: Grid, a: AccountView | undefined, now: num
   limitRow(rows[0], "5h", five);
   limitRow(rows[1], "7d", week);
   // Where "as of" does not fit beside the reason, the time alone still says the figures are old.
-  if (stale) return void failLine(rows[2], a.reason ? [`as of ${hhmm(a.asOf)} ${ICON.sep} ${a.reason}`, `${hhmm(a.asOf)} ${ICON.sep} ${a.reason}`] : [`as of ${hhmm(a.asOf)}`]);
+  const asOf = hhmm(a.asOf);
+  if (stale) {
+    const withReason = a.reason ? whyForms.flatMap((f) => [`as of ${asOf} ${ICON.sep} ${f}`, `${asOf} ${ICON.sep} ${f}`]) : [];
+    return withReason.includes(failLine(rows[2], [...withReason, `as of ${asOf}`, asOf]));
+  }
 
   const x = a.extra;
   const opus = limitOf("seven_day_opus");
@@ -3871,6 +3899,7 @@ function accountBlock(rows: Row[], g: Grid, a: AccountView | undefined, now: num
     const only = (opus ?? sonnet)!;
     limitRow(rows[2], fit(only.label, 5).trimEnd(), only);
   } else if (x) rows[2].put(label, "extra off", C.dim);
+  return false;
 }
 
 /**
@@ -3879,11 +3908,48 @@ function accountBlock(rows: Row[], g: Grid, a: AccountView | undefined, now: num
  * at 150 and at 110; in between and below, what does not fit beside the lane is left out: load first,
  * then the reset times, and under 109 columns the gauges shorten and close up.
  */
-function mediumRow(r: Row, g: Grid, a: AccountView | undefined, now: number) {
+function mediumRow(r: Row, g: Grid, a: AccountView | undefined, now: number, noteLine = false): boolean {
   const end = g.textEnd;
   const tight = end < 76;
-  const GW = tight ? 6 : 8;
-  const gap = tight ? 2 : 3;
+  const base = { GW: tight ? 6 : 8, gap: tight ? 2 : 3 };
+  const five = a?.limits.find((l) => l.key === "five_hour");
+  const week = a?.limits.find((l) => l.key === "seven_day");
+  const stale = a?.kind === "stale";
+  const load = `load ${machine.load.toFixed(1)}`;
+  const loadOn = !!a && a.kind !== "none" && end >= 104; // 150 columns and up
+  /** What may follow a limit's gauge: its forecast in two wordings when there is one, else its bare reset time. */
+  const timeForms = (l?: LimitView): string[] => (stale || !l ? [] : l.fullIn ? [`full ~${roughly(l.fullIn / 60_000)}`, `~${roughly(l.fullIn / 60_000)}`] : [resetText(l.resetsAt, now, "bare")].filter(Boolean));
+  // Stale figures say so (a red ✗ and their time; with no line under the block, the reason too where it fits), and a forecast is shown:
+  // neither is ever what is left out. To make room the reset times go, then load, then the gauges shorten. Nothing else ever shrinks them.
+  type Plan = { GW: number; gap: number; load: boolean; five: string; week: string; note: string };
+  const asOf = a && a.kind !== "none" ? hhmm(a.asOf) : "";
+  const notes = !stale ? [""] : [...(a!.reason && !noteLine ? reasonForms(a!.reason).map((f) => `as of ${asOf} ${ICON.sep} ${f}`) : []), `as of ${asOf}`, asOf];
+  const fives = [...timeForms(five), ...(five?.fullIn && !stale ? [] : [""])];
+  const weeks = [...timeForms(week), ...(week?.fullIn && !stale ? [] : [""])];
+  const urgent = stale || !!five?.fullIn || !!week?.fullIn;
+  const sizes = urgent ? [base, { GW: 6, gap: 2 }, { GW: 4, gap: 2 }].filter((s) => s.GW <= base.GW) : [base];
+  /** The last column a plan uses: cpu, mem, load, 5h and its time (a slot of at least 5 cells), 7d and its time, the stale note. */
+  const lastCol = (p: Plan) => {
+    const meter = 2 + p.GW + 6;
+    let c = 2 + (3 + p.GW + 6) * 2 + p.gap * 2 + (p.load ? 13 : 0) + meter;
+    c += p.five ? 1 + Math.max(5, width(p.five) + 1) + 2 : p.gap;
+    c += meter + (p.week ? 1 + width(p.week) : 0) + (p.note ? 4 + width(p.note) : 0);
+    return c - 1;
+  };
+  let plan: Plan = { ...sizes[sizes.length - 1], load: false, five: "", week: "", note: "" };
+  find: for (const size of sizes)
+    for (const note of notes)
+      for (const fiveText of fives)
+        for (const withLoad of loadOn ? [true, false] : [false])
+          for (const weekText of weeks) {
+            const p = { ...size, load: withLoad, five: fiveText, week: weekText, note };
+            if (lastCol(p) <= end) {
+              plan = p;
+              break find;
+            }
+          }
+  const GW = a && a.kind !== "none" ? plan.GW : base.GW;
+  const gap = a && a.kind !== "none" ? plan.gap : base.gap;
   let col = 2;
   /** A label, a gauge and a value from `col`, which moves on to the column after the value. */
   const meter = (name: string, gaugeText: string, value: string, color: RGB, isBold = false) => {
@@ -3898,7 +3964,6 @@ function mediumRow(r: Row, g: Grid, a: AccountView | undefined, now: number) {
   col += gap;
   meter("mem", limitGauge(memPct, GW), `${Math.round(memPct)}%`, memTone.color, memTone.bold);
   col += gap;
-  const load = `load ${machine.load.toFixed(1)}`;
 
   if (!a) {
     if (col + width(load) - 1 <= end) {
@@ -3906,41 +3971,35 @@ function mediumRow(r: Row, g: Grid, a: AccountView | undefined, now: number) {
       col += 13;
     }
     r.segs(col, topSegs(end - col + 1));
-    return;
+    return false;
   }
-  const full = end >= 104; // 150 columns and up: load, and the reset times
-  const withTimes = end >= 91; // from 137: the reset times, without load
-  if (full) {
+  if (a.kind === "none") {
+    if (end >= 104) {
+      r.put(col, load, C.dim);
+      col += 13;
+    }
+    const w = end - col + 1;
+    const wordings = reasonForms(a.reason).flatMap((f) => [`${f} ${ICON.sep} u retries`, f]);
+    const text = a.reason ? firstFit(wordings, w - 2) : "";
+    if (a.reason) r.segs(col, [[`${ICON.failed} `, C.red], [text, C.dim]]);
+    else r.put(col, fitOrDrop(a.busy ? "reading the usage figures" : "no reading yet", w), C.dim);
+    return wordings.includes(text);
+  }
+  if (plan.load) {
     r.put(col, load, C.dim);
     col += 13;
   }
-  if (a.kind === "none") {
-    const w = end - col + 1;
-    if (a.reason) r.segs(col, [[`${ICON.failed} `, C.red], [firstFit([`${a.reason} ${ICON.sep} u retries`, a.reason], w - 2), C.dim]]);
-    else r.put(col, fitOrDrop(a.busy ? "reading the usage figures" : "no reading yet", w), C.dim);
-    return;
-  }
-  const stale = a.kind === "stale";
-  const times = withTimes && !stale;
-  /** One limit from `at`; `timeW` cells after it for the bare reset time, or the forecast in bold red. */
-  const limit = (at: number, name: string, l: LimitView | undefined, timeW: number) => {
-    col = at;
+  /** One limit from `col`, then its time (or its forecast, in bold red) when the plan has one. */
+  const limit = (name: string, l: LimitView | undefined, text: string) => {
     const tone = figureTone(l?.pct ?? 0);
     meter(name, limitGauge(l?.pct, GW, l?.tick, stale), l ? `${Math.round(l.pct)}%` : "--", !l || stale ? C.dim : tone.color, !!l && !stale && tone.bold);
-    if (!l || timeW <= 0) return;
-    const text = l.fullIn ? `~${roughly(l.fullIn / 60_000)}` : resetText(l.resetsAt, now, "bare");
-    if (width(text) <= timeW) r.put(col + 1, text, l.fullIn ? C.red : C.dim, !!l.fullIn);
+    if (l && text) r.put(col + 1, text, l.fullIn ? C.red : C.dim, !!l.fullIn);
   };
-  const fiveAt = col;
-  const weekAt = fiveAt + GW + 8 + (times ? 8 : gap);
-  limit(fiveAt, "5h", a.limits.find((l) => l.key === "five_hour"), times ? 5 : 0);
-  limit(weekAt, "7d", a.limits.find((l) => l.key === "seven_day"), times ? end - (weekAt + GW + 9) + 1 : 0);
-  if (stale) {
-    // Stale figures are drawn dim; where there is room they also say what time they date from, and why.
-    const w = end - (col + 2) + 1 - 2;
-    const note = [`as of ${hhmm(a.asOf)}${a.reason ? ` ${ICON.sep} ${a.reason}` : ""}`, `as of ${hhmm(a.asOf)}`].find((text) => width(text) <= w);
-    if (note) r.segs(col + 2, [[`${ICON.failed} `, C.red], [note, C.dim]]);
-  }
+  limit("5h", five, plan.five);
+  col += plan.five ? 1 + Math.max(5, width(plan.five) + 1) + 2 : gap;
+  limit("7d", week, plan.week);
+  if (plan.note) r.segs(col + (plan.week ? 1 + width(plan.week) : 0) + 2, [[`${ICON.failed} `, C.red], [plan.note, C.dim]]);
+  return !!a.reason && plan.note !== asOf && plan.note !== `as of ${asOf}`;
 }
 
 /**
@@ -3992,13 +4051,14 @@ export function header(sessions: Session[], W: number, rows: number, now: number
   const a = opt.usage ? accountView(now) : undefined;
   // A failing read you can do something about brings its remedy, on one dim line under the blocks. The line is there for as long
   // as the reason is, whether or not somebody else's figures are filling the block, so the header does not change height as those come and go.
-  const remedy = a ? usageRemedy(a.reason, g.textEnd - 1) : "";
-  const body = Array.from({ length: (kind === "tall" ? 3 : 1) + (remedy ? 1 : 0) }, () => new Row(W));
+  const noteLine = !!a && !!usageRemedy(a.reason);
+  const body = Array.from({ length: (kind === "tall" ? 3 : 1) + (noteLine ? 1 : 0) }, () => new Row(W));
+  let reasonShown: boolean;
   if (kind === "tall") {
     machineBlock(body, g);
-    accountBlock(body, g, a, now);
-  } else mediumRow(body[0], g, a, now);
-  if (remedy) body[body.length - 1].put(2, remedy, C.dim);
+    reasonShown = accountBlock(body, g, a, now);
+  } else reasonShown = mediumRow(body[0], g, a, now, noteLine);
+  if (noteLine) body[body.length - 1].put(2, usageNote(a!, g.textEnd - 1, reasonShown), C.dim);
   // The fleet: tool calls across the window as a chart in the lane, as tall as the rows beside it, and its figures in the figure field.
   const chart = fleetChart(counts, body.length);
   const figures: [string, string][] = [[human(sum(counts)), " tools"], [human(tokensIn(tailsHere, win)), " out"], [barLabel(win), " a bar"]];

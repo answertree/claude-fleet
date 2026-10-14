@@ -10,7 +10,9 @@
 //   --runway          one session's context grows steadily, so "full in ~40m" shows
 //   --ended           adds a completed workflow and a failed one
 //   --account <name>  a made-up account (it turns usage on): current, extra-off, early (the
-//                     5-hour limit runs out before it resets), stale, none, remote. --usage alone,
+//                     5-hour limit runs out before it resets), stale, none, remote, shared (this
+//                     dashboard's own read fails over ssh/mosh; another's figures, 3 minutes old,
+//                     fill the block). --usage alone,
 //                     or FLEET_USAGE=1, means --account current
 //   --seen <minutes>  as if you last looked that many minutes ago
 //   --surprise        --stalled --runway --account early --seen 18
@@ -245,6 +247,7 @@ if (account) {
     stale: { figures: { five_hour: win(38, 130 * MIN), seven_day: week, extra_usage: extra }, ageMin: 39, fail: "Anthropic answered 429" },
     none: { fail: "keychain: no answer in 5s" },
     remote: { fail: "keychain: closed to remote sessions (ssh/mosh)" },
+    shared: { figures: { five_hour: win(38, 130 * MIN), seven_day: week, extra_usage: extra }, ageMin: 3, fail: "keychain: closed to remote sessions (ssh/mosh)" },
   };
   const pick = figures[account];
   if (!pick) {

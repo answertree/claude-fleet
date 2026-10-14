@@ -33,7 +33,7 @@ alias fleet='bun ~/path/to/claude-fleet/fleet.ts --usage'
 - **The fleet:** tool calls across the window as a chart, with the total, the output tokens and how long one bar is.
 - **The rule under it is the time axis** for every sparkline below: each sits in the same columns and counts the same bars, and the header's total is the sum of the sessions' own.
 
-The header is five rows on a terminal of 40 rows or more and three rows below that. Compact mode, and any terminal under 100 columns, keeps a plainer header: one line for the fleet, one for the machine, one for the account.
+The header is five rows on a terminal of 40 rows or more and three rows below that, with one more while the usage read fails for a reason you can do something about (see [In a remote session](#in-a-remote-session-ssh-or-mosh)). Compact mode, and any terminal under 100 columns, keeps a plainer header: one line for the fleet, one for the machine, one for the account.
 
 **For each session** (detail mode)
 
@@ -129,7 +129,7 @@ Each stays silent until it has something to say.
 **Runway: will it hit the wall before the work is done?** Two gauges become forecasts.
 
 - *Context.* When a session's context window has grown steadily and would be full within the hour, `full in ~40m` appears beside its context key (red under 15 minutes; in far mode it follows the `CTX` figure). It is a straight line through the last ten minutes, and it needs five minutes of history. A compaction starts the history again.
-- *Account.* Each usage gauge has a white tick where the clock stands in that limit's window. A fill short of the tick is under pace; a fill past it is burning faster than the window refills. If the pace so far reaches 100% before the reset, `resets in 2h10` is replaced by `full in ~35m` in bold red. Nothing is forecast in the first 15% of a window or under 5% used.
+- *Account.* Each usage gauge has a white tick where the clock stands in that limit's window. A fill short of the tick is under pace; a fill past it is burning faster than the window refills. If the pace so far reaches 100% before the reset, `resets in 2h10` is replaced by `full in ~35m` in bold red (`full ~35m` in the three-row header, or `~35m` where only that fits; the gauges there shorten rather than leave it out). Compact mode's account line keeps its older layout and shows neither the tick nor the forecast. Nothing is forecast in the first 15% of a window or under 5% used.
 
 **Stall watch: not working, not asking, just stuck.** A thread is marked when it has had a tool call outstanding and has written nothing for ten minutes (`--stall <minutes>`) while the session's whole process tree is under 1% CPU. Its `◐` and its age turn red and its action reads `stalled? Bash  Run the refund tests…`. The session's rail turns red, its state reads `◐ STALLED?  ·  14m`, it sorts directly under the sessions that need you, the top row gains `◐ 1 stalled?`, and with the bell on it rings once. It is worded as a question because the evidence is circumstantial: a tool waiting on another machine looks exactly the same.
 
@@ -159,7 +159,7 @@ There are two standard remedies. **Neither has been tested here:**
 - run `security unlock-keychain ~/Library/Keychains/login.keychain-db` in the remote session, then press `u`; or
 - run Claude Fleet inside a tmux that was started on the Mac itself.
 
-While the read is failing for this reason, the screen prints them on one dim line under the header's figures.
+While the read is failing for this reason, the screen prints the first on one dim line under the header's figures, after the reason itself when the block above has no room for it (on a narrow three-row header, where both do not fit, the reason wins and the line ends `u retries`). Once another dashboard's figures are current, the line reads `shared figures · keychain: closed to remote sessions (ssh/mosh) · u retries` instead: the figures are arriving, so it no longer asks you to run anything.
 
 Claude Fleet does not work around the refusal. It has no helper process and no password prompt, it does not refresh the token, and it reads no other program's credentials. The one read it makes is the one above.
 
@@ -170,7 +170,7 @@ What a remote dashboard can do is show figures that another dashboard has alread
 A dashboard whose own read fails shows the figures from that file, or failing that the ones Claude Code itself last cached (the `cachedUsageUtilization` entry of `~/.claude.json`; no other key is read), whichever is newer. So one dashboard left running in a terminal on the Mac keeps a remote one supplied.
 
 - Figures under ten minutes old are shown as current.
-- Older ones are shown dim, with the time they date from and the reason the read is failing.
+- Older ones are shown dim, behind a red `✗` and the time they date from (`✗ as of 23:12`, or `✗ 23:12` where that is all that fits; the three-row header shortens its gauges rather than leave it out), and the reason the read is failing wherever there is room for it.
 - Figures more than a day old, or stamped in the future, are not shown: the block reads `no reading yet`, the reason, and when the next try is.
 
 ## Things to know
@@ -201,7 +201,7 @@ The demo has options of its own, so every state can be seen without waiting for 
 | `--stalled` | An agent that has sat on a tool call for 14 minutes while its session is idle. |
 | `--runway` | A session whose context is growing steadily, so its forecast appears. |
 | `--ended` | A completed workflow and a failed one. |
-| `--account <state>` | A made-up account (it turns `--usage` on): `current`, `extra-off`, `early` (the 5-hour limit runs out before it resets), `stale`, `none`, `remote`. |
+| `--account <state>` | A made-up account (it turns `--usage` on): `current`, `extra-off`, `early` (the 5-hour limit runs out before it resets), `stale`, `none`, `remote`, `shared` (this dashboard's own read fails over ssh or mosh while another's figures, three minutes old, fill the block). |
 | `--seen <minutes>` | The screen as if you last looked that many minutes ago. |
 | `--surprise` | `--stalled --runway --account early --seen 18` together. |
 | `--real-machine` | This machine's CPU, memory and load instead of the made-up ones. |

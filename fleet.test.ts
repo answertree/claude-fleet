@@ -1602,14 +1602,14 @@ describe("header and chrome", () => {
     expect(block(150, "early")).toEqual(["5h    ━━━━━━━━┿━──  86%  full in ~35m", "7d    ━━━────┼────  21%  resets Fri 09:00", "extra ━━━─────────  24%  £12 of £50"]);
     expect(raw(150, 44, "early")[1]).toContain(F.bold(F.fg(F.C.red, "full in ~35m")));
     expect(block(110, "early")[0]).toBe("5h    ━━━━━┿━─  86%  full in ~35m");
-    expect(head(150, 34, "early")[1]).toContain("5h ━━━━━┿━─  86% ~35m   7d ━━───┼──  21% Fri 09:00"); // the medium header has room for the figure alone
+    expect(head(150, 34, "early")[1]).toContain("load 14.6    5h ━━━━━┿━─  86% full ~35m   7d ━━───┼──  21%  "); // the forecast says what it is; the week's reset time gives way
     expect(block(150, "stale")[0]).not.toContain("full in"); // no forecast from stale figures
   });
 
   test("the usage read that fails with a remedy gets one dim line under the blocks, and the chart grows a row to stay on its axis", () => {
     const remote = head(150, 44, "remote");
     expect(remote.length).toBe(6);
-    expect(remote.slice(1, 4).map((l) => l.slice(60, 104).trimEnd())).toEqual(["5h    ╌╌╌╌╌╌╌╌╌╌╌╌   --  no reading yet", "7d    ╌╌╌╌╌╌╌╌╌╌╌╌   --  next try 23:56", "✗ keychain: closed to remote sessions (ssh/…"]);
+    expect(remote.slice(1, 4).map((l) => l.slice(60, 104).trimEnd())).toEqual(["5h    ╌╌╌╌╌╌╌╌╌╌╌╌   --  no reading yet", "7d    ╌╌╌╌╌╌╌╌╌╌╌╌   --  next try 23:56", "✗ keychain: closed over ssh/mosh · u retries"]);
     expect(remote[4].slice(0, 104).trimEnd()).toBe(" run: security unlock-keychain ~/Library/Keychains/login.keychain-db · or use a tmux started on the Mac");
     expect(remote[4].slice(106, 136)).toMatch(/^[▁▂▃▄▅▆▇█]{30}$/); // the chart's bottom row, directly above the axis
     expect(remote[5]).toBe(TALL_150[4]);
@@ -1617,11 +1617,12 @@ describe("header and chrome", () => {
     // The line is there for as long as the reason is: with stale figures, and with fresh ones another reader fetched.
     // (Those come and go as that reader does, and the header must not change height each time.)
     expect(head(150, 44, "staleRemote").length).toBe(6);
-    expect(block(150, "staleRemote")[2]).toBe("✗ as of 23:12 · keychain: closed to remote…");
+    expect(block(150, "staleRemote")[2]).toBe("✗ 23:12 · keychain: closed over ssh/mosh");
     const shared = head(150, 44, "shared");
     expect(shared.length).toBe(6);
     expect(block(150, "shared")).toEqual(block(150, "current")); // the figures are current, so the block shows them as usual
-    expect(shared[4].slice(0, 104)).toBe(remote[4].slice(0, 104));
+    // …and the line under it says whose they are and why, not a command you have chosen not to run.
+    expect(shared[4].slice(0, 104).trimEnd()).toBe(" shared figures · keychain: closed to remote sessions (ssh/mosh) · u retries");
     // Other reasons have no remedy, so no line.
     expect([head(150, 44, "none").length, head(150, 44, "stale").length]).toEqual([5, 5]);
     // Medium: one more row, with the chart two rows tall. Narrow: the command is the last thing to be cut.
@@ -1630,6 +1631,44 @@ describe("header and chrome", () => {
     expect(medium[1]).toContain("load 14.6    ✗ keychain: closed to remote sessions (ssh/mosh)");
     expect(medium[2].slice(0, 104).trimEnd()).toBe(remote[4].slice(0, 104).trimEnd());
     expect(head(110, 44, "remote")[4].slice(0, 77).trimEnd()).toBe(" run: security unlock-keychain ~/Library/Keychains/login.keychain-db");
+  });
+
+  test("stale figures are never told by colour alone: a red ✗ and their time, at every width, and the reason somewhere on the header", () => {
+    for (let W = 100; W <= 160; W++)
+      for (const rows of [36, 44])
+        for (const account of ["stale", "staleRemote"]) {
+          const lines = head(W, rows, account);
+          const text = lines.join("\n");
+          const where = `${account} ${W}x${rows}`;
+          expect([where, /✗ (as of )?23:12/.test(text)]).toEqual([where, true]);
+          if (account === "staleRemote") expect([where, /keychain:? closed/.test(text)]).toEqual([where, true]);
+          for (const line of lines) expect([where, F.width(line) <= W]).toEqual([where, true]);
+        }
+    // The design's frames hold where they fit: the 150-column medium row keeps its gauges and load.
+    expect(head(150, 34, "stale")[1]).toContain("load 14.6    5h ━━━─┼───  38%   7d ━━───┼──  21%  ✗ as of 23:12");
+    // At 110 there was no room at all: the gauges shorten to make it.
+    expect(head(110, 36, "stale")[1]).toMatch(/7d ━+[─┼]+  21%  ✗ 23:12/);
+  });
+
+  test("the remote reason is never cut in the tall header; with someone else's current figures, the line under it says so at every size", () => {
+    for (let W = 100; W <= 200; W += 2) {
+      const text = head(W, 44, "remote").join("\n");
+      expect([W, /✗ keychain:? closed (to remote sessions \(ssh\/mosh\)|over ssh\/mosh|over ssh)( ·|  |$)/m.test(text)]).toEqual([W, true]);
+      for (const rows of [36, 44]) {
+        const shared = head(W, rows, "shared").join("\n");
+        expect([W, rows, shared.includes("shared figures · keychain"), shared.includes("unlock-keychain")]).toEqual([W, rows, true, false]);
+      }
+    }
+  });
+
+  test("the three-row header shows the 5-hour forecast at every width, and the 5-hour reset time wherever it fits", () => {
+    expect(head(120, 36, "early")[1]).toContain("86% full ~35m");
+    expect(head(136, 36, "early")[1]).toContain("86% full ~35m");
+    expect(head(110, 36, "early")[1]).toMatch(/86% (full )?~35m/);
+    expect(head(100, 30, "early")[1]).toMatch(/86% (full )?~35m/);
+    for (let W = 100; W <= 160; W++) expect([W, head(W, 36, "early")[1].includes("~35m")]).toEqual([W, true]);
+    expect(head(120, 36)[1]).toContain("38% 2h10   7d ━━───┼──  21%");
+    expect(head(110, 36)[1]).toContain("5h ━━━─┼───  38%   7d ━━───┼──  21%   "); // the design's 110-column row, unchanged
   });
 
   test("the fleet chart: linear against its own peak, in the lane, with its totals and the bar length", () => {

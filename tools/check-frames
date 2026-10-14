@@ -21,7 +21,7 @@ const VARIANTS: { name: string; args: string[] }[] = [
   { name: "six", args: ["--six"] }, // six sessions sharing the screen
   { name: "surprise", args: ["--surprise"] }, // a stalled agent, a context forecast, the 5-hour limit running out, things new since you looked
   { name: "ended", args: ["--ended", "--all"] }, // a completed and a failed workflow
-  ...["current", "extra-off", "stale", "none", "remote"].map((a) => ({ name: `account-${a}`, args: ["--account", a] })),
+  ...["current", "extra-off", "early", "stale", "none", "remote", "shared"].map((a) => ({ name: `account-${a}`, args: ["--account", a] })),
   { name: "plain-glyphs", args: ["--plain-glyphs", "--account", "none", "--stalled"] }, // the four fallbacks, on the header's no-reading gauges and a stalled thread
 ];
 
