@@ -1,7 +1,7 @@
 // Tests for the parts of fleet.ts that are plain logic. Run with: bun test
 // Nothing here reads a real login, a real transcript or the network.
 
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -1195,6 +1195,11 @@ describe("since you looked", () => {
 });
 
 describe("header and chrome", () => {
+  // The design's frames show the design's clock and reset times (23:51:22 on Tue 13 Oct, "resets Fri 09:00"), which
+  // NOW and the fixtures are only in UTC. These tests are held to UTC whatever zone the suite was started in, and the zone is then put back.
+  const zone = process.env.TZ;
+  beforeAll(() => void (process.env.TZ = "UTC"));
+  afterAll(() => void (process.env.TZ = zone ?? "UTC")); // with no zone given, bun test itself runs in UTC
   const WINDOW = 30 * MIN;
   const SIZES: [number, number][] = [[80, 24], [100, 30], [110, 44], [130, 40], [150, 34], [150, 44], [200, 60]];
   /** The design's made-up machine: 54% CPU, 38% of 128G, sixteen cores, three busy processes. Process 4243 is an idle session's. */
