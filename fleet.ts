@@ -121,7 +121,6 @@ export const C = {
   code: [150, 196, 204] as RGB, // inline code and code lines
   calm: [96, 170, 182] as RGB, // a limit gauge below 60%
   button: [40, 45, 54] as RGB,
-  yellow: [229, 181, 68] as RGB, // the old name for amber, still used by the old renderer
 };
 /** Sparkline ramps, low to high. Hue says whose activity it is, height says how much. */
 export const RAMP = {
@@ -276,11 +275,6 @@ export function spark(counts: number[], max: number, lo: RGB, hi: RGB): string {
     .join("");
 }
 
-export function bar(done: number, total: number, w: number, c: RGB): string {
-  const filled = total > 0 ? Math.round((done / total) * w) : 0;
-  return fg(c, "█".repeat(filled)) + fg(C.faint, "░".repeat(w - filled));
-}
-
 /** Progress as one glyph per step: ✓ done, ◐ in progress (white, never yellow), ○ not started. Scaled down past `w` steps. */
 export function pips(done: number, doing: number, total: number, w: number, c: RGB = C.green): string {
   let n = total;
@@ -352,23 +346,6 @@ export function wrap(text: string, w: number): string[] {
   return lines;
 }
 
-/** A message as readable lines: markdown marks dropped, bullets kept, code fences and blanks skipped. */
-export function messageLines(text: string, w: number): string[] {
-  const out: string[] = [];
-  for (const raw of text.split("\n")) {
-    let line = raw.trim();
-    if (!line || line.startsWith("```") || /^[|:\- ]+$/.test(line)) continue;
-    line = line
-      .replace(/^#+\s*/, "")
-      .replace(/^[-*]\s+/, "• ")
-      .replace(/[*`]+/g, "")
-      .replace(/\s+/g, " ");
-    out.push(...wrap(line, w));
-  }
-  return out;
-}
-
-export const toneFor = (pct: number): RGB => (pct >= 80 ? C.red : pct >= 50 ? C.yellow : C.green);
 /** A thin horizontal gauge. */
 export function gauge(pct: number, w: number, c: RGB): string {
   const n = Math.max(pct > 0 ? 1 : 0, Math.min(w, Math.round((pct / 100) * w)));
@@ -574,6 +551,31 @@ export function grid(W: number): Grid {
 const ANSI = /\x1b\[[0-9;?]*[a-zA-Z]/g;
 /** Display cells a string takes once its colour codes are left out. */
 export const cells = (s: string) => width(s.replace(ANSI, ""));
+/**
+ * A drawn row cut to `w` cells, its colour codes kept so nothing is left switched on. The last line of
+ * defence on a terminal narrower than a row was laid out for (under 76 columns): a row that is cut is
+ * still one row, where a row that wraps pushes every row below it down the screen.
+ */
+export function clipRow(line: string, w: number): string {
+  if (cells(line) <= w) return line;
+  let out = "";
+  let n = 0;
+  for (const part of line.split(/(\x1b\[[0-9;?]*[a-zA-Z])/)) {
+    if (part.startsWith("\x1b[")) out += part;
+    else
+      for (const ch of part) {
+        const cw = charWidth(ch.codePointAt(0)!);
+        if (n + cw > w) n = Infinity; // the row is full: only codes are kept from here on
+        else (out += ch), (n += cw);
+      }
+  }
+  return out;
+}
+
+/** One piece of a drawn row: text, colour, bold. What Row.segs() takes, and what the header, the replies and the roster are built from. */
+export type Seg = [text: string, color?: RGB, bold?: boolean];
+const segsWidth = (segs: Seg[]) => segs.reduce((n, s) => n + width(s[0]), 0);
+const segsText = (segs: Seg[]) => segs.map((s) => s[0]).join("");
 
 interface Cell {
   ch: string; // what is drawn; "" for a cell covered by the one to its left
@@ -649,13 +651,13 @@ export class Row {
     return end - width(text);
   }
   /** Put several pieces one after another: [text, colour, bold?]. Returns the column after the last. */
-  segs(col: number, parts: [string, RGB?, boolean?][]): number {
+  segs(col: number, parts: Seg[]): number {
     for (const [text, color, isBold] of parts) col = this.put(col, text, color, isBold);
     return col;
   }
   /** The same, ending at `end`. */
-  segsr(end: number, parts: [string, RGB?, boolean?][]): number {
-    const start = end - parts.reduce((n, p) => n + width(p[0]), 0) + 1;
+  segsr(end: number, parts: Seg[]): number {
+    const start = end - segsWidth(parts) + 1;
     this.segs(start, parts);
     return start - 1;
   }
@@ -1662,8 +1664,10 @@ function adoptSharedUsage(now: number) {
   usage.sharedAt = now;
   // With both test hooks set, the fixture stands in for the shared file.
   const fixture = process.env.FLEET_USAGE_FAIL && process.env.FLEET_USAGE_FIXTURE ? readSharedUsage(process.env.FLEET_USAGE_FIXTURE) : undefined;
-  const shared = fixture ?? readSharedUsage();
-  const claude = readClaudeUsage();
+  // Figures stamped more than a minute ahead of this clock (a damaged file, a clock that was set back) are not believed: they would count as current for ever.
+  const sane = (r: Reading | undefined) => (r && r.fetchedAt <= now + 60_000 ? r : undefined);
+  const shared = sane(fixture ?? readSharedUsage());
+  const claude = sane(readClaudeUsage());
   const best = shared && (!claude || shared.fetchedAt >= claude.fetchedAt) ? shared : claude;
   if (!best || best.fetchedAt <= usage.fetchedAt || !Object.keys(best.figures).length) return;
   usage.data = best.figures;
@@ -1856,6 +1860,14 @@ export function bucketsIn(lists: number[][], win: Win): number[] {
 export const tailsOf = (s: Session): Tail[] => [...s.mains, ...s.agents.map((a) => a.tail), ...s.workflows.flatMap((w) => w.agents.map((a) => a.tail))];
 /** The window every sparkline in the lane shows at a terminal `W` cells wide: one bar per lane cell. */
 export const laneWindow = (now: number, W: number): Win => timeWindow(now, opt.windowMin * 60_000, grid(W).laneW);
+/** Bars in a compact row's sparkline at a terminal `W` cells wide. */
+const stripBars = (W: number) => Math.min(32, Math.max(12, Math.floor(W / 6)));
+/**
+ * The window a frame counts in: what "in the window" means for every total, masthead tile and "recent"
+ * test on the screen, so they agree with the sparklines they sit beside. Detail and far mode count in
+ * the lane's window; compact mode in its rows' own, shorter strips.
+ */
+export const frameWindow = (now: number, W: number, mode: Mode = opt.mode): Win => (mode === "compact" ? timeWindow(now, opt.windowMin * 60_000, stripBars(W)) : laneWindow(now, W));
 /** The same, for the window the person chose (opt.windowMin). */
 export const buckets = (lists: number[][], now: number, n: number): number[] => bucketsIn(lists, timeWindow(now, opt.windowMin * 60_000, n));
 export const sum = (a: number[]) => a.reduce((x, y) => x + y, 0);
@@ -2089,17 +2101,20 @@ export function subheading(s: Session, f: Facts, state: SessionState): Subheadin
 // The third state worth knowing about: not working, not asking, just stuck. The evidence is
 // circumstantial (a tool may be waiting on another machine), so the screen words it as a question.
 
+const STALL_CPU = 1; // percent of one core: a process tree under this is idle
+const STALL_HOLD_CPU = 5; // a stall already on show stays until the tree is busier than this, so a tree idling either side of 1% does not make the label blink
+
 /**
  * A thread (the main thread or an agent) is stalled when it has had a tool call outstanding and has
  * written nothing for `stallMs`, while the session's whole process tree is under 1% CPU. `treeCpu` is
  * undefined when the session's process was not in the last sample; then nothing is claimed.
  */
-export function threadStalled(th: { pending: boolean; lastWrite: number }, treeCpu: number | undefined, now: number, stallMs: number): boolean {
-  return stallMs > 0 && th.pending && treeCpu !== undefined && treeCpu < 1 && th.lastWrite > 0 && now - th.lastWrite >= stallMs;
+export function threadStalled(th: { pending: boolean; lastWrite: number }, treeCpu: number | undefined, now: number, stallMs: number, cpuLimit = STALL_CPU): boolean {
+  return stallMs > 0 && th.pending && treeCpu !== undefined && treeCpu < cpuLimit && th.lastWrite > 0 && now - th.lastWrite >= stallMs;
 }
 /** A busy session is stalled when no thread at all has written for `stallMs` at under 1% CPU. */
-export function sessionStalled(busy: boolean, lastWrite: number, treeCpu: number | undefined, now: number, stallMs: number): boolean {
-  return stallMs > 0 && busy && treeCpu !== undefined && treeCpu < 1 && lastWrite > 0 && now - lastWrite >= stallMs;
+export function sessionStalled(busy: boolean, lastWrite: number, treeCpu: number | undefined, now: number, stallMs: number, cpuLimit = STALL_CPU): boolean {
+  return stallMs > 0 && busy && treeCpu !== undefined && treeCpu < cpuLimit && lastWrite > 0 && now - lastWrite >= stallMs;
 }
 
 export interface Stall {
@@ -2115,26 +2130,42 @@ const treeCpuOf = (pid: number): number | undefined => {
 };
 const lastWriteOf = (t: Tail) => Math.max(t.lastT, t.mtime);
 const pendingTool = (t: Tail) => !!t.lastTool && t.lastTool.t > t.lastResultT;
+/** What was stalled at the last scan: each thing's name ("sid" for a session, "sid/thread" for a thread) with when it last wrote. holdStalls() keeps it. */
+const stallHeld = new Map<string, number>();
 /**
  * The stall watch's verdict on one session. Only a working session can be stalled: one that needs you
  * or has finished its turn is waiting on you, not stuck. The main thread waits on its agents, so it
- * counts as stalled only when they have all gone quiet too.
+ * counts as stalled only when they have all gone quiet too. Something `held` (stalled at the last scan,
+ * and silent since) stays stalled until the tree is properly busy again, not merely over 1%.
  */
-export function stallOf(s: Session, f: Facts, now: number, treeCpu: number | undefined = treeCpuOf(s.pid), stallMs = opt.stallMin * 60_000): Stall {
+export function stallOf(s: Session, f: Facts, now: number, treeCpu: number | undefined = treeCpuOf(s.pid), stallMs = opt.stallMin * 60_000, held: ReadonlyMap<string, number> = stallHeld): Stall {
   if (stallMs <= 0 || f.needs || !f.working) return NO_STALL;
   const agents = [...s.agents, ...s.workflows.filter((w) => w.status === "running").flatMap((w) => w.agents)];
   const lastWrite = Math.max(0, ...tailsOf(s).map(lastWriteOf));
-  const session = sessionStalled(true, lastWrite, treeCpu, now, stallMs);
+  const cpuLimit = (key: string, wrote: number) => (held.get(key) === wrote ? STALL_HOLD_CPU : STALL_CPU);
+  const session = sessionStalled(true, lastWrite, treeCpu, now, stallMs, cpuLimit(s.sid, lastWrite));
   const threads: string[] = [];
   let since = session ? lastWrite : Infinity;
   if (session && f.main && pendingTool(f.main)) threads.push("main");
   for (const a of agents) {
-    if (a.done || !threadStalled({ pending: pendingTool(a.tail), lastWrite: lastWriteOf(a.tail) }, treeCpu, now, stallMs)) continue;
+    const wrote = lastWriteOf(a.tail);
+    if (a.done || !threadStalled({ pending: pendingTool(a.tail), lastWrite: wrote }, treeCpu, now, stallMs, cpuLimit(`${s.sid}/${a.id}`, wrote))) continue;
     threads.push(a.id);
-    since = Math.min(since, lastWriteOf(a.tail));
+    since = Math.min(since, wrote);
   }
   if (!session && !threads.length) return NO_STALL;
   return { session, threads, count: threads.length || 1, since };
+}
+/** Remember what is stalled as of this scan, for the next one's verdicts. Called once a scan, after the machine has been sampled. */
+export function holdStalls(sessions: Session[], now: number, held: Map<string, number> = stallHeld) {
+  const next: [string, number][] = [];
+  for (const s of sessions) {
+    const st = stallOf(s, factsOf(s), now, undefined, undefined, held);
+    if (st.session) next.push([s.sid, Math.max(0, ...tailsOf(s).map(lastWriteOf))]);
+    for (const a of [...s.agents, ...s.workflows.flatMap((w) => w.agents)]) if (st.threads.includes(a.id)) next.push([`${s.sid}/${a.id}`, lastWriteOf(a.tail)]);
+  }
+  held.clear();
+  for (const [key, wrote] of next) held.set(key, wrote);
 }
 /** One name per stalled thing, so the bell rings once for each: "sid" for a session, "sid/thread" for a thread. */
 export const stallKeys = (sid: string, st: Stall): string[] => (st.threads.length ? st.threads.map((id) => `${sid}/${id}`) : st.session ? [sid] : []);
@@ -2155,11 +2186,21 @@ export function newStalls(known: Map<string, number>, marks: [string, number][])
   for (const [k, wrote] of marks) known.set(k, wrote);
   return fresh;
 }
-/** The members of `current` that were not in `known`; `known` is then brought up to date. Used to ring the bell once per new thing. */
+/** The members of `current` that were not in `known`; `known` is then brought up to date. */
 export function newSince(known: Set<string>, current: string[]): string[] {
   const fresh = current.filter((k) => !known.has(k));
   known.clear();
   for (const k of current) known.add(k);
+  return fresh;
+}
+/**
+ * The sessions that have started waiting on the person since the last scan, for the bell. `current` is
+ * every waiting session with when it asked. A question is known by when it was asked, so a session that
+ * is missing from one scan (its registry file caught half-written) and back in the next has not asked again.
+ */
+export function newAsks(waiting: Set<string>, asked: Map<string, number>, current: [sid: string, since: number][]): string[] {
+  const fresh = newSince(waiting, current.map(([sid]) => sid)).filter((sid) => asked.get(sid) !== current.find((c) => c[0] === sid)![1]);
+  for (const [sid, since] of current) asked.set(sid, since);
   return fresh;
 }
 
@@ -2309,7 +2350,8 @@ export interface FleetCounts {
   agents: number; // agents running in the window
   workflows: number; // workflows running in the window
 }
-export function fleetCounts(sessions: Session[], now: number, since = now - opt.windowMin * 60_000): FleetCounts {
+/** `since` is where the window begins; render() passes its frame's. Left out, it is the start of the wide lane's window, which sits on clock edges, so the counts do not drift from one second to the next. */
+export function fleetCounts(sessions: Session[], now: number, since = frameWindow(now, 150, "detail").start): FleetCounts {
   const c: FleetCounts = { sessions: sessions.length, needs: 0, stalled: 0, working: 0, idle: 0, agents: 0, workflows: 0 };
   for (const s of sessions) {
     const f = factsOf(s);
@@ -2355,15 +2397,10 @@ export interface Group {
 export interface View {
   s: Session;
   groups: Group[]; // workflows first, then one group of standalone agents
-  doneCount: number;
-  showTasks: boolean;
-  showMain: boolean;
-  showNeeds: boolean;
-  showCtx: boolean;
-  showNow: boolean;
-  showTalk: number; // 0, 1 (Claude's last message) or 2 (plus the last prompt)
-  msgs: { lines: string[]; t: number }[]; // Claude's last few messages, newest first, wrapped
-  alloc: number[]; // lines shown of each
+  doneCount: number; // agents that finished in the window, for the "n agents finished" line
+  showTasks: boolean; // it has a task list
+  showMain: boolean; // it is busy, so its main thread is a row of the roster
+  showNeeds: boolean; // it is waiting on the person
   facts: Facts;
   state: SessionState;
   stall: Stall; // the stall watch's verdict: stall.count things are stalled in this session
@@ -2371,7 +2408,8 @@ export interface View {
   lastT: number;
 }
 
-export function buildViews(sessions: Session[], now: number, sayWidth: number, since = now - opt.windowMin * 60_000): View[] {
+/** Every session as the screen shows it, in sort order. `since` is where the window begins, as for fleetCounts(). */
+export function buildViews(sessions: Session[], now: number, since = frameWindow(now, 150, "detail").start): View[] {
   const recent = (a: Agent) => Math.max(a.tail.lastT, a.tail.mtime) >= since;
   const order: Record<AgentState, number> = { active: 0, tool: 1, quiet: 2, done: 3 };
   const pick = (list: Agent[], stuck: string[]) =>
@@ -2394,7 +2432,6 @@ export function buildViews(sessions: Session[], now: number, sayWidth: number, s
       if (solo.length) groups.push({ rows: solo, hidden: 0 });
       const doneCount = opt.showDone ? 0 : s.agents.filter((a) => a.done && recent(a)).length;
       const lastT = Math.max(0, ...s.mains.map((m) => m.mtime), ...s.agents.map((a) => a.tail.mtime));
-      const m = facts.main;
       return {
         s,
         groups,
@@ -2402,11 +2439,6 @@ export function buildViews(sessions: Session[], now: number, sayWidth: number, s
         showTasks: !!s.tasks && s.tasks.total > 0,
         showMain: s.status === "busy" && s.mains.length > 0,
         showNeeds: !!facts.needs,
-        showCtx: !!m?.ctx,
-        showNow: !!facts.now && facts.now !== facts.needs,
-        msgs: m ? [...m.says].reverse().map((x) => ({ lines: messageLines(x.text, sayWidth), t: x.t })).filter((x) => x.lines.length) : [],
-        alloc: m?.say ? [1] : [],
-        showTalk: (m?.say ? 1 : 0) + (m?.ask || m?.lastPrompt ? 1 : 0),
         facts,
         state: sessionState(facts, stall.count > 0),
         stall,
@@ -2428,10 +2460,6 @@ export const isHidden = (v: View): boolean => v.quiet;
 // and every sparkline sits in the one lane. When the screen is short the blocks give rows up in a fixed
 // order (the ladder, below) rather than losing whatever happens to be at the bottom.
 
-/** One piece of a drawn row: text, colour, bold. The shape Row.segs() takes. */
-export type Seg = [text: string, color?: RGB, bold?: boolean];
-const segsWidth = (segs: Seg[]) => segs.reduce((n, s) => n + width(s[0]), 0);
-const segsText = (segs: Seg[]) => segs.map((s) => s[0]).join("");
 /** Plain text cut to at most `w` cells, ending in … when something was lost. Not padded; its spacing is kept. */
 export const cutTo = (s: string, w: number): string => (w <= 0 ? "" : width(s) <= w ? s : fit(s, w, "l", true).trimEnd());
 /** Plain text shortened to at most `w` cells at a word boundary, with no ellipsis of its own. */
@@ -3475,19 +3503,14 @@ export const clickTargets = () => hits.map((h) => ({ ...h }));
 
 // ───────────────────────── the tree (compact mode), the far cards and the frame ─────────────────────────
 
-export const rowsOf = (v: View) =>
-  1 +
-  (v.showNeeds ? 1 : 0) +
-  (v.showCtx ? 1 : 0) +
-  (v.showNow ? 1 : 0) +
-  v.showTalk +
-  (v.showTalk > 0 ? Math.max(0, v.alloc.reduce((n, x) => n + x, 0) - 1) : 0) +
-  (v.showTasks ? 1 : 0) +
-  (v.showMain ? 1 : 0) +
-  v.groups.reduce((n, g) => n + (g.wf ? 1 : 0) + g.rows.length + (g.hidden ? 1 : 0), 0) +
-  (v.doneCount ? 1 : 0);
+/** Rows a session takes in compact mode's tree: its own row, the question, each workflow and agent row, the finished tally. */
+export const rowsOf = (v: View) => 1 + (v.showNeeds ? 1 : 0) + v.groups.reduce((n, g) => n + (g.wf ? 1 : 0) + g.rows.length + (g.hidden ? 1 : 0), 0) + (v.doneCount ? 1 : 0);
 
-/** Shrink the views until they fit in `avail` rows; returns [views, blank separators?, sessions cut]. */
+/**
+ * Shrink compact mode's tree until it fits in `avail` rows: the blank rows between sessions go first,
+ * then the longest agent groups fold, then the finished tallies, then whole sessions from the bottom.
+ * Returns the views that are left, whether the blank rows survived, and how many sessions were cut.
+ */
 export function fitViews(views: View[], avail: number): { views: View[]; gaps: boolean; cut: number } {
   const total = (gaps: boolean) => views.reduce((n, v) => n + rowsOf(v), 0) + (gaps ? Math.max(0, views.length - 1) : 0);
   let gaps = true;
@@ -3500,33 +3523,11 @@ export function fitViews(views: View[], avail: number): { views: View[]; gaps: b
     big.rows.splice(big.rows.length - take, take);
     big.hidden += take;
   }
-  const rev = [...views].reverse(); // give rows up from the bottom of the screen first
-  for (const v of rev) if (total(gaps) > avail && v.showTalk > 1) v.showTalk = 1;
-  for (const v of rev) if (total(gaps) > avail) v.showTalk = 0;
-  for (const v of rev) if (total(gaps) > avail) v.showMain = false;
-  for (const v of rev) if (total(gaps) > avail) v.showTasks = false;
-  for (const v of rev) if (total(gaps) > avail) v.showNow = false;
-  for (const v of rev) if (total(gaps) > avail) v.showCtx = false;
   for (const v of views) if (total(gaps) > avail) v.doneCount = 0;
   let cut = 0;
-  while (views.length > 1 && total(gaps) + 1 > avail) {
-    views = views.slice(0, -1);
+  while (views.length > 1 && total(gaps) + (cut ? 1 : 0) > avail) {
+    views = views.slice(0, -1); // the line that says so takes a row of its own
     cut++;
-  }
-  // Spend whatever rows are left on more of each session's last reply, one line each in turn.
-  let spare = avail - total(gaps) - (cut ? 1 : 0);
-  for (let grew = true; grew && spare > 0; ) {
-    grew = false;
-    for (const v of views) {
-      if (spare <= 0) break;
-      if (v.showTalk === 0) continue;
-      // The newest message fills out first, then each earlier one in turn gets a few lines.
-      const i = v.msgs.findIndex((msg, k) => (v.alloc[k] ?? 0) < Math.min(msg.lines.length, focusSid ? 60 : k === 0 ? 10 : 4));
-      if (i < 0) continue;
-      v.alloc[i] = (v.alloc[i] ?? 0) + 1;
-      spare--;
-      grew = true;
-    }
   }
   return { views, gaps, cut };
 }
@@ -3543,8 +3544,6 @@ export function fitViews(views: View[], avail: number): { views: View[]; gaps: b
 export type HeaderKind = "tall" | "medium" | "old";
 export const headerKind = (W: number, rows: number, mode: Mode = opt.mode): HeaderKind => (mode === "compact" || W < 100 ? "old" : rows >= 40 ? "tall" : "medium");
 
-type Piece = [text: string, color?: RGB, bold?: boolean];
-const piecesWidth = (parts: Piece[]) => parts.reduce((n, p) => n + width(p[0]), 0);
 /** `text` when it fits in `w` cells; cut with … when enough of it would be left to mean something; else nothing. */
 const fitOrDrop = (text: string, w: number): string => (width(text) <= w ? text : w >= 8 ? fit(text, w, "l", true).replace(/\s+…$/, "…") : "");
 /** The first wording that fits in `w` cells, else the fullest one cut with …. */
@@ -3603,11 +3602,11 @@ const dateText = (now: number): string => {
 /** A process's name (already made safe when it was sampled), cut to what the header has room for. */
 const shortProc = (p: Proc) => p.name.slice(0, 14);
 /** "top bun 212% · node 88%": the busiest processes, as many whole ones as fit in `w` cells. */
-function topSegs(w: number): Piece[] {
-  const parts: Piece[] = [["top ", C.dim]];
+function topSegs(w: number): Seg[] {
+  const parts: Seg[] = [["top ", C.dim]];
   for (const p of topProcs(4)) {
-    const next: Piece[] = [...(parts.length > 1 ? [[` ${ICON.sep} `, C.faint] as Piece] : []), [`${shortProc(p)} ${Math.round(p.cpu)}%`, C.text]];
-    if (piecesWidth(parts) + piecesWidth(next) > w) break;
+    const next: Seg[] = [...(parts.length > 1 ? [[` ${ICON.sep} `, C.faint] as Seg] : []), [`${shortProc(p)} ${Math.round(p.cpu)}%`, C.text]];
+    if (segsWidth(parts) + segsWidth(next) > w) break;
     parts.push(...next);
   }
   return parts.length > 1 ? parts : [];
@@ -3624,8 +3623,8 @@ function masthead(g: Grid, c: FleetCounts, now: number): Row {
   const r = new Row(g.W);
   r.put(2, `${ICON.claude} CLAUDE FLEET`, C.cyan, true);
   const first = g.wide ? 21 : 19;
-  const count = (n: number): Piece => [` ${n}`, n ? C.white : C.dim, n > 0];
-  let tiles: { name: string; parts: Piece[]; slot: number }[] = [
+  const count = (n: number): Seg => [` ${n}`, n ? C.white : C.dim, n > 0];
+  let tiles: { name: string; parts: Seg[]; slot: number }[] = [
     { name: "working", parts: [[ICON.working, c.working ? C.green : C.dim], count(c.working), [" working", C.dim]], slot: 12 },
     { name: "agents", parts: [[c.agents ? SPIN[frame % SPIN.length] : ICON.idle, c.agents ? C.green : C.dim], count(c.agents), [` agent${c.agents === 1 ? "" : "s"}`, C.dim]], slot: 11 },
     { name: "workflows", parts: [[ICON.workflow, c.workflows ? C.purple : C.dim], count(c.workflows), [` workflow${c.workflows === 1 ? "" : "s"}`, C.dim]], slot: 13 },
@@ -3634,7 +3633,7 @@ function masthead(g: Grid, c: FleetCounts, now: number): Row {
   if (c.stalled) tiles.push({ name: "stalled", parts: [[ICON.progress, C.red], [` ${c.stalled}`, C.red, true], [" stalled?", C.red]], slot: 12 });
   const tilesFrom = first + 17; // after the needs-you slot
   /** The column after the last of these tiles, laid out from the first slot. */
-  const endOf = (list: typeof tiles) => list.reduce((col, t, i) => col + (i === list.length - 1 ? piecesWidth(t.parts) : Math.max(t.slot, piecesWidth(t.parts)) + 3), tilesFrom);
+  const endOf = (list: typeof tiles) => list.reduce((col, t, i) => col + (i === list.length - 1 ? segsWidth(t.parts) : Math.max(t.slot, segsWidth(t.parts)) + 3), tilesFrom);
   let showDate = g.wide;
   const limit = () => g.W - (showDate ? 24 : 10);
   if (endOf(tiles) > limit()) showDate = false;
@@ -3648,9 +3647,9 @@ function masthead(g: Grid, c: FleetCounts, now: number): Row {
   } else r.put(first, `${ICON.done} none waiting`, C.done);
   let col = tilesFrom;
   for (const t of tiles) {
-    if (col + piecesWidth(t.parts) > limit()) break;
+    if (col + segsWidth(t.parts) > limit()) break;
     r.segs(col, t.parts);
-    col += Math.max(t.slot, piecesWidth(t.parts)) + 3;
+    col += Math.max(t.slot, segsWidth(t.parts)) + 3;
   }
   const left = r.putr(g.figEnd, new Date(now).toTimeString().slice(0, 8), C.white, true);
   if (showDate) r.putr(left - 2, dateText(now), C.dim);
@@ -3669,14 +3668,14 @@ function axisRow(g: Grid, win: Win): Row {
   r.put(2, ICON.gaugeTrack.repeat(g.lane - 3), C.faint);
   const news = digest();
   if (news.groups.length) {
-    const parts: Piece[] = [[`since ${hhmm(news.since)}`, C.dim]];
+    const parts: Seg[] = [[`since ${hhmm(news.since)}`, C.dim]];
     for (const group of news.groups) {
-      const next: Piece[] = [[`  ${ICON.sep}  `, C.faint], [`${group.glyph} `, group.color, group.kind === "asked"], [group.text, C.text]];
-      if (5 + piecesWidth(parts) + piecesWidth(next) > g.lane - 7) break; // "before column 100" at 150 columns
+      const next: Seg[] = [[`  ${ICON.sep}  `, C.faint], [`${group.glyph} `, group.color, group.kind === "asked"], [group.text, C.text]];
+      if (5 + segsWidth(parts) + segsWidth(next) > g.lane - 7) break; // "before column 100" at 150 columns
       parts.push(...next);
     }
     if (parts.length > 1) {
-      r.put(4, " ".repeat(piecesWidth(parts) + 2));
+      r.put(4, " ".repeat(segsWidth(parts) + 2));
       r.segs(5, parts);
     }
   }
@@ -3780,13 +3779,13 @@ function accountBlock(rows: Row[], g: Grid, a: AccountView | undefined, now: num
   const forms = ["long", "short", "bare"] as const;
   const form = forms.find((f) => [five, week].every((l) => !l || width(resetText(l.resetsAt, now, f)) <= room)) ?? "bare";
   const resets = (l: LimitView): string => forms.slice(forms.indexOf(form)).map((f) => resetText(l.resetsAt, now, f)).find((text) => width(text) <= room) ?? "";
-  const limitRow = (r: Row, name: string, l: LimitView | undefined, extra?: Piece[]) => {
+  const limitRow = (r: Row, name: string, l: LimitView | undefined, extra?: Seg[]) => {
     r.put(label, name, C.dim);
     r.paste(gaugeAt, limitGauge(l?.pct, GW, l?.tick, stale), GW);
     if (!l) return void r.putr(valueEnd, "--", C.dim);
     const tone = figureTone(l.pct);
     r.putr(valueEnd, `${Math.round(l.pct)}%`, stale ? C.dim : tone.color, !stale && tone.bold);
-    if (extra) r.segs(detail, piecesWidth(extra) <= room ? extra : []);
+    if (extra) r.segs(detail, segsWidth(extra) <= room ? extra : []);
     else if (l.fullIn) {
       // Runway: at this pace the limit is full before it resets. Say when, instead of the reset time.
       const minutes = l.fullIn / 60_000;
@@ -3802,8 +3801,8 @@ function accountBlock(rows: Row[], g: Grid, a: AccountView | undefined, now: num
   const opus = limitOf("seven_day_opus");
   const sonnet = limitOf("seven_day_sonnet");
   if (x?.enabled) {
-    const spend: Piece[] = [[x.used, C.text], [` of ${x.limit}`, C.dim]];
-    limitRow(rows[2], "extra", { key: "extra", label: "extra", pct: x.pct, resetsAt: 0, windowMs: 0 }, piecesWidth(spend) <= room ? spend : [spend[0]]);
+    const spend: Seg[] = [[x.used, C.text], [` of ${x.limit}`, C.dim]];
+    limitRow(rows[2], "extra", { key: "extra", label: "extra", pct: x.pct, resetsAt: 0, windowMs: 0 }, segsWidth(spend) <= room ? spend : [spend[0]]);
   } else if (opus && sonnet) {
     const tone = figureTone(sonnet.pct);
     limitRow(rows[2], "opus", opus, [["sonnet ", C.dim], [`${Math.round(sonnet.pct)}%`, tone.color, tone.bold]]);
@@ -3883,18 +3882,23 @@ function mediumRow(r: Row, g: Grid, a: AccountView | undefined, now: number) {
   }
 }
 
-/** The older header, kept by compact mode and by terminals under 100 columns: fleet line, machine line, account line with --usage, rule. */
-function oldHeader(sessions: Session[], W: number, now: number, since: number): string[] {
-  const S = Math.min(32, Math.max(12, Math.floor(W / 6)));
-  const HS = Math.min(60, Math.max(S, W - 92));
-  const headBuckets = buckets(sessions.flatMap(tailsOf).map((t) => t.tools), now, HS);
-  const c = fleetCounts(sessions, now, since);
+/**
+ * The older header, kept by compact mode and by terminals under 100 columns: fleet line, machine line,
+ * account line with --usage, rule. Its counts and its tool-call total are taken in `win`, the window the
+ * rows below count in, so the total is the sum of the sessions' own figures; its sparkline has more,
+ * shorter bars than theirs.
+ */
+function oldHeader(sessions: Session[], W: number, now: number, win: Win): string[] {
+  const HS = Math.min(60, Math.max(stripBars(W), W - 92));
+  const calls = sessions.flatMap(tailsOf).map((t) => t.tools);
+  const headBuckets = buckets(calls, now, HS);
+  const c = fleetCounts(sessions, now, win.start);
   const active = c.sessions - c.idle;
   const waiting = c.needs ? `${ICON.needs} ${c.needs} need${c.needs === 1 ? "s" : ""} you` : "";
   const stats =
     (waiting ? `${waiting}  ·  ` : "") +
     `${active} active session${active === 1 ? "" : "s"}  ·  ${c.agents} agent${c.agents === 1 ? "" : "s"} running  ·  ` +
-    `${c.workflows} workflow${c.workflows === 1 ? "" : "s"}  ·  ${human(sum(headBuckets))} tool calls / ${opt.windowMin}m`;
+    `${c.workflows} workflow${c.workflows === 1 ? "" : "s"}  ·  ${human(sum(bucketsIn(calls, win)))} tool calls / ${opt.windowMin}m`;
   const left = ` ${ICON.claude} CLAUDE FLEET   `;
   const clockText = new Date(now).toTimeString().slice(0, 8);
   const shown = fit(stats, Math.max(0, W - width(left) - HS - 2 - clockText.length - 2));
@@ -3913,13 +3917,13 @@ function oldHeader(sessions: Session[], W: number, now: number, since: number): 
 }
 
 /**
- * The header's rows. `since` is the start of the window the older header counts in; the tall and medium
- * headers count in the lane's own window, so their chart, their totals and their tiles agree with the
- * sparklines underneath.
+ * The header's rows. `frameWin` is the window the rows below count in (frameWindow), which the older
+ * header takes its counts and total from. The tall and medium headers are only drawn above rows that
+ * count in the lane's window, and read that: their chart, totals and tiles agree with the sparklines underneath.
  */
-export function header(sessions: Session[], W: number, rows: number, now: number, since: number): string[] {
+export function header(sessions: Session[], W: number, rows: number, now: number, frameWin: Win = frameWindow(now, W)): string[] {
   const kind = headerKind(W, rows);
-  if (kind === "old") return oldHeader(sessions, W, now, since);
+  if (kind === "old") return oldHeader(sessions, W, now, frameWin);
   const g = grid(W);
   const win = laneWindow(now, W);
   const tailsHere = sessions.flatMap(tailsOf);
@@ -3948,28 +3952,22 @@ export function header(sessions: Session[], W: number, rows: number, now: number
 
 export function render(sessions: Session[], cols: number, rows: number, now: number): string[] {
   const W = Math.max(60, cols);
-  const S = Math.min(32, Math.max(12, Math.floor(W / 6))); // sparkline columns
-  // Every strip of S bars on the screen shares these clock-aligned edges; so do the totals beside them.
-  const win = timeWindow(now, opt.windowMin * 60_000, S);
+  const S = stripBars(W); // sparkline columns in compact rows
+  // One window for the whole frame: the header's totals and tiles, which sessions and agents count as recent, and every figure below read these edges.
+  const win = frameWindow(now, W);
   const since = win.start;
   const spin = fg(C.green, SPIN[frame % SPIN.length]);
   const out: string[] = [];
 
   hits.length = 0;
 
-  const sayW = Math.max(20, W - 6 - 9 - 8);
-  const all = buildViews(sessions, now, sayW, since);
+  const all = buildViews(sessions, now, since);
   if (focusSid && !all.some((v) => v.s.sid === focusSid)) focusSid = null;
   const shown = all.filter((v) => (focusSid ? v.s.sid === focusSid : opt.showAll || !isHidden(v)));
   const hidden = all.filter((v) => !shown.includes(v));
-  if (opt.mode === "compact")
-    for (const v of shown) {
-      v.showCtx = v.showNow = v.showTasks = v.showMain = false;
-      v.showTalk = 0;
-    }
 
   // The header: tall or medium in detail and far mode, the older lines in compact mode and under 100 columns.
-  out.push(...header(sessions, W, rows, now, since));
+  out.push(...header(sessions, W, rows, now, win));
 
   if (!shown.length) {
     out.push("", fg(C.dim, all.length ? "   Nothing active and nothing waiting on you." : "   No live Claude Code sessions found in ~/.claude/sessions."));
@@ -3981,7 +3979,9 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
   const sessionTails = tailsOf;
   const sessionMax = Math.max(1, ...shown.map((v) => Math.max(...buckets(sessionTails(v.s).map((t) => t.tools), now, S))));
 
-  const avail = rows - out.length - 2 - (focusSid && hidden.length ? 1 : 0); // the button bar, a spare row above it, and the hint shown while one session is focused
+  // Rows for the sessions: all of them but the button bar and, while one session is focused, the hint above it. Detail mode's blocks
+  // run down to the buttons, as the design's frames do; compact rows and far cards keep one row clear above them, as they always have.
+  const avail = rows - out.length - 1 - (focusSid && hidden.length ? 1 : 0) - (opt.mode === "detail" ? 0 : 1);
   const { views, gaps, cut } = opt.mode !== "compact" ? { views: [] as View[], gaps: false, cut: 0 } : fitViews(shown, avail);
   // Detail mode draws its sessions with its own renderer (the detail view, above). The tree further down is compact mode's.
   if (opt.mode === "detail") out.push(...detailView(shown, W, avail, now, out.length));
@@ -4047,7 +4047,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
           r.segs(sideAt, [
             [`${agentsLive ? SPIN[frame % SPIN.length] : ICON.idle} `, agentsLive ? C.green : dimHere],
             [`${agentsLive} AGENT${agentsLive === 1 ? "" : "S"}`, agentsLive ? C.text : dimHere, true],
-            ...(wfLive ? ([[`   ${ICON.workflow} `, C.purple], [`${wfLive} WORKFLOW${wfLive === 1 ? "" : "S"}`, C.purple]] as [string, RGB][]) : []),
+            ...(wfLive ? ([[`   ${ICON.workflow} `, C.purple], [`${wfLive} WORKFLOW${wfLive === 1 ? "" : "S"}`, C.purple]] as Seg[]) : []),
           ]),
       ];
       if (ctx)
@@ -4065,7 +4065,8 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
           if (forecast) r.put(col + 1, forecast, runwayTone(runway!), true);
         });
       side.push((r) => r.put(sideAt, `CPU ${Math.round(use.cpu)}% ${ICON.sep} ${gb(use.rss * 1024)}`, dimHere));
-      side.push((r) => r.put(sideAt, `${human(sum(cardBuckets))} tool calls / ${opt.windowMin}m`, dimHere));
+      // Counted on the lane's bars, as the header's total and detail mode's figure are, so the cards add up to the header (the chart beside it has finer bars).
+      side.push((r) => r.put(sideAt, `${human(sum(bucketsIn(sessionTails(s).map((t) => t.tools), win)))} tool calls / ${opt.windowMin}m`, dimHere));
       const tasks = s.tasks;
       if (tasks?.total)
         side.push((r) => {
@@ -4102,7 +4103,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
         const name = pending.name.slice(0, Math.max(0, ACT - lead.length));
         const hintW = Math.max(0, ACT - lead.length - name.length - 2);
         doing = fg(C.red, lead) + fg(C.cyan, name) + (hintW ? "  " + fg(C.text, fit(pending.hint, hintW)) : " ".repeat(ACT - lead.length - name.length));
-      } else doing = fg(stalled ? C.red : C.dim, fit(lead + (st === "done" ? "finished" : st === "quiet" ? (a.id === "main" ? "waiting" : "no activity") : "thinking"), ACT));
+      } else doing = fg(stalled ? C.red : C.dim, fit(lead + (st === "done" ? "finished" : st === "quiet" ? "no activity" : "thinking"), ACT));
     }
     return (
       fg(C.faint, prefix) +
@@ -4171,21 +4172,10 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
         " ",
     );
 
-    // Children: tasks line, workflow groups, standalone agents, finished summary.
-    type Child = { kind: "needs" } | { kind: "ctx" } | { kind: "now" } | { kind: "you" } | { kind: "claude"; i: number } | { kind: "tasks" } | { kind: "wf"; g: Group } | { kind: "agent"; a: Agent } | { kind: "more"; n: number } | { kind: "done"; n: number };
+    // Children: the question, workflow groups, standalone agents, finished summary.
+    type Child = { kind: "needs" } | { kind: "wf"; g: Group } | { kind: "agent"; a: Agent } | { kind: "more"; n: number } | { kind: "done"; n: number };
     const children: Child[] = [];
     if (v.showNeeds) children.push({ kind: "needs" });
-    if (v.showCtx) children.push({ kind: "ctx" });
-    if (v.showNow) children.push({ kind: "now" });
-    // The last prompt and Claude's recent messages, in the order they happened.
-    const talk: { t: number; child: Child }[] = [];
-    if (v.showTalk > 1 || (v.showTalk > 0 && !v.msgs.length)) talk.push({ t: f.main?.ask?.t ?? 0, child: { kind: "you" } });
-    if (v.showTalk > 0) v.msgs.forEach((msg, i) => (v.alloc[i] ?? 0) > 0 && talk.push({ t: msg.t, child: { kind: "claude", i } }));
-    talk.sort((a, b) => a.t - b.t);
-    for (const item of talk) children.push(item.child);
-    if (v.showTasks) children.push({ kind: "tasks" });
-    const main = f.main;
-    if (v.showMain && main) children.push({ kind: "agent", a: { id: "main", label: "main thread", type: "", model: "", tail: main, done: false } });
     const isStalled = (a: Agent) => v.stall.threads.includes(a.id);
     for (const g of v.groups) {
       if (g.wf) children.push({ kind: "wf", g });
@@ -4204,54 +4194,6 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
       if (c.kind === "needs") {
         // The question: bold white on the amber tint, led by the one mark that means "look here".
         out.push(fg(C.faint, elbow) + `\x1b[48;2;${C.tint.join(";")}m` + bold(fg(C.amber, ICON.needs)) + bold(fg(C.white, ` ${fit(f.needs, rest - 3).trimEnd()} `)) + "\x1b[49m");
-      } else if (c.kind === "ctx") {
-        const ctx = f.main!.ctx!;
-        const max = ctxMax(ctx);
-        const pct = Math.min(1, ctx.used / max);
-        const tone = figureTone(pct * 100).color;
-        const split = contextSplit(f.main!);
-        const BW = W >= 140 ? 32 : 20;
-        const label = fit(`${Math.round(pct * 100)}% · ${human(ctx.used)} of ${human(max)}`, 19);
-        let legend = "";
-        // Runway: say when the window will be full, but only when that is within the hour.
-        const runway = sessionRunway(f.main, now);
-        const runwayText = runway === undefined ? "" : fullInText(runway);
-        let room = rest - 8 - BW - 1 - 19 - 1 - (runwayText ? width(runwayText) + 2 : 0);
-        const approx = f.main!.parts ? "≈" : "";
-        for (const part of [...split].filter((x) => x.tokens > 0).sort((x, y) => y.tokens - x.tokens)) {
-          const item = `${part.name} ${approx}${human(part.tokens)}`;
-          if (width(item) + 4 > room) break;
-          legend += " " + fg(part.color, ICON.swatch) + " " + fg(C.dim, item) + " ";
-          room -= width(item) + 4;
-        }
-        out.push(fg(C.faint, elbow) + fg(C.dim, "context ") + stacked(split, max, BW) + " " + fg(tone, label) + legend + (runwayText ? "  " + bold(fg(runwayTone(runway!), runwayText)) : ""));
-      } else if (c.kind === "now") {
-        out.push(fg(C.faint, elbow) + fg(C.dim, "now    ▸ ") + fg(C.text, fit(f.now, rest - 9)));
-      } else if (c.kind === "you") {
-        const text = clean(f.main?.ask?.text || f.main?.lastPrompt || "");
-        const when = f.main?.ask ? ago(now - f.main.ask.t) : "";
-        out.push(fg(C.faint, elbow) + fg(C.blue, "you    ▸ ") + fg(C.text, fit(text, rest - 9 - 7)) + " " + fg(C.dim, fit(when, 6, "r")));
-      } else if (c.kind === "claude") {
-        const msg = v.msgs[c.i];
-        const latest = c.i === 0;
-        const shown = msg.lines.slice(0, v.alloc[c.i]);
-        if (msg.lines.length > shown.length) shown[shown.length - 1] = fit(shown[shown.length - 1], Math.max(1, sayW - 2)).trimEnd() + " …";
-        shown.forEach((line, li) => {
-          if (li === 0)
-            out.push(
-              fg(C.faint, elbow) + fg(latest ? C.cyan : mix(C.cyan, C.faint, 0.55), "claude ▸ ") + fg(latest ? C.text : C.dim, fit(line, rest - 9 - 7)) + " " + fg(C.dim, fit(ago(now - msg.t), 6, "r")),
-            );
-          else out.push(fg(C.faint, stem) + " ".repeat(9) + fg(C.dim, fit(line, rest - 9)));
-        });
-      } else if (c.kind === "tasks") {
-        const t = s.tasks!;
-        out.push(
-          fg(C.faint, elbow) +
-            fg(C.dim, "tasks ") +
-            pips(t.done, t.doing, t.total, Math.min(PW, t.total)) +
-            fg(C.text, ` ${t.done}/${t.total}`) +
-            (t.active ? fg(C.dim, "  ▸ ") + fg(C.text, fit(t.active, Math.max(0, W - 30 - PW))) : ""),
-        );
       } else if (c.kind === "agent") {
         out.push(agentRow(c.a, elbow, isStalled(c.a)));
       } else if (c.kind === "more") {
@@ -4307,13 +4249,14 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
   // Idle and finished sessions kept off the screen are counted on the masthead and on the a button. Only focus leaves a line here.
   if (focusSid && hidden.length) {
     while (out.length < rows - 2) out.push("");
-    out.length = rows - 2;
+    out.length = Math.max(0, rows - 2);
     out.push(fg(C.dim, fit(`   focused on one session  ·  esc or click it again to return  ·  ${hidden.length} other${hidden.length === 1 ? "" : "s"} hidden`, W)));
   }
   while (out.length < rows - 1) out.push("");
-  out.length = rows - 1;
+  out.length = Math.max(0, rows - 1);
   out.push(buttonBar(W, rows, all.filter(isHidden).length));
-  return out;
+  // The layout is made for 80 columns and up, and is not drawn narrower than 60. On anything smaller a row is cut at the edge rather than left to wrap.
+  return out.map((line) => clipRow(line, cols));
 }
 
 /**
@@ -4376,12 +4319,12 @@ let legendOn = false; // key ?: the legend is showing instead of the fleet
  */
 export function legend(cols: number, rows: number): string[] {
   const W = Math.max(60, cols);
-  type Line = Piece[];
+  type Line = Seg[];
   const head = (text: string): Line => [[text, C.white, true]];
   /** A mark in its own colour, its name, and what it means. */
   const mark = (glyph: string, color: RGB, name: string, note: Line | string, isBold = false): Line => [[glyph, color, isBold], [" " + fit(name, 12), C.text], ...(typeof note === "string" ? ([[note, C.dim]] as Line) : note)];
   /** A graph or gauge sample, or a key, and what it is. */
-  const sample = (parts: Line, w: number, note: string): Line => [...parts, [" ".repeat(Math.max(1, w - piecesWidth(parts))), C.dim], [note, C.dim]];
+  const sample = (parts: Line, w: number, note: string): Line => [...parts, [" ".repeat(Math.max(1, w - segsWidth(parts))), C.dim], [note, C.dim]];
   const key = (name: string, note: string): Line => sample([[name, C.text, true]], 6, note);
   const spin = SPIN[frame % SPIN.length];
   const left: Line[] = [
@@ -4407,7 +4350,7 @@ export function legend(cols: number, rows: number): string[] {
   ];
   const right: Line[] = [
     head("GRAPHS AND GAUGES"),
-    sample([1, 3, 5, 8].map((level): Piece => [BARS[level - 1], mix(...RAMP.session, level / 8)]), 5, "tool calls per bar, oldest left"),
+    sample([1, 3, 5, 8].map((level): Seg => [BARS[level - 1], mix(...RAMP.session, level / 8)]), 5, "tool calls per bar, oldest left"),
     sample([[ICON.gaugeFill.repeat(2), C.calm], [ICON.gaugeTrack, C.faint]], 5, "limit: white from 60%, red 80%"),
     sample([[ICON.gaugeTrack, C.faint], [ICON.pace, C.white], [ICON.gaugeTrack, C.faint]], 5, "pace: time gone in that window"),
     sample([[ICON.gaugeNone.repeat(3), C.faint]], 5, "no reading"),
@@ -4451,23 +4394,26 @@ export function legend(cols: number, rows: number): string[] {
   out.length = Math.max(0, rows - 1);
   out.push(fg(C.dim, "  any key or click returns to the fleet"));
   hits.length = 0;
-  return out;
+  return out.map((line) => clipRow(line, cols));
 }
 
 // ───────────────────────── main loop ─────────────────────────
 
 let sessions: Session[] = [];
-const needing = new Set<string>();
+const needing = new Set<string>(); // sessions that were waiting on the person at the last scan
+const askedAt = new Map<string, number>(); // …and when each one's question was asked, the last time the bell rang for it
 const stalledNow = new Map<string, number>();
 function refresh() {
   const now = clock();
   sessions = scan(now);
   prune(now);
   sampleMachine();
+  holdStalls(sessions, now);
   if (opt.usage && !opt.once) tickUsage(now); // --once has already made its one read
   // Ring once when a session starts waiting on the person, and once for each thing that newly stalls.
   const facts = sessions.map((s) => ({ s, f: factsOf(s) }));
-  const rings = newSince(needing, facts.filter((x) => x.f.needs).map((x) => x.s.sid)).length + newStalls(stalledNow, facts.flatMap((x) => stallMarks(x.s, x.f, stallOf(x.s, x.f, now)))).length;
+  const asks = facts.filter((x) => x.f.needs).map((x): [string, number] => [x.s.sid, stateSince(x.s, x.f, "needs")]);
+  const rings = newAsks(needing, askedAt, asks).length + newStalls(stalledNow, facts.flatMap((x) => stallMarks(x.s, x.f, stallOf(x.s, x.f, now)))).length;
   if (opt.bell && !opt.once) process.stdout.write("\x07".repeat(rings));
   noteScan(sessions, now);
 }
@@ -4497,7 +4443,7 @@ if (import.meta.main) {
     out.write("\x1b[H" + lines.map((l) => l + "\x1b[K").join("\n"));
   };
   /** The tab title follows the fleet's state. It is written only when it changes, and cleared on the way out. */
-  const retitle = () => out.write(titleChange(titleFor(fleetCounts(sessions, clock()))));
+  const retitle = () => out.write(titleChange(titleFor(fleetCounts(sessions, clock(), frameWindow(clock(), Math.max(60, out.columns || 140)).start)))); // the same window the screen's own counts use
   const restore = () => {
     out.write(titleSequence("") + (opt.mouse ? "\x1b[?1000l\x1b[?1006l" : "") + "\x1b[?25h\x1b[?1049l");
     if (process.stdin.isTTY) process.stdin.setRawMode(false);

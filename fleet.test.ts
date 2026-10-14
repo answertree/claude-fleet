@@ -736,6 +736,30 @@ describe("usage read tells the truth", () => {
     expect(fs.existsSync(shared())).toBe(false);
   });
 
+  test("figures stamped in the future are not believed: they would count as current for ever", async () => {
+    resetUsage();
+    fs.rmSync(path.dirname(shared()), { recursive: true, force: true });
+    const home = process.env.FLEET_HOME!;
+    fs.mkdirSync(home, { recursive: true });
+    try {
+      // A damaged shared file, or one written before the clock was set back: three days ahead.
+      F.writeSharedUsage(figures(50), NOW + 3 * 24 * 60 * MIN);
+      fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({ cachedUsageUtilization: { fetchedAtMs: NOW + 2 * 60 * MIN, utilization: figures(60) } }));
+      await F.fetchUsage(NOW, async () => ({ reason: "network: timed out" }));
+      expect(F.usage).toMatchObject({ source: "", fetchedAt: 0, data: undefined });
+      expect(F.usageState(NOW)).toMatchObject({ kind: "none", reason: "network: timed out" });
+      // A reader whose clock runs a few seconds behind the writer's is not a damaged file.
+      F.writeSharedUsage(figures(50), NOW + 20_000);
+      await F.fetchUsage(NOW + 1000, async () => ({ reason: "network: timed out" }));
+      expect(F.usage).toMatchObject({ source: "shared", fetchedAt: NOW + 20_000 });
+      expect(F.usageState(NOW + 1000).kind).toBe("current");
+    } finally {
+      fs.rmSync(path.join(home, ".claude.json"), { force: true });
+      fs.rmSync(path.dirname(shared()), { recursive: true, force: true });
+      resetUsage();
+    }
+  });
+
   test("test hooks: FLEET_USAGE_FIXTURE supplies figures, FLEET_USAGE_FAIL forces a reason, and made-up figures are never shared", async () => {
     const fixture = path.join(SCRATCH, "fixture.json");
     fs.writeFileSync(fixture, JSON.stringify({ ...figures(86), fetchedAt: NOW - 39 * MIN }));
@@ -988,7 +1012,7 @@ describe("stall watch", () => {
     F.machine.procs = procs;
     F.machine.kids = new Map();
     try {
-      const views = F.buildViews([busy, stuck, asks], NOW, 80);
+      const views = F.buildViews([busy, stuck, asks], NOW);
       expect(views.map((v) => [v.s.sid, v.state, v.stall.count])).toEqual([["asks", "needs", 0], ["stuck", "stalled", 1], ["busy", "working", 0]]);
       expect(F.stateTime(stuck, views[1].facts, "stalled", NOW, views[1].stall.since)).toBe("14m");
       const frame = F.render([busy, stuck, asks], 150, 40, NOW).map(strip).join("\n");
@@ -1142,7 +1166,7 @@ describe("since you looked", () => {
     const c = F.fleetCounts(sessions, NOW);
     expect(c).toEqual({ sessions: 6, needs: 1, stalled: 0, working: 3, idle: 2, agents: 3, workflows: 1 });
     expect(c.needs + c.stalled + c.working + c.idle).toBe(c.sessions);
-    const views = F.buildViews(sessions, NOW, 80);
+    const views = F.buildViews(sessions, NOW);
     expect(views.filter(F.isHidden).map((v) => v.s.sid).sort()).toEqual(["done", "turn"]);
   });
 
@@ -1241,7 +1265,7 @@ describe("header and chrome", () => {
       Object.assign(F.seen, saved.seen);
     }
   }
-  const raw = (W: number, rows: number, account = "current", sessions = fleet(F.grid(W).laneW), o: Parameters<typeof draw>[2] = {}) => draw(account, () => F.header(sessions, W, rows, NOW, NOW - WINDOW), o);
+  const raw = (W: number, rows: number, account = "current", sessions = fleet(F.grid(W).laneW), o: Parameters<typeof draw>[2] = {}) => draw(account, () => F.header(sessions, W, rows, NOW), o);
   const head = (...args: Parameters<typeof raw>) => raw(...args).map(strip);
   /** The account block's three rows, by its own columns. */
   const block = (W: number, account: string) => {
@@ -1363,7 +1387,7 @@ describe("header and chrome", () => {
     // The machine at 100% CPU: still the cool ramp. Memory at 85% is a limit, and red.
     const hot = draw("current", () => {
       Object.assign(F.machine, { cpu: 100, cores: MACHINE.cores.map(() => 100), hist: MACHINE.hist.map(() => 100), memUsed: 0.85 * MACHINE.memTotal });
-      return F.header(fleet(), 150, 44, NOW, NOW - WINDOW);
+      return F.header(fleet(), 150, 44, NOW);
     });
     for (const warm of [F.C.amber, F.C.red]) expect(hot[1]).not.toContain(F.fg(warm, "━").slice(0, -5));
     expect(hot[1]).toContain(F.fg(F.coolTone(0.75), "━".repeat(12)));
@@ -1375,7 +1399,7 @@ describe("header and chrome", () => {
     const strip18 = (cores: number[], W = 150) =>
       draw("off", () => {
         F.machine.cores = cores;
-        return strip(F.header(fleet(F.grid(W).laneW), W, 44, NOW, NOW - WINDOW)[3]).slice(6, 26).trimEnd();
+        return strip(F.header(fleet(F.grid(W).laneW), W, 44, NOW)[3]).slice(6, 26).trimEnd();
       });
     expect(strip18(MACHINE.cores)).toBe("▅▅▄▄▃▃▃▃▄▄▆▆▆▆▇▇   1"); // sixteen cores from column 7, then the detail at column 26
     expect(strip18(Array.from({ length: 18 }, () => 50))).toBe("▅".repeat(18) + " 1"); // eighteen still fit, one cell short of the detail
@@ -1384,7 +1408,7 @@ describe("header and chrome", () => {
     expect(strip18(Array.from({ length: 19 }, () => 0)).replace(/ .*/, "")).toBe("▁".repeat(10));
     // Narrow: load follows the strip, two cells on, wherever the strip ends.
     expect(strip18(Array.from({ length: 18 }, () => 50), 110)).toBe("▅".repeat(18));
-    expect(draw("off", () => ((F.machine.cores = Array.from({ length: 18 }, () => 50)), strip(F.header(fleet(20), 110, 44, NOW, NOW - WINDOW)[3]).slice(0, 38)))).toBe(" core " + "▅".repeat(18) + "  load 14.6   ");
+    expect(draw("off", () => ((F.machine.cores = Array.from({ length: 18 }, () => 50)), strip(F.header(fleet(20), 110, 44, NOW)[3]).slice(0, 38)))).toBe(" core " + "▅".repeat(18) + "  load 14.6   ");
   });
 
   test("runway in the header: pace ticks on the 5h and 7d gauges, and 'full in' in bold red when the limit fills before it resets", () => {
@@ -1453,7 +1477,7 @@ describe("header and chrome", () => {
     const axis = (W: number, seenAt: number, events: F.FleetEvent[] = [], windowMin = 30) =>
       draw("current", () => {
         Object.assign(F.seen, { at: seenAt, events });
-        return strip(F.header(fleet(F.grid(W).laneW), W, 44, NOW, NOW - WINDOW).at(-1)!);
+        return strip(F.header(fleet(F.grid(W).laneW), W, 44, NOW).at(-1)!);
       }, { windowMin });
     expect(axis(150, NOW)).toBe(TALL_150[4]); // just looked: nothing new, and the mark does not sit on "now"
     expect(axis(110, NOW)).toBe(TALL_110[4]);
@@ -1463,7 +1487,7 @@ describe("header and chrome", () => {
     expect(axis(150, NOW - 17 * MIN, news)).toBe(" ── since 23:34  ·  ▲ 1 asked  ·  ✓ 3 agents done  ·  ◆ 4 new replies ─────────────────────────────────── 30m ──────┴─▼───────┴───── now ────────────");
     const rule = draw("current", () => {
       Object.assign(F.seen, { at: NOW - 17 * MIN, events: news });
-      return F.header(fleet(), 150, 44, NOW, NOW - WINDOW).at(-1)!;
+      return F.header(fleet(), 150, 44, NOW).at(-1)!;
     });
     expect(rule).toContain(F.bold(F.fg(F.C.white, "▼")));
     expect(rule).toContain(F.bold(F.fg(F.C.amber, "▲ ")) + F.fg(F.C.text, "1 asked"));
@@ -1712,7 +1736,7 @@ describe("the detail view", () => {
   const three = (now: number) => [waiting(now), withAgents(now), busy(now)];
   const six = (now: number) => [waiting(now), busy(now), ...["search reindex", "billing export", "upgrade tooling", "onboarding emails"].map((name, i) => busy(now, name, 71 + 12 * i, `${"defg"[i].repeat(8)}-001${i}`))];
   /** The views as render() hands them over: in order, quiet ones left out unless asked for. */
-  const viewsOf = (sessions: F.Session[], now: number, all = false) => F.buildViews(sessions, now, 80).filter((v) => all || !F.isHidden(v));
+  const viewsOf = (sessions: F.Session[], now: number, all = false) => F.buildViews(sessions, now).filter((v) => all || !F.isHidden(v));
   /** Plan the blocks without drawing them: each block's rows, and what the ladder left it. */
   function plan(sessions: F.Session[], W: number, avail: number, now = NOW, focus = false) {
     const g = F.grid(W);
@@ -2017,7 +2041,7 @@ describe("the detail view", () => {
       const s = sessionOf({ sid: "many-agents", mains: [tailOf([prompt(NOW - 5 * MIN, "look into it"), reply(NOW - 30_000, "On it.\n\nFirst the logs.")])], agents: [quiet("quiet-1"), quiet("quiet-2"), inTool("tool-1"), quiet("quiet-3"), live("live-1"), inTool("tool-2"), quiet("quiet-4")] });
       const label = (row: string) => row.slice(4, 24).trim().replace(/^[⠋◐○] /, ""); // the row without its state glyph
       const labels = (avail: number, stalled: string[] = []) => {
-        const views = F.buildViews([s], NOW, 80);
+        const views = F.buildViews([s], NOW);
         views[0].stall = { session: false, threads: stalled, count: stalled.length, since: stalled.length ? NOW - 3 * MIN : 0 };
         return plain(F.detailView(views, 150, avail, NOW, 0, false)).slice(5).map(label);
       };
@@ -2029,14 +2053,14 @@ describe("the detail view", () => {
       expect(labels(9)).toEqual(["live-1", "tool-1", "tool-2", "… 4 more agents"]);
       // A stalled agent is the last to be folded away, and keeps its place in the list.
       const mostlyLive = sessionOf({ sid: "live-ones", mains: s.mains, agents: [live("live-1"), live("live-2"), live("live-3"), live("live-4"), live("live-5"), inTool("stuck")] });
-      const views = F.buildViews([mostlyLive], NOW, 80);
+      const views = F.buildViews([mostlyLive], NOW);
       views[0].stall = { session: false, threads: ["stuck"], count: 1, since: NOW - 3 * MIN };
       expect(plain(F.detailView(views, 150, 9, NOW, 0, false)).slice(5).map(label)).toEqual(["live-1", "live-2", "stuck", "… 3 more agents"]);
       // A count that would take the row of the one agent it hides is never drawn: four agents stay four.
       const four = sessionOf({ sid: "four", mains: s.mains, agents: [live("live-1"), live("live-2"), live("live-3"), inTool("tool-1")] });
-      expect(plain(F.detailView(F.buildViews([four], NOW, 80), 150, 8, NOW, 0, false)).slice(4).map(label)).toEqual(["live-1", "live-2", "live-3", "tool-1"]);
+      expect(plain(F.detailView(F.buildViews([four], NOW), 150, 8, NOW, 0, false)).slice(4).map(label)).toEqual(["live-1", "live-2", "live-3", "tool-1"]);
       // Shorter still (step 11): standalone agents fold into one line.
-      expect(plain(F.detailView(F.buildViews([s], NOW, 80), 150, 5, NOW, 0, false))[4]).toBe(" ▌  ⠋ 1 live   ◐ 2 in a tool   ○ 4 quiet");
+      expect(plain(F.detailView(F.buildViews([s], NOW), 150, 5, NOW, 0, false))[4]).toBe(" ▌  ⠋ 1 live   ◐ 2 in a tool   ○ 4 quiet");
     });
   });
 
@@ -2075,7 +2099,7 @@ describe("the detail view", () => {
       const s = busy(NOW);
       const ended = (id: string, name: string, status: string, tokens?: number): F.Workflow => ({ ...s.workflows[0], id, name, status, tokens, finished: NOW - 4 * MIN, lastT: NOW - 4 * MIN, agents: s.workflows[0].agents.slice(0, 2) });
       s.workflows = [ended("wf_2", "link-check", "completed", 412_000), ended("wf_3", "reindex-preview", "failed")];
-      const raw = F.detailView(F.buildViews([s], NOW, 80), 150, 40, NOW, 0, false);
+      const raw = F.detailView(F.buildViews([s], NOW), 150, 40, NOW, 0, false);
       const [okRow, badRow] = ["link-check", "reindex-preview"].map((name) => raw.find((r) => r.includes(name))!);
       expect(strip(okRow).slice(0, 104)).toBe(" ▌  ✓ link-check                                  completed · 412k tok                          ✓ ✓  2/2");
       expect(strip(okRow)).toMatch(/ 4m$/);
@@ -2141,7 +2165,7 @@ describe("the detail view", () => {
         for (const W of [60, 80, 99, 100, 110, 129, 130, 150, 200])
           for (let avail = 0; avail <= 60; avail++)
             for (const focus of sessions.length === 1 ? [false, true] : [false]) {
-              const views = F.buildViews(sessions, NOW, 80).filter((v) => all || !F.isHidden(v));
+              const views = F.buildViews(sessions, NOW).filter((v) => all || !F.isHidden(v));
               const g = F.grid(W);
               const blocks = views.map((v) => F.blockOf(v, g, NOW, F.laneWindow(NOW, W), focus));
               const fit = F.fitBlocks(blocks, g, avail, NOW);
@@ -2192,7 +2216,7 @@ describe("the detail view", () => {
     quietly(() => {
       const turn = sessionOf({ sid: "eeeeeeee-0005", name: "release notes draft", status: "idle", kind: "interactive", cwd: "/work/docs", mains: [tailOf(on("docs/release-4.2", [prompt(NOW - 29 * MIN, "draft the release notes for 4.2"), ...calls(12, NOW - 13 * MIN), reply(NOW - 12 * MIN - 20_000, "The draft is in `docs/releases/4.2.md`: 14 changes under Features, Fixes and Upgrading.\n\nShall I open a pull request with it?")]))] });
       const done = sessionOf({ sid: "dddddddd-0004", name: "rename billing module", status: "idle", mains: [tailOf([reply(NOW - 50 * MIN, "Merged.")])], job: { state: "done", detail: "merged", needs: "" } });
-      const views = F.buildViews([busy(NOW), turn, done], NOW, 80);
+      const views = F.buildViews([busy(NOW), turn, done], NOW);
       expect(views.map((v) => [v.state, v.quiet])).toEqual([["working", false], ["yourTurn", true], ["finished", true]]);
       const raw = F.detailView(views, 150, 60, NOW, 0, false);
       const rows = plain(raw);
@@ -2219,7 +2243,7 @@ describe("the detail view", () => {
   test("a quiet session with no reply and no now-line shows its last prompt, not an empty row", () => {
     quietly(() => {
       const idle = sessionOf({ sid: "ffffffff-0006", name: "scratch", status: "idle", kind: "interactive", mains: [tailOf([prompt(NOW - 48 * MIN, "what does the totals helper round to?")])] });
-      const views = F.buildViews([idle], NOW, 80);
+      const views = F.buildViews([idle], NOW);
       expect([views[0].state, views[0].quiet]).toEqual(["idle", true]);
       const rows = plain(F.detailView(views, 150, 20, NOW, 0, false));
       expect(rows.length).toBe(2);
@@ -2230,7 +2254,7 @@ describe("the detail view", () => {
   test("a reply is formatted once, and again when its text changes", () => {
     quietly(() => {
       const s = busy(NOW);
-      const views = () => F.buildViews([s], NOW, 80);
+      const views = () => F.buildViews([s], NOW);
       const g = F.grid(150);
       const first = F.blockOf(views()[0], g, NOW, F.laneWindow(NOW, 150));
       const second = F.blockOf(views()[0], g, NOW, F.laneWindow(NOW, 150));
@@ -2246,7 +2270,7 @@ describe("the detail view", () => {
       const s = busy(NOW);
       const said = (n: number) => `Reply ${n}, first paragraph.\n\n- a bullet in reply ${n}\n- another\n\nReply ${n}, last paragraph.`;
       s.mains[0].says = [1, 2, 3, 4, 5, 6].map((n) => ({ text: said(n), t: NOW - (8 - n) * MIN }));
-      const views = F.buildViews([s], NOW, 80);
+      const views = F.buildViews([s], NOW);
       const all = plain(F.detailView(views, 150, 80, NOW, 0, true));
       for (let n = 1; n <= 6; n++) for (const part of [`Reply ${n}, first paragraph.`, `• a bullet in reply ${n}`, `Reply ${n}, last paragraph.`]) expect(all.filter((r) => r.includes(part)).length).toBe(1);
       expect(all.filter((r) => r.includes("◇")).length).toBe(5);
@@ -2270,7 +2294,7 @@ describe("the detail view", () => {
     try {
       const s = busy(NOW);
       F.seen.at = NOW - 3 * MIN; // you looked three minutes ago: the newest reply (2m) is new, the one before it (3m) is not
-      const views = F.buildViews([s], NOW, 80);
+      const views = F.buildViews([s], NOW);
       const raw = F.detailView(views, 150, 40, NOW, 0, false);
       const rows = plain(raw);
       const newest = rows.findIndex((r) => r.includes("◆ Two of the three"));
@@ -2292,7 +2316,7 @@ describe("the detail view", () => {
       // The runway sits at the right end of the key row, and the key gives way to it.
       const growing = busy(NOW);
       growing.mains[0].ctxLog = Array.from({ length: 11 }, (_, i): [number, number] => [NOW - (10 - i) * MIN, 611_000 - 97_500 + i * 9_750]);
-      const key = plain(F.detailView(F.buildViews([growing], NOW, 80), 150, 40, NOW, 0, false))[3];
+      const key = plain(F.detailView(F.buildViews([growing], NOW), 150, 40, NOW, 0, false))[3];
       expect(key).toMatch(/■ Used \d+k {2,}full in ~40m$/);
       expect(F.width(key)).toBe(149);
     } finally {
@@ -2330,6 +2354,151 @@ describe("the detail view", () => {
       ]);
       for (const h of targets.slice(-6)) expect([h.x0, h.x1]).toEqual([1, 150]);
     });
+  });
+});
+
+describe("one program: the header, the sessions and the buttons agree", () => {
+  const MODES: F.Mode[] = ["detail", "compact", "far"];
+  /** Tool calls spread over the 33 minutes before `end`, so some fall off the far edge of every window on the screen. */
+  const calls = (count: number, end: number, seed: number) => callTimes(count, end, 33, seed).flatMap((t, i) => [toolCall(t, "Read", {}, `c${seed}-${i}`), toolResult(t + 900)]);
+  /** A fleet with every kind of row: a session that needs you, one running a workflow with tasks, one with two agents, and an idle one that has been busy inside the window. */
+  function fleet(now: number): F.Session[] {
+    const member = (id: string, seed: number, done = false) => agentOf(id, tailOf(calls(14, now - (done ? 12 * MIN : 20_000), seed)), { label: `fix:${id}`, type: "workflow-subagent", model: "opus", wf: "wf_1", phase: "Fix", done });
+    const wf: F.Workflow = { id: "wf_1", name: "bisect-and-fix", status: "running", phase: "Fix", phases: [], seen: ["Reproduce", "Fix"], started: now - 14 * MIN, finished: 0, agents: [member("w1", 21, true), member("w2", 22), member("w3", 23)], lastT: now };
+    return [
+      sessionOf({ sid: "aaaaaaaa", name: "checkout flow redesign", status: "idle", mains: [tailOf([prompt(now - 29 * MIN, "move coupons to the new table"), ...calls(46, now - 7 * MIN, 7), reply(now - 6 * MIN, "The migration is written.\n- 41,208 rows were copied\n- 0 rows differ")])], job: { state: "blocked", detail: "migration drafted", needs: "Approve dropping the legacy coupon_code column before I run the migration?" } }),
+      sessionOf({ sid: "bbbbbbbb", name: "flaky test hunt", mains: [tailOf([prompt(now - 29 * MIN, "why are the tests flaky?"), ...calls(60, now - 3 * MIN, 11), reply(now - 2 * MIN, "Two of the three share a cause.")])], workflows: [wf], job: { state: "working", detail: "bisecting the payment tests", needs: "" }, tasks: { done: 2, doing: 1, total: 6, active: "Fixing the clock-dependent tests" } }),
+      sessionOf({ sid: "cccccccc", name: "docs site search", kind: "interactive", startedAt: now - 22 * MIN, mains: [tailOf([prompt(now - 29 * MIN, "why does search miss new pages?"), ...calls(18, now - 60_000, 3), reply(now - 55_000, "Search is built from an index that is only regenerated on release.")])], agents: [agentOf("s1", tailOf(calls(22, now - 20_000, 5)), { label: "Find where the index is built" }), agentOf("s2", tailOf([...calls(9, now - 4 * MIN, 9), toolCall(now - 3 * MIN, "Bash", { description: "Build the site" })]), { label: "Measure the build" })] }),
+      sessionOf({ sid: "dddddddd", name: "release notes", kind: "interactive", status: "idle", mains: [tailOf([prompt(now - 31 * MIN, "draft the release notes"), ...calls(12, now - 12 * MIN, 13), reply(now - 12 * MIN, "The draft is ready.")])] }),
+    ];
+  }
+  /** One frame as plain text, on a quiet machine with nothing new since you looked; every global is put back afterwards. */
+  function frame(mode: F.Mode, cols: number, rows: number, now = NOW, all = true, sessions = fleet(now)): string[] {
+    const saved = { opt: { ...F.opt }, machine: { ...F.machine }, seen: { ...F.seen } };
+    Object.assign(F.opt, { mode, usage: false, windowMin: 30, showAll: all, showDone: false });
+    Object.assign(F.machine, { cpu: 54, load: 14.6, cores: [58, 62, 49, 44], hist: [6, 7, 8, 22, 54], procs: [], kids: new Map() });
+    Object.assign(F.seen, { at: now, events: [], known: new Map(), primed: true });
+    try {
+      return F.render(sessions, cols, rows, now).map(strip);
+    } finally {
+      Object.assign(F.opt, saved.opt);
+      Object.assign(F.machine, saved.machine);
+      Object.assign(F.seen, saved.seen);
+    }
+  }
+
+  test("at every width from 100 columns, every sparkline sits in the header's lane and every figure ends on its figure column", () => {
+    for (let W = 100; W <= 230; W++)
+      for (const rows of [34, 44]) {
+        const g = F.grid(W);
+        const lines = frame("detail", W, rows);
+        const where = `${W}x${rows}`;
+        // The rule under the header is the time axis: the window at the lane's left edge, "now" at its right.
+        const axis = lines[rows >= 40 ? 4 : 2];
+        expect([where, axis.slice(g.lane - 1, g.lane + 2), axis.slice(g.laneEnd - 3, g.laneEnd)]).toEqual([where, "30m", "now"]);
+        // A full strip of bars is as wide as the lane and nothing else on the screen is: find each, wherever it was drawn.
+        const strips = lines.flatMap((line, i) => [...line.matchAll(new RegExp(`[${F.BARS}]{${g.laneW},}`, "g"))].map((m) => ({ i, at: m.index! + 1, w: m[0].length })));
+        expect([where, [...new Set(strips.map((x) => `${x.at}+${x.w}`))]]).toEqual([where, [`${g.lane}+${g.laneW}`]]);
+        const head = strips.filter((x) => x.i < (rows >= 40 ? 4 : 2)).length;
+        expect([where, head, strips.length - head >= 4 + 6]).toEqual([where, 1, true]); // the fleet chart's bottom row; then four sessions and six thread rows
+        // Beside each strip, the figure (a total, an age, "live") ends on the figure field's last column, one short of the edge.
+        for (const x of strips) expect([where, x.i, lines[x.i].padEnd(W)[g.figEnd - 1] !== " ", lines[x.i].padEnd(W)[g.figEnd]]).toEqual([where, x.i, true, " "]);
+      }
+  });
+
+  test("the header's total is the sum of the sessions' own figures, in every mode and wherever the bars' edges fall", () => {
+    const sumOf = (lines: string[], figure: RegExp) => F.sum(lines.flatMap((line) => [...line.matchAll(figure)].map((m) => Number(m[1]))));
+    // The clock moves through a whole minute, so each window's far edge sweeps across the oldest calls.
+    for (let now = NOW; now < NOW + MIN; now += 7000) {
+      for (const W of [110, 150, 200]) {
+        const detail = frame("detail", W, 60, now);
+        expect([now, W, sumOf(detail.slice(5), / (\d+) tools\s*$/g)]).toEqual([now, W, sumOf(detail.slice(1, 2), / (\d+) tools$/g)]);
+        const far = frame("far", W, 60, now);
+        expect([now, W, sumOf(far.slice(5), / (\d+) tool calls \/ 30m/g)]).toEqual([now, W, sumOf(far.slice(1, 2), / (\d+) tools$/g)]);
+        // Detail and far count on the same bars, so a figure does not change when the view does.
+        expect(sumOf(far.slice(1, 2), / (\d+) tools$/g)).toBe(sumOf(detail.slice(1, 2), / (\d+) tools$/g));
+      }
+      const compact = frame("compact", 200, 60, now);
+      const total = sumOf(compact.slice(0, 1), / (\d+) tool calls \/ 30m/g);
+      expect(total).toBeGreaterThan(100);
+      expect([now, sumOf(compact.slice(3), / (\d+) tools /g)]).toEqual([now, total]);
+    }
+  });
+
+  test("the masthead counts the sessions the screen shows, and the a button carries the ones it keeps off", () => {
+    const lines = frame("detail", 150, 44, NOW, false);
+    expect(lines[0]).toContain("▲ 1 needs you    ● 2 working    ⠋ 4 agents    ≡ 1 workflow    ○ 1 idle");
+    expect(lines.filter((l) => l.startsWith(" ██ ")).length).toBe(3 * 2); // three sessions on screen, two head rows each
+    expect(lines[43]).toContain(" a All · 1 idle ");
+    expect(lines.join("\n")).not.toContain("hidden"); // the line that used to say so is gone from every mode
+    for (const mode of MODES) expect([mode, frame(mode, 150, 44, NOW, false).join("\n").includes("hidden")]).toEqual([mode, false]);
+
+    // "In the window" means one thing on a frame. An agent that last wrote just before the lane's first bar (but under 30 minutes ago)
+    // is past the left edge of every sparkline, so it is neither counted in the masthead nor given a row; one bar later it is both.
+    const edge = F.laneWindow(NOW, 150).start;
+    expect(NOW - 30 * MIN).toBeLessThan(edge - 10_000);
+    const withAgent = (lastWrite: number) => {
+      const sessions = fleet(NOW);
+      sessions[2].agents.push(agentOf("s9", Object.assign(tailOf([]), { mtime: lastWrite }), { label: "Check the release log" }));
+      const text = frame("detail", 150, 44, NOW, false, sessions);
+      return [/(\d+) agents/.exec(text[0])![1], text.some((l) => l.includes("Check the release log"))];
+    };
+    expect([withAgent(edge - 10_000), withAgent(edge + 10_000)]).toEqual([["4", false], ["5", true]]);
+    // The frame's window is the lane's in detail and far mode, and the rows' own shorter strips in compact mode.
+    expect([F.frameWindow(NOW, 150, "detail"), F.frameWindow(NOW, 150, "far"), F.frameWindow(NOW, 110, "detail").n, F.frameWindow(NOW, 150, "compact").n]).toEqual([F.laneWindow(NOW, 150), F.laneWindow(NOW, 150), 20, 25]);
+  });
+
+  test("detail mode's rows run down to the buttons; compact rows and far cards keep one row clear above them", () => {
+    // Enough sessions to fill any screen: the row above the button bar is a session's in detail mode, blank in the other two.
+    const crowd = (now: number) => [...fleet(now), ...fleet(now).map((s) => ({ ...s, sid: s.sid + "-2" })), ...fleet(now).map((s) => ({ ...s, sid: s.sid + "-3" }))];
+    const saved = { ...F.opt };
+    try {
+      for (const [cols, rows] of [[150, 34], [150, 44], [110, 44], [200, 60]]) {
+        const at = (mode: F.Mode) => (Object.assign(F.opt, { mode, usage: false, windowMin: 30, showAll: true }), F.render(crowd(NOW), cols, rows, NOW).map(strip));
+        expect([cols, rows, at("detail")[rows - 2].trim() !== "", at("compact")[rows - 2].trim(), at("far")[rows - 2].trim()]).toEqual([cols, rows, true, "", ""]);
+        for (const mode of MODES) expect(at(mode).length).toBe(rows);
+      }
+    } finally {
+      Object.assign(F.opt, saved);
+    }
+  });
+
+  test("compact mode cuts a session only when one does not fit, and says so on a row of its own", () => {
+    const views = () => F.buildViews(fleet(NOW), NOW);
+    const need = F.sum(views().map(F.rowsOf));
+    expect(need).toBe(1 + 1 + (1 + 1 + 2) + (1 + 2) + 1); // a row each, the question, a workflow and its two running agents, two agents
+    expect(F.fitViews(views(), need + 3)).toMatchObject({ gaps: true, cut: 0 });
+    expect(F.fitViews(views(), need)).toMatchObject({ gaps: false, cut: 0 }); // exactly full is not too full
+    const tight = F.fitViews(views(), need - 1);
+    expect([tight.cut > 0, tight.views.length + tight.cut, F.sum(tight.views.map(F.rowsOf)) + 1 <= need - 1]).toEqual([true, 4, true]); // what is left, and the line that says the rest are not shown
+  });
+
+  test("no mode draws a retired glyph, one of the old word labels or the old approximate sign", () => {
+    for (const mode of MODES)
+      for (const [cols, rows] of [[80, 24], [110, 44], [150, 44], [200, 60]])
+        for (const all of [false, true]) {
+          const text = frame(mode, cols, rows, NOW, all).join("\n");
+          const where = `${mode} ${cols}x${rows}`;
+          expect([where, text.match(/[⚠⚙⎇▪◈▤┆≈]/)?.[0]]).toEqual([where, undefined]);
+          expect([where, text.match(/context [█▌░]|now +▸|you +▸|claude +▸|tasks [✓◐○]|phase |\? needs you|\(d to list\)/)?.[0]]).toEqual([where, undefined]);
+        }
+  });
+
+  test("a terminal narrower than the layout was made for cuts its rows at the edge: none wraps, at any size", () => {
+    const row = F.fg(F.C.cyan, "abc") + F.bold("def") + `\x1b[48;2;52;38;0m${F.fg(F.C.white, "ghi")}\x1b[49m`;
+    expect([F.clipRow(row, 9), F.clipRow(row, 40)]).toEqual([row, row]);
+    expect([strip(F.clipRow(row, 5)), strip(F.clipRow(row, 1)), strip(F.clipRow(row, 0))]).toEqual(["abcde", "a", ""]);
+    // Every code is kept, so a cut row leaves no colour, bold or background switched on.
+    expect(F.clipRow(row, 2).match(/\x1b\[[0-9;]*m/g)).toEqual(row.match(/\x1b\[[0-9;]*m/g));
+    expect(strip(F.clipRow("日本語", 3))).toBe("日"); // a wide character that does not fit is left out whole
+    for (const mode of MODES)
+      for (let cols = 20; cols < 80; cols += 3)
+        for (const rows of [1, 2, 3, 8, 24]) {
+          const lines = frame(mode, cols, rows);
+          expect([mode, cols, rows, lines.length, Math.max(...lines.map((l) => Bun.stringWidth(l))) <= cols]).toEqual([mode, cols, rows, rows, true]);
+        }
+    const key = F.legend(40, 12);
+    expect([key.length, Math.max(...key.map((l) => Bun.stringWidth(strip(l)))) <= 40]).toEqual([12, true]);
   });
 });
 
@@ -2561,7 +2730,7 @@ describe("safe text holds against anything", () => {
     expect(F.wrap("hello world", 0)).toEqual(["h", "e", "l", "l", "o", "w", "o", "r", "l", "d"]);
     expect(F.wrap("hello", -3).length).toBe(5);
     expect(F.wrap("日本", 1)).toEqual(["日", "本"]);
-    expect(F.messageLines("- one\n- two", 0).length).toBeGreaterThan(0);
+
     expect(F.fit(text, 0)).toBe("");
   });
 
@@ -2667,7 +2836,7 @@ describe("stall watch and news under rough conditions", () => {
       const wf: F.Workflow = { id: "wf_1", name: "bisect-and-fix", status: "running", phase: "Fix", phases: [], seen: ["Fix"], started: NOW - 30 * MIN, finished: 0, agents: [agentOf("w5", stuckFor(14), { wf: "wf_1", label: "review:clock-in-refund" })], lastT: NOW - 14 * MIN };
       const s = sessionOf({ sid: "b", pid: 4242, name: "flaky test hunt", mains: [stuckFor(1)], agents: [agentOf("s1", stuckFor(14), { label: "measure build time" }), agentOf("old", tailOf([toolCall(NOW - 20 * MIN), toolResult(NOW - 19 * MIN)]))], workflows: [wf] });
       withCpu(4242, 0.2, () => {
-        const v = F.buildViews([s], NOW, 80)[0];
+        const v = F.buildViews([s], NOW)[0];
         expect([v.state, [...v.stall.threads].sort()]).toEqual(["stalled", ["s1", "w5"]]);
         expect(v.groups.flatMap((g) => g.rows.map((a) => a.id)).sort()).toEqual(["s1", "w5"]); // the quiet, unstalled one has aged out; these two have not
         expect(v.groups.some((g) => g.wf?.id === "wf_1")).toBe(true);
@@ -2715,6 +2884,54 @@ describe("stall watch and news under rough conditions", () => {
     const marks = withCpu(77, 0, () => F.stallMarks(silent, F.factsOf(silent), F.stallOf(silent, F.factsOf(silent), NOW)));
     expect(marks).toEqual([["c", NOW - 12 * MIN + 1]]);
     expect([F.newStalls(known, marks), F.newStalls(known, marks)]).toEqual([["c"], []]);
+  });
+
+  test("a stall on show is held while the tree idles either side of 1%, and let go when it is properly busy or the thread writes", () => {
+    const agent = agentOf("review", stuckFor(14));
+    const s = sessionOf({ sid: "b", pid: 77, mains: [stuckFor(0.5)], agents: [agent] });
+    const held = new Map<string, number>();
+    /** One scan with the tree at `cpu`: the verdict the screen would show, then what refresh() remembers for the next. */
+    const scanAt = (cpu: number) =>
+      withCpu(77, cpu, () => {
+        F.holdStalls([s], NOW, held);
+        return F.stallOf(s, F.factsOf(s), NOW, undefined, undefined, held).threads.join();
+      });
+    expect([0.2, 1.4, 0.3, 2.0, 4.9].map(scanAt)).toEqual(["review", "review", "review", "review", "review"]); // under 1% to begin, under 5% to stay
+    expect([...held]).toEqual([["b/review", NOW - 14 * MIN]]);
+    expect([5, 1.4, 0.9].map(scanAt)).toEqual(["", "", "review"]); // busy lets it go; after that it takes under 1% again
+    // Without the memory of the last scan the rule is the plain one, as the tests above use it.
+    expect(withCpu(77, 1.4, () => F.stallOf(s, F.factsOf(s), NOW, undefined, undefined, new Map()).count)).toBe(0);
+    // It writes again and falls silent on a new tool call: that is a different silence, which starts from under 1% like any other.
+    F.ingest(agent.tail, JSON.stringify(toolResult(NOW - 12 * MIN)));
+    F.ingest(agent.tail, JSON.stringify(toolCall(NOW - 11 * MIN)));
+    expect([1.4, 0.5, 1.4].map(scanAt)).toEqual(["", "review", "review"]);
+    // A whole session gone quiet is held by its own name, and its main thread with it.
+    const silent = sessionOf({ sid: "c", pid: 77, mains: [stuckFor(12)] });
+    const verdict = (cpu: number) =>
+      withCpu(77, cpu, () => {
+        F.holdStalls([silent], NOW, held);
+        const st = F.stallOf(silent, F.factsOf(silent), NOW, undefined, undefined, held);
+        return [st.session, st.threads.join()];
+      });
+    expect([verdict(0.4), verdict(1.8), verdict(7)]).toEqual([[true, "main"], [true, "main"], [false, ""]]);
+    expect(held.size).toBe(0);
+  });
+
+  test("the bell for a question rings once, even when its session is missing from one scan", () => {
+    const waiting = new Set<string>();
+    const asked = new Map<string, number>();
+    const ring = (current: [string, number][]) => F.newAsks(waiting, asked, current);
+    expect(ring([["a", NOW - 6 * MIN]])).toEqual(["a"]);
+    expect(ring([["a", NOW - 6 * MIN]])).toEqual([]); // still waiting
+    expect(ring([])).toEqual([]); // its registry file was caught half-written: the session is missing from this scan
+    expect(ring([["a", NOW - 6 * MIN]])).toEqual([]); // back, with the same question: it has not asked again
+    expect(ring([["a", NOW - 6 * MIN], ["b", NOW]])).toEqual(["b"]);
+    expect(ring([["a", NOW - 5 * MIN], ["b", NOW]])).toEqual([]); // its transcript was touched while it waited: the same wait, not a new one
+    expect(ring([["b", NOW]])).toEqual([]); // a was answered
+    expect(ring([["a", NOW + MIN], ["b", NOW]])).toEqual(["a"]); // and has asked something new
+    // The time a question was asked is the time the state rail and the news list use for it.
+    const s = sessionOf({ sid: "q", status: "idle", mains: [tailOf([toolCall(NOW - 6 * MIN, "AskUserQuestion", { questions: [{ question: "Merge it?" }] })])] });
+    expect(F.stateSince(s, F.factsOf(s), "needs")).toBe(NOW - 6 * MIN);
   });
 
   test("a session that drops out of one scan and comes back is not news a second time", () => {
