@@ -144,6 +144,53 @@ session(1, {
     says: ["The new promotions table is in place and every read now goes through it. All 212 checkout tests pass.", "The migration that drops coupon_code is written and has run cleanly against a copy of the data.\n- 41,208 rows were copied to promotions\n- 0 rows differ between the old column and the new table\n\nI have not run it for real, because dropping a column cannot be undone."] })],
 });
 
+/**
+ * The task history in a session's transcript: [ms ago, task id, status] starts or finishes a task;
+ * [ms ago, "say", text] is a message, which belongs to the task in hand when it is written.
+ */
+type TaskStep = [number, string, string];
+const TASK_STEPS: TaskStep[] = [
+  [28 * MIN, "1", "in_progress"],
+  [26 * MIN, "say", "Reproduced all three failures: each fails about one run in twenty under load, never alone."],
+  [25 * MIN, "1", "completed"],
+  [25 * MIN, "2", "in_progress"],
+  [21 * MIN, "say", "Two of them read the clock twice in one request and assume both reads fall in the same second."],
+  [20 * MIN, "2", "completed"],
+  [19 * MIN, "4", "in_progress"],
+  [12 * MIN, "say", "The retry test sleeps on the real clock. With the fake one in, two more places that read the time turn up."],
+  [9 * MIN, "3", "in_progress"],
+  [6 * MIN, "say", "Started on the refund tests: the request now reads the clock once and hands the time to each helper."],
+];
+const MANY_TASK_STEPS: TaskStep[] = [
+  [29 * MIN, "1", "in_progress"],
+  [27 * MIN, "1", "completed"],
+  [27 * MIN, "2", "in_progress"],
+  [24 * MIN, "2", "completed"],
+  [24 * MIN, "3", "in_progress"],
+  [22 * MIN, "say", "The failing test pins the clock and fails the same way every time now."],
+  [21 * MIN, "3", "completed"],
+  [20 * MIN, "4", "in_progress"],
+  [15 * MIN, "say", "Both refund tests now take the time from the request. One helper still reads the clock on its own."],
+  [10 * MIN, "5", "in_progress"],
+  [6 * MIN, "say", "The backoff test has a fake clock; it no longer sleeps, and it passed two hundred runs in a row."],
+];
+function taskHistory(steps: TaskStep[], used: number | ((msAgo: number) => number)): unknown[] {
+  const ctx = (msAgo: number) => Math.round(typeof used === "function" ? used(msAgo) : used);
+  return steps.map(([msAgo, what, arg], i) => ({
+    type: "assistant",
+    timestamp: iso(msAgo),
+    message: {
+      id: `task${i}`,
+      model: "claude-opus-5-5",
+      content: [what === "say" ? { type: "text", text: arg } : { type: "tool_use", name: "TaskUpdate", input: { taskId: what, status: arg } }],
+      usage: { input_tokens: 4, cache_read_input_tokens: ctx(msAgo), output_tokens: what === "say" ? 140 : 30 },
+    },
+  }));
+}
+/** Transcript rows in the order they were written. */
+const byTime = (rows: unknown[]): unknown[] =>
+  rows.map((r, i) => [r, i] as const).sort(([a, i], [b, j]) => Date.parse((a as any).timestamp) - Date.parse((b as any).timestamp) || i - j).map(([r]) => r);
+
 /** A busy job running a workflow, with tasks: three agents fixing, two that have already reported. */
 function busyJob(n: number, o: { sid: string; name: string; cwd: string; branch: string; wfId: string; upMin: number; quietReviewer?: boolean; growing?: boolean; manyTasks?: boolean }) {
   // With --runway the context has grown by about 12k tokens a minute for the last ten minutes: 389k left, so full in about 40.
@@ -151,24 +198,27 @@ function busyJob(n: number, o: { sid: string; name: string; cwd: string; branch:
   const dir = session(n, {
     sid: o.sid, name: o.name, kind: "bg", status: "busy", cwd: o.cwd, upMin: o.upMin, branch: o.branch, mem: 0.4, cpu: o.quietReviewer ? 0.2 : 3,
     job: { state: "working", detail: "bisecting the three payment tests that fail one run in twenty" },
-    main: [...loaded(118_000, 30_000), ...transcript({ calls: 30, endAgo: 2 * MIN, ask: "find out why the payment tests are flaky and fix them", used, pending: ["Workflow", { description: "Bisect and fix the flaky payment tests" }],
-      says: ["Three tests fail intermittently, all in the payments suite. I'm running each two hundred times under load to find which ones share a cause.", "Two of the three share a cause: both read the clock twice and assume the same second. The third is separate. I've started a workflow with one agent per test, and a reviewer to confirm each fix."] })],
+    main: [...loaded(118_000, 30_000), ...byTime([...taskHistory(o.manyTasks ? MANY_TASK_STEPS : TASK_STEPS, used), ...transcript({ calls: 30, endAgo: 2 * MIN, ask: "find out why the payment tests are flaky and fix them", used, pending: ["Workflow", { description: "Bisect and fix the flaky payment tests" }],
+      says: ["Three tests fail intermittently, all in the payments suite. I'm running each two hundred times under load to find which ones share a cause.", "Two of the three share a cause: both read the clock twice and assume the same second. The third is separate. I've started a workflow with one agent per test, and a reviewer to confirm each fix."] })])],
   });
   const task = (id: number, subject: string, status: string, more: Record<string, unknown> = {}) => write(path.join(home, "tasks", o.sid, `${id}.json`), JSON.stringify({ id: String(id), subject, status, description: "", blocks: [], blockedBy: [], ...more }));
   if (!o.manyTasks) {
-    ["Reproduce each failure", "Find the shared cause", "Fix clock-dependent tests", "Fix retry test"].forEach((subject, i) => task(i + 1, subject, i < 2 ? "completed" : i === 2 ? "in_progress" : "pending", { activeForm: "Fixing the clock-dependent tests" }));
-    task(5, "Verify under load", "pending");
-    task(6, "Open the pull request", "pending", { blockedBy: ["5"] });
+    task(1, "Reproduce each failure", "completed", { description: "Run each of the three payment tests two hundred times under load and note which fail and how." });
+    task(2, "Find the shared cause", "completed", { description: "Compare the failing runs and find what the failures have in common." });
+    task(3, "Fix clock-dependent tests", "in_progress", { activeForm: "Fixing the clock-dependent tests", description: "Make the refund tests read the clock once per request and pass the time down." });
+    task(4, "Fix retry test", "in_progress", { activeForm: "Fixing the retry test", description: "Give the retry backoff test a fake clock so it stops sleeping on the real one." });
+    task(5, "Verify under load", "pending", { description: "Run every fixed test two hundred times under load; all of them must pass." });
+    task(6, "Open the pull request", "pending", { blockedBy: ["5"], description: "Open a pull request with the fixes and the load-test results, and ask the payments team to review." });
   } else {
     // With --many-tasks: a long list, two tasks in progress, long subjects, one in Russian, a chain of blocked ones, and a deleted one that is left out.
     const list: [string, string, Record<string, unknown>?][] = [
       ["Reproduce each failure under load on the build machine", "completed"],
       ["Find the shared cause of the clock-dependent failures", "completed"],
       ["Write a failing test that pins the clock", "completed"],
-      ["Fix the clock-dependent refund tests", "in_progress", { activeForm: "Fixing the clock-dependent refund tests so they read the time once and pass it down to every helper" }],
-      ["Fix the retry backoff test", "in_progress", { activeForm: "Fixing the retry backoff test, which sleeps on the real clock" }],
-      ["Make the clock injectable in every payments service that reads the time, including the ledger export and the nightly reconciliation job", "pending"],
-      ["Verify each fix two hundred times under load", "pending", { blockedBy: ["4", "5"] }],
+      ["Fix the clock-dependent refund tests", "in_progress", { activeForm: "Fixing the clock-dependent refund tests so they read the time once and pass it down to every helper", description: "Both refund tests read the clock twice per request; read it once and pass it down." }],
+      ["Fix the retry backoff test", "in_progress", { activeForm: "Fixing the retry backoff test, which sleeps on the real clock", description: "The backoff test sleeps on the real clock; give it the fake one." }],
+      ["Make the clock injectable in every payments service that reads the time, including the ledger export and the nightly reconciliation job", "pending", { description: "Every payments service that reads the time takes a clock instead, so tests can pin it." }],
+      ["Verify each fix two hundred times under load", "pending", { blockedBy: ["4", "5"], description: "Two hundred runs of each fixed test on the build machine, under load." }],
       ["Обновить тексты ошибок оплаты в русской версии сайта", "pending"],
       ["Remove the retry wrapper that hid the flaky failures", "pending"],
       ["Update the payments runbook with the new clock rule", "pending"],

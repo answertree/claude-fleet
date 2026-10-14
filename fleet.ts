@@ -752,6 +752,15 @@ export class Row {
 
 // ───────────────────────── transcript tailing ─────────────────────────
 
+/** One task as its transcript tells it: when it was last started and finished, and the latest thing Claude wrote while it was the task in hand. */
+export interface TaskTrace {
+  started?: number;
+  finished?: number;
+  say?: { text: string; t: number };
+}
+const TASK_TRACE_MAX = 400; // tasks remembered per transcript; the oldest is let go first
+const TASK_SAY_KEEP = 4_000; // a task's latest message, kept for its first line (a few in focus)
+
 export interface Tail {
   path: string;
   offset: number;
@@ -770,6 +779,8 @@ export interface Tail {
   ask?: { text: string; t: number }; // last thing the person typed
   say?: { text: string; t: number }; // last thing Claude wrote
   says: { text: string; t: number }[]; // its last few messages, oldest first
+  taskLog: Map<string, TaskTrace>; // each task its updates started or finished, by task id
+  taskFocus: string[]; // the tasks in progress, in the order they were started: the last is the task in hand
   sayTs: number[]; // when each of its replies in the window was written, for "new since you looked"
   summary?: string; // the session's own "while you were away" summary
   summaryT?: number; // when it was written, so it can be compared with the last prompt
@@ -829,6 +840,36 @@ export function hintFor(_name: string, input: any): string {
 const count = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
 
 /** Read one transcript line into the tail. Text a session wrote is made safe here, once, so everything drawn later already is. */
+/**
+ * A task update from the transcript: a task started ("in_progress") becomes the task in hand; one
+ * finished or deleted leaves the tasks in progress. Other updates (a new description, a blocker) say
+ * nothing about what is in hand.
+ */
+export function traceTask(t: Tail, input: any, ts: number) {
+  const raw = input?.taskId ?? input?.task_id;
+  if (typeof raw !== "string" && typeof raw !== "number") return;
+  const status = input?.status;
+  if (status !== "in_progress" && status !== "completed" && status !== "deleted") return;
+  const id = safeLine(capText(String(raw), 100));
+  let e = t.taskLog.get(id);
+  if (!e) {
+    t.taskLog.set(id, (e = {}));
+    if (t.taskLog.size > TASK_TRACE_MAX) t.taskLog.delete(t.taskLog.keys().next().value as string);
+  }
+  t.taskFocus = t.taskFocus.filter((x) => x !== id);
+  if (status === "in_progress") {
+    e.started = ts;
+    e.finished = undefined;
+    t.taskFocus.push(id);
+  } else e.finished = ts;
+}
+/** A message from Claude belongs to the task in hand when it was written: the one started last of those in progress. */
+function noteTaskSay(t: Tail, text: string, ts: number) {
+  const id = t.taskFocus[t.taskFocus.length - 1];
+  const e = id === undefined ? undefined : t.taskLog.get(id);
+  if (e) e.say = { text: capText(text, TASK_SAY_KEEP), t: ts };
+}
+
 export function ingest(t: Tail, line: string) {
   if (ATTACHMENT.test(line.slice(0, 2000)) || (line.length < 400_000 && ATTACHMENT.test(line))) return absorb(t, line);
   if (line.length < 2 || !line.includes('"timestamp"')) {
@@ -873,6 +914,7 @@ export function ingest(t: Tail, line: string) {
         if (item?.type === "tool_use") {
           t.tools.push(ts);
           t.lastTool = { name: safeLine(capText(String(item.name ?? ""), 200)), hint: safeLine(capText(hintFor(item.name, item.input), NOTE_KEEP)), t: ts };
+          if (!o.isSidechain && item.name === "TaskUpdate") traceTask(t, item.input, ts);
         }
       }
     }
@@ -885,6 +927,7 @@ export function ingest(t: Tail, line: string) {
           t.says.push(t.say);
           if (t.says.length > 6) t.says.shift();
           t.sayTs.push(ts);
+          noteTaskSay(t, t.say.text, ts);
         }
       if (u) {
         const used = count(u.input_tokens) + count(u.cache_read_input_tokens) + count(u.cache_creation_input_tokens);
@@ -943,6 +986,8 @@ export function newTail(file: string, start = 0, birth = 0): Tail {
     decoder: new StringDecoder("utf8"),
     tools: [],
     says: [],
+    taskLog: new Map(),
+    taskFocus: [],
     sayTs: [],
     ctxLog: [],
     tokens: new Map(),
@@ -959,6 +1004,65 @@ const lastWriteOf = (t: Tail) => Math.max(t.lastT, t.mtime);
 /** The tool call a thread is waiting on, if it has one outstanding. */
 const pendingOf = (t: Tail) => (t.lastTool && t.lastTool.t > t.lastResultT ? t.lastTool : undefined);
 const pendingTool = (t: Tail) => !!pendingOf(t);
+
+/** What the search before the tail looks for: task updates, and Claude's messages (a text block). */
+const TASK_MARKS = [Buffer.from('"name":"TaskUpdate"'), Buffer.from('"type":"text"')];
+const TASK_LINE_MAX = 256 * 1024; // longer lines are tool results, not messages or task updates
+/**
+ * The task updates and Claude's messages written before the part pump() tails, read once, so that a
+ * task started long ago is known to be in progress (and since when), and has the latest message written
+ * while it was in hand, however old. The file is searched as bytes; only the lines that hold one of the
+ * marks are parsed, in the order they were written. Lines that start before `upTo` are this scan's; the
+ * tail drops its first, partial line.
+ */
+export function scanTaskUpdates(t: Tail, upTo: number) {
+  let fd: number;
+  try {
+    fd = fs.openSync(t.path, "r");
+  } catch {
+    return;
+  }
+  try {
+    const size = fs.fstatSync(fd).size;
+    const limit = Math.min(size, upTo + TASK_SCAN_OVERLAP);
+    const buf = Buffer.allocUnsafe(TASK_SCAN_CHUNK + TASK_SCAN_OVERLAP);
+    const read = new Set<number>(); // where each line read starts: the chunks overlap
+    for (let pos = 0; pos < upTo; pos += TASK_SCAN_CHUNK) {
+      const n = fs.readSync(fd, buf, 0, Math.min(TASK_SCAN_CHUNK + TASK_SCAN_OVERLAP, limit - pos), pos);
+      if (n <= 0) break;
+      const view = buf.subarray(0, n);
+      const lines = new Map<number, [number, number]>(); // where a line starts in the file -> its bounds in this chunk
+      for (const mark of TASK_MARKS)
+        for (let at = view.indexOf(mark); at !== -1; at = view.indexOf(mark, at + mark.length)) {
+          const before = view.lastIndexOf(10, at);
+          const end = view.indexOf(10, at);
+          if (end === -1 || (before === -1 && pos > 0)) continue; // not whole in this chunk: the overlapping one has it
+          const from = pos + before + 1;
+          if (from >= upTo || read.has(from) || end - before > TASK_LINE_MAX) continue;
+          lines.set(from, [before + 1, end]);
+        }
+      for (const [from, [a, z]] of [...lines].sort((p, q) => p[0] - q[0])) {
+        read.add(from);
+        let o: any;
+        try {
+          o = JSON.parse(view.subarray(a, z).toString("utf8"));
+        } catch {
+          continue;
+        }
+        const ts = Date.parse(o?.timestamp);
+        if (o?.type !== "assistant" || o.isSidechain || Number.isNaN(ts) || !Array.isArray(o.message?.content)) continue;
+        for (const item of o.message.content) {
+          if (item?.type === "tool_use" && item.name === "TaskUpdate") traceTask(t, item.input, ts);
+          else if (item?.type === "text" && typeof item.text === "string" && item.text.trim()) noteTaskSay(t, safeText(capText(item.text, TASK_SAY_KEEP)), ts);
+        }
+      }
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+const TASK_SCAN_CHUNK = 4 << 20;
+const TASK_SCAN_OVERLAP = 1 << 20; // longer than any line that holds a task update
 
 const chunk = Buffer.allocUnsafe(1 << 20);
 function pump(file: string, isMain = false): Tail | undefined {
@@ -977,7 +1081,10 @@ function pump(file: string, isMain = false): Tail | undefined {
     t = newTail(file, start, st.birthtimeMs);
     t.ino = st.ino;
     tails.set(file, t);
-    if (isMain && start > 0) scanHead(t, start);
+    if (isMain && start > 0) {
+      scanHead(t, start);
+      scanTaskUpdates(t, start);
+    }
   }
   t.used = scanSeq;
   t.mtime = st.mtimeMs;
@@ -1050,6 +1157,9 @@ export interface TaskItem {
   activeForm: string; // what it says while it is in progress ("Fixing the tests"); may be empty
   status: "pending" | "in_progress" | "completed";
   blocked: boolean; // it waits on a task that is not completed yet
+  description: string; // what it is for, from its file, on one line
+  since?: number; // in progress: when it was started, when the transcript says
+  say?: { text: string; t: number }; // the latest thing Claude wrote while it was the task in hand
 }
 const TASK_KEEP = 300; // a task's subject or active form: one row outside focus, a few rows in it
 /** Task order: by number when the id is one, then by the id's text. */
@@ -1346,14 +1456,24 @@ export function scan(now: number): Session[] {
         const idOf = (x: { file: string; t: any }) => safeLine(typeof x.t.id === "string" || typeof x.t.id === "number" ? String(x.t.id) : x.file);
         // A task is blocked while something it waits on is still to finish. A blocker that is not on the list (never made, or deleted) holds nothing up.
         const unfinished = new Set(open.filter((x) => x.t.status !== "completed").map(idOf));
+        // What the transcript says about each task: the freshest transcript first, should a session have more than one.
+        const traced = [...mains].sort((p, q) => q.mtime - p.mtime);
         const items: TaskItem[] = open
-          .map((x) => ({
-            id: idOf(x),
-            subject: text(x.t.subject),
-            activeForm: text(x.t.activeForm),
-            status: x.t.status === "completed" || x.t.status === "in_progress" ? x.t.status : "pending",
-            blocked: Array.isArray(x.t.blockedBy) && x.t.blockedBy.some((id: unknown) => (typeof id === "string" || typeof id === "number") && unfinished.has(safeLine(String(id)))),
-          }))
+          .map((x) => {
+            const id = idOf(x);
+            const status: TaskItem["status"] = x.t.status === "completed" || x.t.status === "in_progress" ? x.t.status : "pending";
+            const trace = traced.map((m) => m.taskLog.get(id)).find(Boolean);
+            return {
+              id,
+              subject: text(x.t.subject),
+              activeForm: text(x.t.activeForm),
+              status,
+              blocked: Array.isArray(x.t.blockedBy) && x.t.blockedBy.some((b: unknown) => (typeof b === "string" || typeof b === "number") && unfinished.has(safeLine(String(b)))),
+              description: text(x.t.description),
+              since: status === "in_progress" ? trace?.started : undefined,
+              say: trace?.say,
+            };
+          })
           .sort(taskOrder);
         const current = items.find((t) => t.status === "in_progress"); // the first in task order, as the list shows it
         tasks = {
@@ -3073,6 +3193,7 @@ export interface Keep {
   taskList: number; // entries of the task list under it, the last of them "… n more tasks" when it is cut short; 0: no list. Each is a row while the list is cut short.
   taskScope: "all" | "open" | "doing"; // the tasks it lists: every one (focus), those not done, or only those in progress
   taskWrap: boolean; // each task's text on as many rows as it takes (focus), rather than one row cut with …
+  taskDetail: "all" | "doing" | "none"; // the line under each listed task: under every one, under those in progress only, or under none
   ctx: boolean; // the context row, where it has a row to itself
   main: boolean; // the main-thread row
   done: boolean; // the "n agents finished" line
@@ -3146,6 +3267,7 @@ export function blockOf(v: View, g: Grid, now: number, win: Win, focus = false):
       taskList: Infinity,
       taskScope: focus ? "all" : "open",
       taskWrap: focus,
+      taskDetail: "all",
       ctx: body,
       main: body && v.showMain && !!m,
       done: body && v.doneCount > 0,
@@ -3224,12 +3346,47 @@ function stackOf(b: Block, g: Grid, now: number): StackRow[] {
       // A blocked task keeps its " · blocked" when the subject is cut, on the last of its rows.
       const mark: Seg[] = t.status === "pending" && t.blocked ? [[` ${ICON.sep} blocked`, C.faint]] : [];
       const lines = taskLines(t, b.taskRoom, k.taskWrap);
-      lines.forEach((line, i) => rows.push({ icon: i ? undefined : icon, iconAt: g.childIcon, at, segs: [[line, tone], ...(i === lines.length - 1 ? mark : [])] }));
+      // A task in progress says how long it has been, in the ages column, when its transcript knows.
+      const since: Seg | undefined = t.status === "in_progress" && t.since ? [ago(now - t.since), C.dim] : undefined;
+      lines.forEach((line, i) => rows.push({ icon: i ? undefined : icon, iconAt: g.childIcon, at, segs: [[line, tone], ...(i === lines.length - 1 ? mark : [])], age: i ? undefined : since }));
+      // Under it, while there is room: the latest thing Claude wrote about it (◇, with its age), or what it is for.
+      const d = taskDetailOf(b, t);
+      d?.lines.forEach((line, i) => rows.push({ icon: i || !d.say ? undefined : [ICON.earlier, EARLIER_TONE], iconAt: at, at: at + 2, segs: [[line, C.dim]], age: i || !d.say ? undefined : [ago(now - d.say.t), C.dim] }));
     }
     if (list.more) rows.push({ at: g.childIcon, segs: [[`${ICON.cut} ${list.more} more task${list.more === 1 ? "" : "s"}`, C.dim]] });
   }
   return rows;
 }
+
+/** The replies the block has to show, by when they were written: a task's latest message that is one of them is not repeated under the task. */
+const replyTimes = (b: Block): Set<number> => new Set([...b.earlier.map((e) => e.t), ...(b.newest ? [b.newest.t] : [])]);
+const detailCut = new WeakMap<TaskItem, Map<string, string[]>>();
+/**
+ * The line under a listed task, as much as the block keeps (Keep.taskDetail): the latest thing Claude
+ * wrote while it was the task in hand, when that is not one of the replies above; else what the task
+ * is for. Tasks still to start (and done ones, in focus) lose theirs first, then those in progress.
+ * One row cut with …, or up to three in focus.
+ */
+function taskDetailOf(b: Block, t: TaskItem): { lines: string[]; say?: { text: string; t: number } } | undefined {
+  const level = b.keep.taskDetail;
+  if (level === "none" || (level === "doing" && t.status !== "in_progress")) return undefined;
+  const say = t.say && !replyTimes(b).has(t.say.t) ? t.say : undefined;
+  const text = say ? firstLine(say.text) : t.description;
+  if (!text) return undefined;
+  const room = Math.max(1, b.taskRoom - 2);
+  const key = `${room} ${b.keep.taskWrap} ${say ? say.t : "d"}`;
+  let at = detailCut.get(t);
+  if (!at) detailCut.set(t, (at = new Map()));
+  let lines = at.get(key);
+  if (!lines) {
+    const all = b.keep.taskWrap ? wrap(text, room) : [text];
+    lines = all.slice(0, b.keep.taskWrap ? 3 : 1).map((line, i, shown) => (i === shown.length - 1 && all.length > shown.length ? cutTo(`${line} ${ICON.cut}`, room) : cutTo(line, room)));
+    at.set(key, lines);
+  }
+  return { lines, say };
+}
+/** Rows under the listed tasks, as the block stands. */
+const taskDetailRows = (b: Block): number => taskListOf(b).shown.reduce((n, t) => n + (taskDetailOf(b, t)?.lines.length ?? 0), 0);
 
 /** What a task says: what it is doing while in progress, else its subject, else its id. */
 const taskText = (t: TaskItem): string => (t.status === "in_progress" && t.activeForm) || t.subject || `Task ${t.id}`;
@@ -3434,9 +3591,20 @@ function taskScopeTo(b: Block, scope: "open" | "doing"): Change | undefined {
   if (after >= before) return undefined;
   return change(() => (b.keep.taskScope = scope), () => (b.keep.taskScope = from), () => b.keep.taskScope === scope && (from === "all" ? b.keep.taskList === Infinity : b.keep.taskList > 0));
 }
-/** In focus: each task back on one row, cut with …, when one of them takes more. Its rows come back only to a list that is not cut short. */
+/** Fewer lines under the listed tasks: what the tasks still to start are for ("doing"), then the latest message under each task in progress ("none"). */
+function taskDetailTo(b: Block, level: "doing" | "none"): Change | undefined {
+  const from = b.keep.taskDetail;
+  if (from === level || from === "none") return undefined;
+  const before = taskDetailRows(b);
+  b.keep.taskDetail = level;
+  const after = taskDetailRows(b);
+  b.keep.taskDetail = from;
+  if (after >= before) return undefined;
+  return change(() => (b.keep.taskDetail = level), () => (b.keep.taskDetail = from), () => b.keep.taskDetail === level);
+}
+/** In focus: each task and the line under it back on one row, cut with …, when one of them takes more. Its rows come back only to a list that is not cut short. */
 function taskUnwrap(b: Block): Change | undefined {
-  if (!b.keep.taskWrap || !taskListOf(b).shown.some((t) => taskLines(t, b.taskRoom, true).length > 1)) return undefined;
+  if (!b.keep.taskWrap || !taskListOf(b).shown.some((t) => taskLines(t, b.taskRoom, true).length > 1 || (taskDetailOf(b, t)?.lines.length ?? 0) > 1)) return undefined;
   return change(() => (b.keep.taskWrap = false), () => (b.keep.taskWrap = true), () => !b.keep.taskWrap && b.keep.taskList === Infinity);
 }
 
@@ -3454,6 +3622,8 @@ const LADDER: { step: number; cut: "gaps" | ((b: Block) => Change | undefined) }
   { step: 0, cut: (b) => (b.focus ? earlierTo(b, 2) : undefined) },
   { step: 0, cut: (b) => (b.focus ? taskUnwrap(b) : undefined) }, // each task on one row
   { step: 0, cut: (b) => (b.focus ? taskScopeTo(b, "open") : undefined) }, // the done tasks leave the list; the strip still counts them
+  { step: 0.5, cut: (b) => taskDetailTo(b, "doing") }, // the lines under tasks still to start: what each is for
+  { step: 0.7, cut: (b) => taskDetailTo(b, "none") }, // the latest message under each task in progress
   { step: 1, cut: (b) => earlierTo(b, 1) }, // earlier replies shrink to one line each
   { step: 2, cut: (b) => earlierTo(b, 0) }, // …and are removed, oldest first
   { step: 2.5, cut: (b) => taskListTo(b, 5) }, // the task list is cut to 5 rows, the last "… n more tasks"

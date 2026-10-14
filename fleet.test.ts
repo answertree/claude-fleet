@@ -2940,7 +2940,7 @@ describe("the detail view", () => {
   function tasksOf(spec: string, subjects: string[] = []): F.Session["tasks"] {
     const items = [...spec].map((c, i): F.TaskItem => {
       const subject = subjects.length ? subjects[i % subjects.length] : `Task ${i + 1}`;
-      return { id: String(i + 1), subject, activeForm: c === "r" ? `Working on ${subject}` : "", status: c === "d" ? "completed" : c === "r" ? "in_progress" : "pending", blocked: c === "b" };
+      return { id: String(i + 1), subject, activeForm: c === "r" ? `Working on ${subject}` : "", status: c === "d" ? "completed" : c === "r" ? "in_progress" : "pending", blocked: c === "b", description: "" };
     });
     const current = items.find((t) => t.status === "in_progress");
     return { done: items.filter((t) => t.status === "completed").length, doing: items.filter((t) => t.status === "in_progress").length, total: items.length, active: current ? current.activeForm || current.subject : "", items };
@@ -3004,6 +3004,69 @@ describe("the detail view", () => {
         expect(list).toEqual([" ▌    ◐ " + "B".repeat(g.measure - 3) + "…", " ▌    ○ " + "A".repeat(g.measure - 13) + "… · blocked"].map((r) => r.slice(0, 104)));
         expect(F.width(list[0])).toBe(g.text + g.measure - 1); // the last cell of the conversation's measure
       }
+    });
+  });
+
+  // ── the line under each task ──
+
+  /** The busy session with four tasks: two in progress (one whose latest message is a reply already shown above), two still to start. */
+  function detailed(now = NOW): F.Session {
+    const s = withTasks(busy(now), tasksOf("rrpp", ["Alpha", "Bravo", "Charlie", "Delta"]));
+    const [a, b, c, d] = s.tasks!.items;
+    Object.assign(a, { since: now - 19 * MIN, description: "What alpha is for", say: { text: "Alpha is half done.\nThe rest needs a fake clock.", t: now - 12 * MIN } });
+    Object.assign(b, { since: now - 9 * MIN, description: "What bravo is for", say: { text: "a reply shown above", t: s.mains[0].say!.t } });
+    Object.assign(c, { description: "What charlie is for" });
+    Object.assign(d, { description: "" });
+    return s;
+  }
+
+  test("under each listed task, while there is room: the latest message about it (◇ and its age) unless that is a reply already shown, else what it is for; a task in progress says how long it has run", () => {
+    quietly(() => {
+      const rows = draw([detailed()], 150, 60).map((r) => r.slice(0, 104).trimEnd());
+      const at = rows.findIndex((r) => r.includes("Working on Alpha"));
+      const shape = rows.slice(at, at + 7).map((r) => r.replace(/ {2,}(\S+)$/, " … $1"));
+      expect(shape).toEqual([
+        " ▌    ◐ Working on Alpha … 19m",
+        " ▌      ◇ Alpha is half done. … 12m",
+        " ▌    ◐ Working on Bravo … 9m",
+        " ▌        What bravo is for",
+        " ▌    ○ Charlie",
+        " ▌        What charlie is for",
+        " ▌    ○ Delta",
+      ]);
+      // Ages end where the conversation's ages end; the ◇ hangs at column 9 and every line under a task starts at column 11.
+      expect([rows[at].length, rows[at + 1].length]).toEqual([104, 104]);
+      expect([[...rows[at + 1]].indexOf("◇"), rows[at + 1].indexOf("Alpha"), rows[at + 3].indexOf("What")]).toEqual([8, 10, 10]);
+    });
+  });
+
+  test("the lines under the tasks are the first thing to go: what the tasks still to start are for, then the lines under tasks in progress, before any reply or prompt is touched", () => {
+    quietly(() => {
+      const keepAt = (avail: number) => plan([detailed()], 150, avail).blocks[0].keep;
+      const full = keepAt(200);
+      expect(full.taskDetail).toBe("all");
+      let h = 200;
+      while (keepAt(h).taskDetail === "all") h--;
+      const first = keepAt(h);
+      expect([first.taskDetail, first.earlier, first.reply, first.prompt, first.taskList]).toEqual(["doing", full.earlier, full.reply, full.prompt, full.taskList]);
+      while (keepAt(h).taskDetail === "doing") h--;
+      const second = keepAt(h);
+      expect([second.taskDetail, second.earlier, second.reply, second.prompt, second.taskList]).toEqual(["none", full.earlier, full.reply, full.prompt, full.taskList]);
+      expect(second.taskScope).toBe(full.taskScope); // the list itself is untouched: only the lines under its tasks went
+    });
+  });
+
+  test("in focus a done task shows its last message too, and a long one takes up to three rows, cut with …", () => {
+    quietly(() => {
+      const s = withTasks(busy(NOW), tasksOf("drp", ["Alpha", "Bravo", "Charlie"]));
+      s.tasks!.items[0].say = { text: "Alpha finished: " + "word ".repeat(80), t: NOW - 20 * MIN };
+      const rows = draw([s], 150, 90, NOW, true).map((r) => r.slice(0, 104).trimEnd());
+      const at = rows.findIndex((r) => /^ ▌    ✓ Alpha/.test(r));
+      expect(at).toBeGreaterThan(0);
+      expect(rows[at + 1]).toMatch(/^ ▌      ◇ Alpha finished: word word/);
+      expect(rows[at + 2]).toMatch(/^ ▌        word word/);
+      expect(rows[at + 3]).toMatch(/^ ▌        word .*…$/);
+      expect(rows[at + 4]).toMatch(/^ ▌    ◐ Working on Bravo/);
     });
   });
 
@@ -3206,6 +3269,7 @@ describe("the detail view", () => {
           const k = plan([make()], 150, avail).blocks[0].keep;
           const list = taskRowsOf(draw([make()], 150, avail)).list;
           const now: Record<string, boolean> = {
+            "task lines": k.taskDetail === "none",
             "earlier replies": k.earlier.every((n) => n === 0),
             "finished line": !k.done,
             "reply to 4": k.reply <= 4,
@@ -3232,11 +3296,14 @@ describe("the detail view", () => {
       const before = (at: Record<string, number>, first: string, then: string) => expect([first, then, at[first] > at[then]]).toEqual([first, then, true]);
       /** With a finished agent, so the finished-agents line is there to give up. */
       const finished = (s: F.Session) => ((s.agents = [agentOf("x1", tailOf(calls(6, NOW - 9 * MIN, 31)), { label: "List the flaky tests", done: true })]), s);
-      const busyAt = firstCut(() => finished(withTasks(busy(NOW), manyTasks())));
+      /** Each task says what it is for, so the lines under the tasks are there to give up. */
+      const described = (tasks: F.Session["tasks"]) => (tasks!.items.forEach((t) => (t.description = `What ${t.subject} is for`)), tasks);
+      const busyAt = firstCut(() => finished(withTasks(busy(NOW), described(manyTasks()))));
       // The list's own four steps, in order, each one firing on some screen…
       for (const [a, b] of [["list to 5", "list to 3"], ["list to 3", "list in progress only"], ["list in progress only", "no list"], ["no list", "no tasks row"]]) before(busyAt, a, b);
       // …and the order the README gives, which is the order the ladder takes them in.
       const ORDER: [phrase: string, cut: string][] = [
+        ["the lines under each task", "task lines"],
         ["earlier replies", "earlier replies"],
         ["each task list down to five rows", "list to 5"],
         ["the finished-agents line", "finished line"],
@@ -3331,6 +3398,63 @@ describe("the detail view", () => {
   });
 });
 
+describe("what the transcript says about each task", () => {
+  const update = (at: number, input: object, sidechain = false) => JSON.stringify({ ...toolCall(at, "TaskUpdate", input), ...(sidechain ? { isSidechain: true } : {}) });
+
+  test("the task started last is the one in hand, and each message is put against it", () => {
+    const t = F.newTail("/nowhere/tasks.jsonl");
+    for (const line of [
+      update(NOW - 30 * MIN, { taskId: "1", status: "in_progress" }),
+      JSON.stringify(reply(NOW - 28 * MIN, "One is under way.")),
+      update(NOW - 25 * MIN, { taskId: 2, status: "in_progress" }), // a number for an id
+      JSON.stringify(reply(NOW - 20 * MIN, "Two is under way.")),
+      update(NOW - 18 * MIN, { taskId: "1", description: "a new description" }), // no status: nothing changes
+      update(NOW - 17 * MIN, { taskId: "9", status: "in_progress" }, true), // a subagent's own update: not this session's
+      update(NOW - 15 * MIN, { task_id: "2", status: "completed" }),
+      JSON.stringify(reply(NOW - 10 * MIN, "Back on one.")),
+      update(NOW - 5 * MIN, { taskId: "1", status: "completed" }),
+      JSON.stringify(reply(NOW - 2 * MIN, "All done.")), // nothing in hand: it belongs to no task
+    ])
+      F.ingest(t, line);
+    expect(t.taskLog.get("1")).toEqual({ started: NOW - 30 * MIN, finished: NOW - 5 * MIN, say: { text: "Back on one.", t: NOW - 10 * MIN } });
+    expect(t.taskLog.get("2")).toEqual({ started: NOW - 25 * MIN, finished: NOW - 15 * MIN, say: { text: "Two is under way.", t: NOW - 20 * MIN } });
+    expect([t.taskLog.has("9"), t.taskFocus]).toEqual([false, []]);
+  });
+
+  test("updates written before the tailed part are found by a byte search, across a chunk's edge and the tail's first partial line, and none after it", () => {
+    const file = path.join(SCRATCH, "task-updates.jsonl");
+    const lines: string[] = [];
+    let size = 0;
+    const add = (o: object) => {
+      const l = JSON.stringify(o);
+      lines.push(l);
+      size += Buffer.byteLength(l) + 1;
+    };
+    const pad = (n: number) => ({ type: "user", timestamp: iso(NOW - 40 * MIN), message: { content: "x".repeat(Math.max(0, n)) } });
+    const PAD0 = Buffer.byteLength(JSON.stringify(pad(0))) + 1;
+    const started = (at: number, id: string) => toolCall(at, "TaskUpdate", { taskId: id, status: "in_progress" });
+    add(started(NOW - 50 * MIN, "1"));
+    const EDGE = 4 << 20; // the search reads the file in chunks of this size
+    while (size + 2000 < EDGE) add(pad(1500));
+    add(pad(EDGE - 40 - size - PAD0)); // the next line starts 40 bytes before the chunk's edge
+    expect(size).toBe(EDGE - 40);
+    add(started(NOW - 45 * MIN, "2"));
+    add(reply(NOW - 44.8 * MIN, "Two is under way.")); // before the tail: still put against the task in hand
+    add({ ...reply(NOW - 44.7 * MIN, "a subagent talking"), isSidechain: true }); // not this session's
+    add({ type: "user", timestamp: iso(NOW - 44.6 * MIN), message: { content: [{ type: "tool_result", content: [{ type: "text", text: "a tool's output" }] }] } }); // not a message from Claude
+    for (let i = 0; i < 50; i++) add(pad(1500));
+    const third = size;
+    add(started(NOW - 44 * MIN, "3")); // starts before the tail and runs into it: the search's, as the tail drops its partial first line
+    add(started(NOW - 43 * MIN, "4")); // wholly in the tail: the tail's
+    fs.writeFileSync(file, lines.join("\n") + "\n");
+    const upTo = third + 20;
+    const t = F.newTail(file, upTo);
+    F.scanTaskUpdates(t, upTo);
+    expect([[...t.taskLog.keys()], t.taskFocus]).toEqual([["1", "2", "3"], ["1", "2", "3"]]);
+    expect([t.taskLog.get("1")!.say, t.taskLog.get("2")!.say]).toEqual([undefined, { text: "Two is under way.", t: NOW - 44.8 * MIN }]);
+  });
+});
+
 describe("the task list, as scan() reads it", () => {
   const home = path.join(SCRATCH, "task-list");
   const sid = "tasks000-0000-4000-8000-000000000001";
@@ -3373,6 +3497,25 @@ describe("the task list, as scan() reads it", () => {
     expect(s.tasks!.items[1].activeForm).toBe("Finding the cause");
     // The counts are as before: the deleted task is not one of them, and the current task is the first in progress in task order.
     expect([s.tasks!.done, s.tasks!.doing, s.tasks!.total, s.tasks!.active]).toEqual([1, 2, 9, "Finding the cause"]);
+  });
+
+  test("each task carries what it is for, since when it has been in progress, and the latest message written while it was in hand", () => {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.mkdirSync(path.join(home, "sessions"), { recursive: true });
+    fs.writeFileSync(path.join(home, "sessions", "1.json"), JSON.stringify({ pid: process.pid, sessionId: sid, name: "tasks", kind: "bg", status: "busy", cwd: "/work/shop", startedAt: NOW - 40 * MIN }));
+    fs.mkdirSync(path.join(home, "projects", "-tasks"), { recursive: true });
+    const update = (at: number, id: string, status: string) => toolCall(at, "TaskUpdate", { taskId: id, status });
+    const lines = [prompt(NOW - 32 * MIN, "fix it"), update(NOW - 30 * MIN, "1", "in_progress"), reply(NOW - 20 * MIN, "Alpha under way."), update(NOW - 15 * MIN, "1", "completed"), update(NOW - 14 * MIN, "2", "in_progress"), reply(NOW - 10 * MIN, "Bravo under way.")];
+    fs.writeFileSync(path.join(home, "projects", "-tasks", sid + ".jsonl"), lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+    task("1.json", { id: "1", subject: "Alpha", status: "completed", description: "What alpha is for" });
+    task("2.json", { id: "2", subject: "Bravo", status: "in_progress", description: "What bravo\nis for" });
+    task("3.json", { id: "3", subject: "Charlie", status: "pending" });
+    const s = F.scan(NOW).find((x) => x.sid === sid)!;
+    expect(s.tasks!.items.map((t) => [t.id, t.description, t.since, t.say?.text, t.say?.t])).toEqual([
+      ["1", "What alpha is for", undefined, "Alpha under way.", NOW - 20 * MIN],
+      ["2", "What bravo is for", NOW - 14 * MIN, "Bravo under way.", NOW - 10 * MIN],
+      ["3", "", undefined, undefined, undefined],
+    ]);
   });
 
   test("a file that is not a JSON object is not a task; a task with no text is listed by its id; a long subject is kept only as long as focus can show", () => {
