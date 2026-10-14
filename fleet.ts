@@ -139,15 +139,24 @@ export function charWidth(cp: number): number {
   if (cp < 0x300) return cp === 0xad ? 0 : 1;
   if (
     (cp >= 0x1100 && cp <= 0x115f) ||
+    (cp >= 0x2630 && cp <= 0x2637) || // Yijing trigrams and digrams: wide since Unicode 16
+    (cp >= 0x268a && cp <= 0x268f) ||
     (cp >= 0x2e80 && cp <= 0xa4cf) ||
+    (cp >= 0xa960 && cp <= 0xa97f) || // more Hangul lead consonants
     (cp >= 0xac00 && cp <= 0xd7a3) ||
     (cp >= 0xf900 && cp <= 0xfaff) ||
+    (cp >= 0xfe10 && cp <= 0xfe19) || // vertical punctuation
     (cp >= 0xfe30 && cp <= 0xfe6f) ||
     (cp >= 0xff00 && cp <= 0xff60) ||
+    (cp >= 0xffe0 && cp <= 0xffe6) || // full-width ￠ ￡ ￢ ￣ ￤ ￥ ￦
+    (cp >= 0x16fe0 && cp <= 0x18dff) || // Tangut and Khitan
+    (cp >= 0x1aff0 && cp <= 0x1b2ff) || // more kana, Nushu
+    (cp >= 0x1d300 && cp <= 0x1d37f) || // Tai Xuan Jing, counting rods
     (cp >= 0x1f300 && cp <= 0x1faff) ||
     (cp >= 0x20000 && cp <= 0x3fffd)
   )
     return 2;
+  if ((cp >= 0x1160 && cp <= 0x11ff) || (cp >= 0xd7b0 && cp <= 0xd7ff)) return 0; // Hangul vowels and tails join the letter before them
   if (cp >= 0x2190 && cp <= 0x2bff) return 1; // arrows, box drawing, blocks, shapes, braille: what the screen is built from
   return ZERO_WIDTH.test(String.fromCodePoint(cp)) ? 0 : 1;
 }
@@ -186,7 +195,7 @@ const SAFE_SWAP: Record<string, string> = {
  * names) to glyphs that are exactly one cell wide everywhere, so nothing it contains can push a column
  * out of line. Ticks and crosses become ✓ and ✗; other emoji, variation selectors, joiners, combining
  * marks, control characters and terminal escape sequences are removed; tabs become two spaces;
- * full-width Latin becomes plain Latin; any other double-width character becomes "?". Line breaks stay.
+ * full-width Latin and money signs become plain ones; any other double-width character becomes "?". Line breaks stay.
  * Afterwards every character other than a line break is one cell: width(s) equals its character count.
  */
 export function safeText(s: string): string {
@@ -207,7 +216,8 @@ export function safeText(s: string): string {
     else if (cp < 0x300) out += cp === 0xa0 ? " " : cp === 0xad ? "" : ch;
     else if ((cp >= 0x2000 && cp <= 0x200a) || cp === 0x202f || cp === 0x205f || cp === 0x3000) out += " ";
     else if (cp >= 0xff01 && cp <= 0xff5e) out += String.fromCodePoint(cp - 0xfee0);
-    else if (hasEmojiForm(cp) || ZERO_WIDTH.test(ch)) continue;
+    else if (cp >= 0xffe0 && cp <= 0xffe6) out += "¢£¬¯¦¥₩"[cp - 0xffe0];
+    else if (hasEmojiForm(cp) || charWidth(cp) === 0) continue;
     else if (charWidth(cp) !== 1) out += "?";
     else out += ch;
   }
@@ -317,8 +327,9 @@ export function stacked(segments: { tokens: number; color: RGB }[], max: number,
   return out;
 }
 
-/** Word-wrap plain text to `w` display columns. */
+/** Word-wrap plain text to `w` display columns. A width under one is taken as one, and a character wider than `w` gets a line to itself, so this always returns. */
 export function wrap(text: string, w: number): string[] {
+  w = Math.max(1, w);
   const lines: string[] = [];
   let cur = "";
   for (let word of text.split(" ")) {
@@ -326,7 +337,7 @@ export function wrap(text: string, w: number): string[] {
       if (cur) lines.push(cur), (cur = "");
       let head = "";
       for (const ch of word) {
-        if (width(head + ch) > w) break;
+        if (head && width(head + ch) > w) break;
         head += ch;
       }
       lines.push(head);
@@ -1211,6 +1222,9 @@ export const machine = {
   prev: [] as { idle: number; total: number }[],
 };
 
+/** A process's name as the screen may show it: the program's file name, made safe like any other text that did not come from here (a program can call itself anything, escape sequences included). */
+export const procName = (comm: string): string => safeLine(path.basename(comm.trim()));
+
 export function sampleMachine() {
   const fx = fixtureMachine();
   if (fx) {
@@ -1220,7 +1234,7 @@ export function sampleMachine() {
     machine.load = fx.load ?? 0;
     machine.memTotal = fx.memTotal ?? machine.memTotal;
     machine.memUsed = fx.memUsed ?? 0;
-    machine.procs = (fx.procs ?? []).map((p: any) => ({ pid: +p.pid, ppid: +(p.ppid ?? 1), cpu: +(p.cpu ?? 0), rss: +(p.rss ?? 0), name: String(p.name ?? "") }));
+    machine.procs = (fx.procs ?? []).map((p: any) => ({ pid: +p.pid, ppid: +(p.ppid ?? 1), cpu: +(p.cpu ?? 0), rss: +(p.rss ?? 0), name: procName(String(p.name ?? "")) }));
     machine.kids = new Map();
     for (const p of machine.procs) machine.kids.set(p.ppid, [...(machine.kids.get(p.ppid) ?? []), p]);
     return;
@@ -1264,7 +1278,7 @@ export function sampleMachine() {
     for (const line of ps.split("\n")) {
       const m = /^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+(.*)$/.exec(line);
       if (!m) continue;
-      const proc = { pid: +m[1], ppid: +m[2], cpu: +m[3], rss: +m[4], name: path.basename(m[5].trim()) };
+      const proc = { pid: +m[1], ppid: +m[2], cpu: +m[3], rss: +m[4], name: procName(m[5]) };
       procs.push(proc);
       if (!kids.has(proc.ppid)) kids.set(proc.ppid, []);
       kids.get(proc.ppid)!.push(proc);

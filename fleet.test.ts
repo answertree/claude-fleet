@@ -1339,3 +1339,132 @@ describe("the tests never look at the real home", () => {
     expect(homeIsScratch()).toBe(true);
   });
 });
+
+describe("safe text holds against anything", () => {
+  // Text that tries everything: colour and title escape sequences, a bell, a backspace, a NUL, C1 controls,
+  // emoji joined and flagged, CJK, full-width Latin and money signs, combining marks, a right-to-left
+  // override, zero-width and line-separator characters, lone Hangul vowels, and one very long word.
+  const EVIL = "\x1b[31mRED\x1b[0m\x1b]2;pwned\x07 \x07\x08\r\x00 \t👨‍👩‍👧‍👦✅❌⚠️🇬🇧1️⃣ 日本語テキスト ＡＢＣ￥１００ é́ ‮gnp.exe ​  한국어 가 ☰ ︐ \x9b31m " + "W".repeat(400);
+  /** Cells as the runtime counts them, which is not fleet's own table: charWidth() must not mark its own homework. */
+  const drawn = (s: string) => Bun.stringWidth(s);
+
+  test("nothing survives as a double-width character, whatever the codepoint", () => {
+    const wide: string[] = [];
+    for (let cp = 0x20; cp <= 0x3ffff; cp++) {
+      if (cp >= 0xd800 && cp <= 0xdfff) continue;
+      const s = F.safeText(String.fromCodePoint(cp));
+      if (drawn(s) > [...s].length) wide.push("U+" + cp.toString(16).toUpperCase());
+    }
+    expect([wide.length, ...wide.slice(0, 8)]).toEqual([0]);
+  });
+
+  test("full-width money signs become ordinary ones, other wide characters become ?, and a lone Hangul vowel (which fills no cell) goes", () => {
+    expect(F.safeText("￥１００ ￡５ ￠ ￢ ￣ ￤ ￦")).toBe("¥100 £5 ¢ ¬ ¯ ¦ ₩");
+    expect(F.safeText("☰ ︐ ꥠ 𗀀 𛀀")).toBe("? ? ? ? ?");
+    expect(F.safeText("aᅡbᆨcힰd")).toBe("abcd");
+    for (const ch of ["￥", "︐", "ꥠ", "𗀀", "𛀀"]) expect(F.width(ch)).toBe(2); // fleet's own table agrees they are wide
+    const safe = F.safeLine(EVIL);
+    expect(drawn(safe)).toBe([...safe].length);
+    expect(safe).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
+  });
+
+  test("a process's name is made safe like any other text that comes from outside", () => {
+    expect(F.procName("/Applications/Some App.app/Contents/MacOS/Some App")).toBe("Some App");
+    expect(F.procName(" bun ")).toBe("bun");
+    const name = F.procName("/opt/\x1b[41m日本語アプリ🙂\x1b]2;pwned\x07\x07");
+    expect(name).toBe("??????"); // six wide characters; the picture and both escape sequences are gone
+    expect(F.procName("ｔｓｃ￥\t✅")).toBe("tsc¥ ✓");
+  });
+
+  test("wrap and fit always return, and never give a line wider than asked, even for a width of nothing", () => {
+    const text = F.safeLine(EVIL);
+    for (const w of [1, 2, 7, 37, 96]) {
+      const lines = F.wrap(text, w);
+      expect(lines.join("").replace(/ /g, "")).toBe(text.replace(/ /g, "")); // nothing lost, nothing added
+      expect(Math.max(...lines.map(drawn))).toBeLessThanOrEqual(w);
+      expect(drawn(F.fit(text, w))).toBe(w);
+    }
+    // A width of zero or less used to loop for ever; so did a character wider than the width.
+    expect(F.wrap("hello world", 0)).toEqual(["h", "e", "l", "l", "o", "w", "o", "r", "l", "d"]);
+    expect(F.wrap("hello", -3).length).toBe(5);
+    expect(F.wrap("日本", 1)).toEqual(["日", "本"]);
+    expect(F.messageLines("- one\n- two", 0).length).toBeGreaterThan(0);
+    expect(F.fit(text, 0)).toBe("");
+  });
+
+  /** Sessions on disk whose every piece of text is hostile, read back through scan() as a real home would be. */
+  function hostileHome(): F.Session[] {
+    if (!homeIsScratch()) throw new Error("fleet.ts is not looking at the throwaway home: refusing to scan");
+    const home = process.env.FLEET_HOME!;
+    const put = (file: string, data: string, t = NOW - 20_000) => {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, data);
+      fs.utimesSync(file, new Date(t), new Date(t));
+    };
+    const lines = (rows: object[]) => rows.map((r) => JSON.stringify(r)).join("\n") + "\n";
+    fs.rmSync(path.join(home, "sessions"), { recursive: true, force: true });
+    fs.rmSync(path.join(home, "projects"), { recursive: true, force: true });
+    const talk = (extra: object[] = []) => [
+      { type: "ai-title", aiTitle: EVIL },
+      { ...prompt(NOW - 29 * MIN, EVIL), gitBranch: EVIL },
+      ...callTimes(40, NOW - MIN).map((t) => toolCall(t, EVIL, { description: EVIL })),
+      { type: "system", subtype: "away_summary", timestamp: iso(NOW - 3 * MIN), content: EVIL },
+      reply(NOW - 2 * MIN, `# ${EVIL}\n\n- ${EVIL}\n- **bold** and \`code\`\n\n| a | b |\n|---|---|\n| ${EVIL} | 2 |\n\n${EVIL}`, 611_000),
+      ...extra,
+    ];
+    [
+      { n: 1, sid: "aaaaaaaa-evil", status: "idle", job: { state: "blocked", detail: EVIL, needs: EVIL }, rows: talk() },
+      { n: 2, sid: "bbbbbbbb-evil", status: "busy", job: undefined, rows: talk([toolCall(NOW - 30_000, "AskUserQuestion", { questions: [{ question: EVIL }] })]) },
+      { n: 3, sid: "cccccccc-evil", status: "busy", job: { state: "working", detail: EVIL, needs: "" }, rows: talk() },
+      { n: 4, sid: "dddddddd-evil", status: "idle", job: undefined, rows: talk() }, // your turn: kept off the screen without --all
+    ].forEach(({ n, sid, status, job, rows }) => {
+      put(path.join(home, "sessions", `${n}.json`), JSON.stringify({ pid: process.pid, sessionId: sid, name: EVIL, kind: EVIL, status, cwd: `/work/${EVIL}/shop`, jobId: job ? `evil${n}` : undefined, startedAt: NOW - 64 * MIN }));
+      if (job) put(path.join(home, "jobs", `evil${n}`, "state.json"), JSON.stringify(job));
+      const dir = path.join(home, "projects", "-evil", sid);
+      put(dir + ".jsonl", lines(rows));
+      put(path.join(home, "tasks", sid, "1.json"), JSON.stringify({ id: "1", subject: EVIL, activeForm: EVIL, status: "in_progress" }));
+      put(path.join(home, "tasks", sid, "2.json"), JSON.stringify({ id: "2", subject: EVIL, status: "pending" }));
+      for (const id of ["s1", "s2"]) {
+        put(path.join(dir, "subagents", `agent-${id}.jsonl`), lines(callTimes(12, NOW - 30_000).map((t) => toolCall(t, EVIL, { description: EVIL }))));
+        put(path.join(dir, "subagents", `agent-${id}.meta.json`), JSON.stringify({ agentType: EVIL, model: EVIL, description: EVIL }));
+      }
+      const wf = path.join(dir, "subagents", "workflows", "wf_evil");
+      put(path.join(dir, "workflows", "scripts", "bisect-wf_evil.js"), "");
+      put(path.join(wf, "journal.jsonl"), lines([{ type: "launched" }, ...["w1", "w2"].map((id) => ({ type: "started", agentId: id, label: EVIL, phase: `${id} ${EVIL}` }))]));
+      for (const id of ["w1", "w2"]) {
+        put(path.join(wf, `agent-${id}.jsonl`), lines(callTimes(9, NOW - 30_000).map((t) => toolCall(t, EVIL, { file_path: `/x/${EVIL}` }))));
+        put(path.join(wf, `agent-${id}.meta.json`), JSON.stringify({ agentType: "workflow-subagent", model: EVIL, workflowPhase: EVIL }));
+      }
+    });
+    return F.scan(NOW);
+  }
+
+  test("whatever the sessions, tasks, workflows and processes say, every frame keeps its size and no control character reaches the terminal", () => {
+    const sessions = hostileHome();
+    expect(sessions.length).toBe(4);
+    expect(sessions.every((s) => s.agents.length === 2 && s.workflows.length === 1 && s.workflows[0].agents.length === 2 && s.tasks?.total === 2)).toBe(true);
+    const saved = { opt: { ...F.opt }, procs: F.machine.procs, cores: F.machine.cores };
+    F.machine.procs = [{ pid: 1, ppid: 0, cpu: 212, rss: 1, name: F.procName("/opt/" + EVIL) }, { pid: 2, ppid: 0, cpu: 88, rss: 1, name: F.procName("ｔｓｃ￥") }];
+    F.machine.cores = [50, 60, 70, 80];
+    const problems: string[] = [];
+    try {
+      for (const showAll of [false, true])
+        for (const [cols, rows] of [[80, 24], [100, 30], [110, 44], [130, 40], [150, 34], [150, 44], [200, 60]])
+          for (const mode of ["detail", "compact", "far"] as F.Mode[]) {
+            Object.assign(F.opt, { mode, showAll, usage: false });
+            const frame = F.render(sessions, cols, rows, NOW);
+            const where = `${mode} ${cols}x${rows}${showAll ? " --all" : ""}`;
+            if (frame.length !== rows) problems.push(`${where}: ${frame.length} rows`);
+            frame.map(strip).forEach((line, i) => {
+              if (drawn(line) > cols) problems.push(`${where}: row ${i + 1} is ${drawn(line)} cells`);
+              if (/[\x00-\x1f\x7f-\x9f]/.test(line)) problems.push(`${where}: row ${i + 1} has a control character`);
+              if (/undefined|NaN/.test(line)) problems.push(`${where}: row ${i + 1} shows undefined or NaN`);
+            });
+          }
+    } finally {
+      Object.assign(F.opt, saved.opt);
+      Object.assign(F.machine, { procs: saved.procs, cores: saved.cores });
+    }
+    expect(problems).toEqual([]);
+  });
+});
