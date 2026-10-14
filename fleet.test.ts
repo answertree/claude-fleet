@@ -475,6 +475,75 @@ describe("session state and subheading", () => {
     expect(F.firstLine("```ts\ncode\n```\n\n- **first** `point`\n- second")).toBe("code");
     expect(F.firstLine("\n\n- **first** `point`\n- second")).toBe("first point");
   });
+
+  test("an idle session with no reply and no now-line falls back to its last prompt, in far mode as in detail", () => {
+    const quiet = sessionOf({ sid: "scratch", status: "idle", mains: [main([prompt(NOW - 29 * MIN, "what does the totals helper round to?")])] });
+    expect(F.subheading(quiet, F.factsOf(quiet), "idle")).toEqual({ source: "prompt", text: "what does the totals helper round to?", t: NOW - 29 * MIN });
+    const saved = { ...F.opt };
+    try {
+      Object.assign(F.opt, { mode: "far", showAll: true, usage: false });
+      const frame = F.render([quiet], 150, 30, NOW).map(strip);
+      expect(frame.some((l) => l.includes("▸ what does the totals helper round to?"))).toBe(true);
+    } finally {
+      Object.assign(F.opt, saved);
+    }
+  });
+});
+
+describe("head rows keep what was written", () => {
+  // The question, the now-line, your prompt and the reply's first line: marks in pairs (code, bold, links) may go, but no character is deleted on its own.
+  const QUESTION = "Is a retry count > 3 OK for issue #412, i.e. timeout = 2 * base and map a -> b with x >= 5? Use C# or `ls *.ts`?";
+  test("the question and the now-line lose only paired marks", () => {
+    const s = sessionOf({ sid: "x", status: "idle", job: { state: "blocked", detail: "waiting: coverage >= 80% on PR #1184", needs: QUESTION } });
+    const f = F.factsOf(s);
+    expect(f.needs).toBe("Is a retry count > 3 OK for issue #412, i.e. timeout = 2 * base and map a -> b with x >= 5? Use C# or ls *.ts?");
+    expect(f.now).toBe("waiting: coverage >= 80% on PR #1184");
+    const names = sessionOf({ sid: "y", status: "idle", job: { state: "blocked", detail: "", needs: "Delete __init__.py and _private_cache_?\n- **yes**: now\n- no" } });
+    expect(F.factsOf(names).needs).toBe("Delete __init__.py and _private_cache_? • yes: now • no");
+    // On the screen, in every mode.
+    const saved = { ...F.opt };
+    try {
+      for (const mode of ["detail", "compact", "far"] as F.Mode[]) {
+        Object.assign(F.opt, { mode, usage: false });
+        const frame = F.render([s], 150, 30, NOW).map(strip).join("\n");
+        expect([mode, frame.includes("retry count > 3 OK for issue #412")]).toEqual([mode, true]);
+      }
+    } finally {
+      Object.assign(F.opt, saved);
+    }
+  });
+
+  test("your prompt is shown as you typed it", () => {
+    const typed = "fix issue #412: retries > 3 hang, see src/**/*.test.ts and `__init__`";
+    const s = sessionOf({ sid: "x", mains: [tailOf([prompt(NOW - 29 * MIN, typed)])] });
+    expect(F.subheading(s, F.factsOf(s), "working")).toEqual({ source: "prompt", text: typed, t: NOW - 29 * MIN });
+  });
+
+  test("a reply's first line: links as their text, a table as its cells, literal marks kept", () => {
+    expect(F.firstLine("See [the plan](https://example.com/plan), then PR #1184 -> main")).toBe("See the plan, then PR #1184 -> main");
+    expect(F.firstLine("| a | b |\n|---|---|\n| 1 | 2 |")).toBe("a · b");
+    expect(F.firstLine("Use `x >= 5` and **not** x > 5")).toBe("Use x >= 5 and not x > 5");
+  });
+
+  test("a prompt of one long unbroken token costs a frame no more than an ordinary one", () => {
+    const blob = "eyJ" + "QUJDRA".repeat(46_000); // 276k characters of base64, no spaces
+    const t = tailOf([prompt(NOW - 5 * MIN, blob), toolCall(NOW - MIN)]);
+    expect(t.ask!.text.length).toBeLessThan(5000); // only what can be drawn is kept
+    const s = sessionOf({ sid: "blob", job: { state: "working", detail: "copying", needs: "" }, mains: [t] });
+    const saved = { ...F.opt };
+    try {
+      Object.assign(F.opt, { mode: "detail", usage: false });
+      const start = performance.now();
+      for (let i = 0; i < 5; i++) F.render([s], 150, 44, NOW);
+      expect(performance.now() - start).toBeLessThan(500);
+    } finally {
+      Object.assign(F.opt, saved);
+    }
+    const word = "x".repeat(290_000);
+    const start = performance.now();
+    expect(F.wrap(word, 92).length).toBe(Math.ceil(290_000 / 92));
+    expect(performance.now() - start).toBeLessThan(300); // it was quadratic: 1.6 s
+  });
 });
 
 describe("workflow phase trail", () => {

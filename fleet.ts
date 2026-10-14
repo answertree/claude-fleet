@@ -229,6 +229,15 @@ export function safeText(s: string): string {
 }
 /** Session text as one safe line: safeText(), then every run of white space becomes one space. */
 export const safeLine = (s: unknown): string => safeText(String(s ?? "")).replace(/\s+/g, " ").trim();
+/** Text as one line: every run of white space becomes one space. Nothing else is touched. */
+export const oneLine = (s: string): string => s.replace(/\s+/g, " ").trim();
+/**
+ * At most `n` UTF-16 units of `s`, never half a character, with … when something was left off. Text read
+ * from a session is kept only as long as the screen can ever show, so nothing drawn each second grows with it.
+ */
+export const capText = (s: string, n: number): string => (s.length <= n ? s : s.slice(0, n).replace(/[\ud800-\udbff]$/, "") + "…");
+const PROMPT_KEEP = 2_000; // your prompt is drawn on two rows at most
+const NOTE_KEEP = 8_000; // a question, a now-line or a tool's hint: the whole question can be read in focus
 
 /** Truncate or pad plain text to exactly `w` display columns. */
 export function fit(s: string, w: number, align: "l" | "r" = "l", keepSpacing = false): string {
@@ -331,20 +340,26 @@ export function wrap(text: string, w: number): string[] {
   w = Math.max(1, w);
   const lines: string[] = [];
   let cur = "";
-  for (let word of text.split(" ")) {
-    while (width(word) > w) {
-      if (cur) lines.push(cur), (cur = "");
-      let head = "";
+  let curW = 0;
+  for (const word of text.split(" ")) {
+    let rest = word;
+    let restW = width(word);
+    if (restW > w) {
+      // A word longer than the line is broken into whole lines of it, walked once; what is left carries on as a word.
+      if (cur) lines.push(cur), (cur = ""), (curW = 0);
+      let piece = "";
+      let pieceW = 0;
       for (const ch of word) {
-        if (head && width(head + ch) > w) break;
-        head += ch;
+        const cw = charWidth(ch.codePointAt(0)!);
+        if (piece && pieceW + cw > w) lines.push(piece), (piece = ""), (pieceW = 0);
+        piece += ch;
+        pieceW += cw;
       }
-      lines.push(head);
-      word = word.slice(head.length);
+      (rest = piece), (restW = pieceW);
     }
-    if (!cur) cur = word;
-    else if (width(cur) + 1 + width(word) <= w) cur += " " + word;
-    else lines.push(cur), (cur = word);
+    if (!cur) (cur = rest), (curW = restW);
+    else if (curW + 1 + restW <= w) (cur += " " + rest), (curW += 1 + restW);
+    else lines.push(cur), (cur = rest), (curW = restW);
   }
   if (cur) lines.push(cur);
   return lines;
@@ -805,7 +820,7 @@ export function ingest(t: Tail, line: string) {
       try {
         const o = JSON.parse(line);
         if (typeof o.aiTitle === "string") t.title = safeLine(o.aiTitle);
-        if (typeof o.lastPrompt === "string") t.lastPrompt = safeText(o.lastPrompt);
+        if (typeof o.lastPrompt === "string") t.lastPrompt = safeText(capText(o.lastPrompt, PROMPT_KEEP));
       } catch {}
     }
     return;
@@ -829,7 +844,7 @@ export function ingest(t: Tail, line: string) {
   const ts = Date.parse(o.timestamp);
   if (Number.isNaN(ts)) return;
   if (o.type === "system" && o.subtype === "away_summary" && typeof o.content === "string") {
-    t.summary = safeText(o.content);
+    t.summary = safeText(capText(o.content, NOTE_KEEP));
     t.summaryT = ts;
   }
   if (o.type !== "assistant" && o.type !== "user") return;
@@ -841,7 +856,7 @@ export function ingest(t: Tail, line: string) {
       for (const item of content) {
         if (item?.type === "tool_use") {
           t.tools.push(ts);
-          t.lastTool = { name: safeLine(item.name), hint: safeLine(hintFor(item.name, item.input)), t: ts };
+          t.lastTool = { name: safeLine(capText(String(item.name ?? ""), 200)), hint: safeLine(capText(hintFor(item.name, item.input), NOTE_KEEP)), t: ts };
         }
       }
     }
@@ -870,7 +885,7 @@ export function ingest(t: Tail, line: string) {
     // Something the person typed. Harness-injected turns start with a tag; skip those.
     const texts: string[] = typeof content === "string" ? [content] : Array.isArray(content) ? content.filter((i: any) => i?.type === "text").map((i: any) => String(i.text ?? "")) : [];
     const typed = texts.map((x) => x.trim()).find((x) => x && !x.startsWith("<"));
-    if (typed) t.ask = { text: safeText(typed), t: ts };
+    if (typed) t.ask = { text: safeText(capText(typed, PROMPT_KEEP)), t: ts };
   }
 }
 
@@ -1270,7 +1285,7 @@ export function scan(now: number): Session[] {
     let job: Session["job"];
     if (reg.jobId && /^[\w-]+$/.test(String(reg.jobId))) {
       const st = readJson(path.join(CLAUDE, "jobs", String(reg.jobId), "state.json"));
-      if (st) job = { state: safeLine(st.state), detail: typeof st.detail === "string" ? safeText(st.detail) : "", needs: typeof st.needs === "string" ? safeText(st.needs) : "" };
+      if (st) job = { state: safeLine(st.state), detail: typeof st.detail === "string" ? safeText(capText(st.detail, NOTE_KEEP)) : "", needs: typeof st.needs === "string" ? safeText(capText(st.needs, NOTE_KEEP)) : "" };
     }
 
     const title = mains.map((m) => m.title).find(Boolean);
@@ -2031,7 +2046,8 @@ export function paceForecast(pct: number, resetsAt: number, windowMs: number, no
   return now + toFull < resetsAt ? toFull : undefined;
 }
 
-export const clean = (s: string) => s.replace(/[*`#>]+/g, "").replace(/\s+/g, " ").trim();
+/** A question or a now-line as one line of plain text: paired marks and link syntax go, as in a reply; a lone > # * or _ stays, as written. */
+const headText = (s: string): string => flatLines(s, false).join(" ");
 
 export interface Facts {
   main?: Tail;
@@ -2054,7 +2070,7 @@ export function factsOf(s: Session): Facts {
   const yourTurn = !needs && (s.job ? s.job.state === "done" : idle && !!main?.say && (!main.ask || main.say.t >= main.ask.t));
   // The now-line is the job's own detail, or the away summary when that is newer than the last prompt.
   const summary = main?.summary && (main.summaryT ?? 0) >= (main.ask?.t ?? 0) ? main.summary : "";
-  return { main, needs: clean(needs), yourTurn, finished: s.job?.state === "done", working: s.status === "busy" || s.job?.state === "working", now: clean(s.job?.detail || summary) };
+  return { main, needs: headText(needs), yourTurn, finished: s.job?.state === "done", working: s.status === "busy" || s.job?.state === "working", now: headText(s.job?.detail || summary) };
 }
 
 /**
@@ -2089,15 +2105,9 @@ export function stateTime(s: Session, f: Facts, state: SessionState, now: number
   return state === "working" ? `up ${ago(now - since)}` : ago(now - since);
 }
 
-/** The first line of a reply as plain text: markdown marks dropped, fences and blank lines skipped. */
+/** The first line of a reply as plain text, as an earlier reply is flattened: paired marks and link syntax gone, a table row as its cells, a bullet's mark dropped. */
 export function firstLine(text: string): string {
-  for (const raw of text.split("\n")) {
-    const line = raw.trim();
-    if (!line || line.startsWith("```") || /^[|:\- ]+$/.test(line)) continue;
-    const flat = clean(line.replace(/^[-*+]\s+/, ""));
-    if (flat) return flat;
-  }
-  return "";
+  return (flatLines(text, false)[0] ?? "").replace(new RegExp(`^${ICON.bullet} `), "");
 }
 
 export interface Subheading {
@@ -2115,17 +2125,13 @@ export function subheading(s: Session, f: Facts, state: SessionState): Subheadin
   const said = m?.say ? firstLine(m.say.text) : "";
   const reply = (): Subheading | undefined => (said ? { source: "reply", text: said, t: m!.say!.t } : undefined);
   const nowLine = (): Subheading | undefined => (f.now ? { source: "now", text: f.now } : undefined);
+  // Your prompt, as you typed it.
+  const typed = oneLine(m?.ask?.text || m?.lastPrompt || "");
+  const prompt = (): Subheading | undefined => (typed ? { source: "prompt", text: typed, t: m?.ask?.t } : undefined);
   if (state === "needs") return { source: "question", text: f.needs };
-  if (state === "working" || state === "stalled") {
-    const typed = clean(m?.ask?.text || m?.lastPrompt || "");
-    return (
-      nowLine() ??
-      (s.tasks?.active ? { source: "task", text: s.tasks.active } : undefined) ??
-      (typed ? { source: "prompt", text: typed, t: m?.ask?.t } : undefined) ??
-      reply() ?? { source: "none", text: "" }
-    );
-  }
-  return reply() ?? nowLine() ?? { source: "none", text: "" };
+  if (state === "working" || state === "stalled") return nowLine() ?? (s.tasks?.active ? { source: "task", text: s.tasks.active } : undefined) ?? prompt() ?? reply() ?? { source: "none", text: "" };
+  // A quiet session with no reply and no now-line: better its last prompt than an empty row.
+  return reply() ?? nowLine() ?? prompt() ?? { source: "none", text: "" };
 }
 
 // ───────────────────────── stall watch ─────────────────────────
@@ -2557,7 +2563,7 @@ export function shortUrl(url: string): string {
  * tokeniser rather than a set of replacements, so a mark only counts when it has a partner and sits
  * where emphasis can (snake_case, 5*3 and *.ts are left alone). Anything it is unsure of stays as typed.
  */
-export function inlineSegs(src: string, tone: ReplyTone = BRIGHT): Seg[] {
+export function inlineSegs(src: string, tone: ReplyTone = BRIGHT, underscores = true): Seg[] {
   const out: Seg[] = [];
   let plain = "";
   const flush = () => {
@@ -2605,13 +2611,13 @@ export function inlineSegs(src: string, tone: ReplyTone = BRIGHT): Seg[] {
       }
       continue;
     }
-    if (ch === "*" || ch === "_" || ch === "~") {
+    if (ch === "*" || (ch === "_" && underscores) || ch === "~") {
       const mark = ["***", "**", "__", "~~", "*", "_"].find((m) => src.startsWith(m, i));
       const end = mark ? closeOf(mark, i) : -1;
       if (mark && end > 0) {
         flush();
         const strong = mark.length >= 2 && mark !== "~~";
-        for (const [text, color, isBold] of inlineSegs(src.slice(i + mark.length, end), tone)) out.push(strong ? [text, color === tone.text ? tone.strong : color, true] : [text, color, isBold]);
+        for (const [text, color, isBold] of inlineSegs(src.slice(i + mark.length, end), tone, underscores)) out.push(strong ? [text, color === tone.text ? tone.strong : color, true] : [text, color, isBold]);
         i = end + mark.length;
         continue;
       }
@@ -2629,7 +2635,7 @@ export function inlineSegs(src: string, tone: ReplyTone = BRIGHT): Seg[] {
       if (end > 0 && end - close <= 2100 && !src.slice(open + 1, close).includes("[")) {
         flush();
         const label = src.slice(open + 1, close);
-        if (label.trim()) out.push(...inlineSegs(label, tone));
+        if (label.trim()) out.push(...inlineSegs(label, tone, underscores));
         else out.push([shortUrl(src.slice(close + 2, end).trim()), tone.text]);
         i = end + 1;
         continue;
@@ -2732,7 +2738,7 @@ export function replyRows(text: string, w: number, o: { focus?: boolean; receded
   try {
     return formatReply(text, Math.max(8, w), tone, !!o.focus);
   } catch {
-    return wrap(clean(text), Math.max(8, w)).map((line): Seg[] => [[line, tone.text]]);
+    return wrap(oneLine(text), Math.max(8, w)).map((line): Seg[] => [[line, tone.text]]);
   }
 }
 function formatReply(text: string, w: number, tone: ReplyTone, focus: boolean): Seg[][] {
@@ -2824,8 +2830,12 @@ function once<T>(say: { text: string }, key: string, make: () => T): T {
   return entry.at.get(key) as T;
 }
 
-/** A reply as one plain line, for an earlier reply: marks, fences, rules and table rules gone, bullets kept as •. */
-export function flatReply(text: string): string {
+/**
+ * Markdown as plain lines, one per line of the source that says something: paired marks, fences, rules and
+ * table rules gone, a table row as its cells, bullets kept as •. `underscores` false leaves _ and __ as
+ * typed, for the one-line head rows, where snake_case and __init__ are likelier than emphasis.
+ */
+function flatLines(text: string, underscores = true): string[] {
   const out: string[] = [];
   let code = false;
   for (const raw of text.replace(NO_COMMENTS, "").split("\n")) {
@@ -2833,10 +2843,12 @@ export function flatReply(text: string): string {
     if (FENCE.test(line)) code = !code;
     else if (code) out.push(line);
     else if (line && !RULE.test(line) && !(line.includes("|") && TABLE_RULE.test(line)))
-      out.push(segsText(inlineSegs((line.startsWith("|") ? line.replace(/^\|\s*|\s*\|$/g, "").replace(/\s*\|\s*/g, ` ${ICON.sep} `) : line).replace(/^#{1,6}\s+/, "").replace(/^>+\s?/, "").replace(/^[-*+]\s+/, ICON.bullet + " "))));
+      out.push(segsText(inlineSegs((line.startsWith("|") ? line.replace(/^\|\s*|\s*\|$/g, "").replace(/\s*\|\s*/g, ` ${ICON.sep} `) : line).replace(/^#{1,6}\s+/, "").replace(/^>+\s?/, "").replace(/^[-*+]\s+/, ICON.bullet + " "), BRIGHT, underscores)));
   }
-  return out.join(" ").replace(/\s+/g, " ").trim();
+  return out.map(oneLine).filter(Boolean);
 }
+/** A reply as one plain line, for an earlier reply. */
+export const flatReply = (text: string): string => flatLines(text).join(" ");
 
 /**
  * The rows of a reply that fit in `cap`, kept from the top. When rows are hidden, a dim "… +N lines" is
@@ -2916,10 +2928,9 @@ export function blockOf(v: View, g: Grid, now: number, win: Win, focus = false):
   const m = f.main;
   const body = focus || !v.quiet;
   const subW = g.textEnd - g.icon + 1;
-  const typed = clean(m?.ask?.text || m?.lastPrompt || "");
+  const typed = oneLine(m?.ask?.text || m?.lastPrompt || "");
   const typedAt = m?.ask?.text ? m.ask.t : undefined;
-  let sub = subheading(s, f, state);
-  if (sub.source === "none" && typed) sub = { source: "prompt", text: typed, t: typedAt }; // a quiet session with no reply and no now-line: better its last prompt than an empty row
+  const sub = subheading(s, f, state);
   const question = state === "needs" ? wrap(f.needs, subW) : [];
   if (question.length > 3) question.splice(2, question.length, cutTo(question.slice(2).join(" "), subW));
   const nowLine = state === "needs" && f.now && f.now !== f.needs ? f.now : "";
