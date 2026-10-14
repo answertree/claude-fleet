@@ -1794,3 +1794,39 @@ describe("runway and pace, worked by hand", () => {
     expect(F.ctxRunway([...Array.from({ length: 11 }, (_, i) => at(10 - i, 600_000 + i * 10_000)), [NOW + 5 * MIN, 999_000]], 1_000_000, NOW)).toBeCloseTo(30, 9);
   });
 });
+
+describe("what turns the usage read on", () => {
+  test("--usage, or FLEET_USAGE=1 in the environment, and nothing else", () => {
+    const before = { ...F.opt };
+    const saved = process.env.FLEET_USAGE;
+    try {
+      delete process.env.FLEET_USAGE;
+      for (const argv of [[], ["--all", "--bell", "--once"], ["--mode", "far", "60"], ["--stall", "5"], ["--plain-glyphs"]]) {
+        F.parseArgs(argv);
+        expect(F.opt.usage).toBe(false);
+      }
+      F.parseArgs(["--usage"]);
+      expect(F.opt.usage).toBe(true);
+      for (const [value, on] of [["1", true], ["0", false], ["true", false], ["", false]] as [string, boolean][]) {
+        process.env.FLEET_USAGE = value;
+        F.parseArgs([]);
+        expect(F.opt.usage).toBe(on);
+      }
+    } finally {
+      if (saved === undefined) delete process.env.FLEET_USAGE;
+      else process.env.FLEET_USAGE = saved;
+      Object.assign(F.opt, before);
+    }
+  });
+
+  test("the README names every environment variable fleet.ts reads, so none is a hidden switch", () => {
+    const source = fs.readFileSync(path.join(here, "fleet.ts"), "utf8");
+    const readme = fs.readFileSync(path.join(here, "README.md"), "utf8");
+    const read = [...new Set([...source.matchAll(/process\.env\.(FLEET_[A-Z_]+)/g)].map((m) => m[1]))].sort();
+    expect(read).toContain("FLEET_USAGE");
+    expect(read.filter((name) => !readme.includes("`" + name))).toEqual([]);
+    // And it does not promise that --usage is the only way to switch the read on.
+    expect(readme).toContain("`FLEET_USAGE=1`");
+    expect(readme).not.toMatch(/Without `--usage`, Claude Fleet makes no network requests/);
+  });
+});
