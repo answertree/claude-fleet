@@ -9,7 +9,7 @@ It is one TypeScript file with no dependencies. It reads the files Claude Code a
 ## Try it
 
 ```bash
-git clone https://github.com/pdaddyo/claude-fleet
+git clone https://github.com/answertree/claude-fleet
 cd claude-fleet
 bun demo.ts        # made-up sessions, so you can see everything straight away
 bun fleet.ts       # your real sessions
