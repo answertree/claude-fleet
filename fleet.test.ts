@@ -1669,12 +1669,12 @@ describe("since you looked", () => {
   test("the buttons carry the hidden count and the count of new things", () => {
     resetSeen(NOW);
     expect(strip(F.buttonBar(200, 44, 1))).toContain(" a All · 1 idle ");
-    expect(strip(F.buttonBar(110, 44, 1))).toContain(" a All·1 "); // the shorter labels at 110
+    expect(strip(F.buttonBar(150, 44, 1))).toContain(" a All·1 "); // the shorter labels at 150
     expect(strip(F.buttonBar(200, 44, 0))).toContain(" a All ");
     expect(strip(F.buttonBar(200, 44))).toContain(" space Seen ");
     F.seen.events.push(...Array.from({ length: 4 }, (_, i) => ({ kind: "reply" as F.EventKind, t: NOW + i, sid: "a", key: "k" })));
     expect(strip(F.buttonBar(210, 44, 1))).toContain(" space Seen · 4 new ");
-    expect(strip(F.buttonBar(110, 44, 1))).toContain(" ␣ Seen·4 ");
+    expect(strip(F.buttonBar(150, 44, 1))).toContain(" ␣ Seen·4 ");
     expect(strip(F.buttonBar(210, 44, 1))).not.toContain("Retry usage"); // only while a usage read is failing
     for (const W of [80, 100, 110, 130, 150, 200]) expect(F.cells(F.buttonBar(W, 44, 3))).toBeLessThanOrEqual(W);
     resetSeen(NOW);
@@ -2057,9 +2057,9 @@ describe("header and chrome", () => {
 
   test("the button bar carries the hidden count, and its labels shorten in two steps", () => {
     const bar = (W: number, idle = 1, account = "current") => draw(account, () => strip(F.buttonBar(W, 44, idle)).trimEnd());
-    expect(bar(150)).toBe("  1 Detail   2 Compact   3 Timeline    −  30m  +    a All · 1 idle   d Finished agents   b Bell   space Seen   r Reply   ? Legend    q Quit");
-    expect(bar(110)).toBe("  1 Detail   2 Compact   3 Timeline    −  30m  +    a All·1   d Done   b   ␣ Seen   r Reply   ?    q Quit");
-    expect(bar(80, 1, "remote")).toBe("  1   2   3    −  30m  +    a   d   b   u   ␣   r   ?    q");
+    expect(bar(200)).toBe("  1 Detail   2 Compact   3 Timeline    −  30m  +    a All · 1 idle   d Finished agents   b Bell   space Seen   r Reply   w Phone   ? Legend    q Quit                       click a session to focus it");
+    expect(bar(150)).toBe("  1 Detail   2 Compact   3 Timeline    −  30m  +    a All·1   d Done   b   ␣ Seen   r Reply   w Phone   ?    q Quit       click a session to focus it");
+    expect(bar(80, 1, "remote")).toBe("  1   2   3    −  30m  +    a   d   b   u   ␣   r   w   ?    q");
     // "u Retry usage" is there only while a usage read is failing, whatever figures are on screen.
     expect([bar(220, 1, "none"), bar(220, 1, "stale"), bar(220, 1, "shared")].map((b) => b.includes(" u Retry usage "))).toEqual([true, true, true]);
     expect([bar(220), bar(220, 1, "off")].map((b) => b.includes("Retry"))).toEqual([false, false]);
@@ -2070,7 +2070,7 @@ describe("header and chrome", () => {
       const frame = draw("current", () => F.render(fleet(), 150, 44, NOW).map(strip), { mode });
       expect(frame.length).toBe(44);
       expect(frame.join("\n")).not.toMatch(/hidden|a shows/);
-      expect(frame.at(-1)).toContain(" a All · 1 idle ");
+      expect(frame.at(-1)).toContain(" a All·1 ");
     }
   });
 
@@ -2082,7 +2082,7 @@ describe("header and chrome", () => {
       const text = lines.join("\n");
       for (const word of ["needs you", "stalled?", "working", "your turn", "idle", "finished", "you", "Claude", "earlier", "live", "in progress", "not started", "done", "failed", "workflow", "no reading", "pace", "context", "rail"]) expect([cols, word, text.includes(word)]).toEqual([cols, word, true]);
       for (const glyph of ["▲", "◐", "●", "▸", "○", "✓", "✗", "◆", "◇", "⠋", "≡", "━", "┼", "┿", "╌", "█", "▌", "░", "■", "•", "…", "┴", "▼"]) expect([cols, glyph, text.includes(glyph)]).toEqual([cols, glyph, true]);
-      for (const key of ["1 2 3", "+ -", "a ", "d ", "tab", "esc", "b u", "r ", "space", "? ", "q "]) expect([cols, key, lines.some((l) => l.includes(key))]).toEqual([cols, key, true]);
+      for (const key of ["1 2 3", "+ -", "a ", "d ", "tab", "esc", "b u", "r w", "space", "? ", "q "]) expect([cols, key, lines.some((l) => l.includes(key))]).toEqual([cols, key, true]);
       expect(lines.at(-1)).toContain("any key or click returns");
     }
     // With --plain-glyphs it shows the stand-ins the screen is drawing.
@@ -3864,7 +3864,7 @@ describe("one program: the header, the sessions and the buttons agree", () => {
     const lines = frame("detail", 150, 44, NOW, false);
     expect(lines[0]).toContain("▲ 1 needs you    ● 2 working    ⠋ 4 agents    ≡ 1 workflow    ○ 1 idle");
     expect(lines.filter((l) => l.startsWith(" ██ ")).length).toBe(3 * 2); // three sessions on screen, two head rows each
-    expect(lines[43]).toContain(" a All · 1 idle ");
+    expect(lines[43]).toContain(" a All·1 ");
     expect(lines.join("\n")).not.toContain("hidden"); // the line that used to say so is gone from every mode
     for (const mode of MODES) expect([mode, frame(mode, 150, 44, NOW, false).join("\n").includes("hidden")]).toEqual([mode, false]);
 
@@ -4939,5 +4939,46 @@ describe("a remote session is told apart from one that merely uses mosh", () => 
     const silent: F.KeychainOutcome = { status: null, stderr: "", timedOut: true, parse: "empty" };
     const d = F.loginDecision(silent, "missing", F.isRemoteSession({ MOSH_ESCAPE_KEY: "~" }, local));
     expect("reason" in d && d.reason).toBe("keychain: no answer in 5s");
+  });
+});
+
+describe("key w: the phone page", () => {
+  test("the QR code grows with the link and refuses one too long to scan", () => {
+    expect(F.qrMatrix("hi")!.length).toBe(21);
+    expect(F.qrMatrix("http://100.101.102.103:4777/?t=AbCdEfGhIjKlMnOpQrStUv")!.length).toBe(29);
+    expect(F.qrMatrix("w".repeat(271))!.length).toBe(57);
+    expect(F.qrMatrix("w".repeat(272))).toBeUndefined();
+    // The three finder patterns sit in their corners.
+    const m = F.qrMatrix("hi")!;
+    for (const [x, y] of [[0, 0], [14, 0], [0, 14]]) expect([m[y][x], m[y + 1][x + 1], m[y + 3][x + 3]]).toEqual([true, false, true]);
+  });
+
+  test("the server answers only the link it made, only to GET, and only for the page and its data", async () => {
+    process.env.FLEET_WEB_HOST = "127.0.0.1";
+    process.env.FLEET_WEB_PORT = "4877";
+    const web = F.startWeb(() => [], () => Date.now());
+    try {
+      const url = new URL(web.url!);
+      const token = url.searchParams.get("t")!;
+      expect(token.length).toBe(24);
+      const base = `${url.protocol}//${url.host}`;
+      expect((await fetch(web.url!)).status).toBe(200);
+      expect((await fetch(`${base}/`)).status).toBe(403);
+      expect((await fetch(`${base}/?t=${"x".repeat(24)}`)).status).toBe(403);
+      expect((await fetch(`${base}/elsewhere?t=${token}`)).status).toBe(404);
+      expect((await fetch(web.url!, { method: "POST" })).status).toBe(405);
+      const state = await (await fetch(`${base}/api/state?t=${token}`)).json();
+      expect(state.sessions).toEqual([]);
+      expect(typeof state.machine.cpu).toBe("number");
+    } finally {
+      web.server?.stop();
+      delete process.env.FLEET_WEB_HOST;
+      delete process.env.FLEET_WEB_PORT;
+    }
+  });
+
+  test("the page builds no markup from data, so text from a session cannot become HTML", () => {
+    expect(F.WEB_PAGE).not.toContain("innerHTML");
+    expect(F.WEB_PAGE).not.toContain("insertAdjacentHTML");
   });
 });

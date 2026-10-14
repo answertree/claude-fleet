@@ -136,6 +136,17 @@ Every control has a key, and all but `tab` and `esc` are also buttons on the bot
 
 Capturing clicks means a plain drag no longer selects text. Hold Shift (Option in iTerm2 and Terminal.app) while dragging, or start with `--no-mouse`.
 
+## On your phone
+
+Press `w` and the dashboard shows a QR code; scan it and the same sessions open as a page on your phone, refreshing every two seconds: who needs you (glowing), what each is doing, context, failures, background commands, pull requests with their CI and deploys, tasks, agents and the last few messages, with confetti when something merges. Add it to your home screen and it opens like an app.
+
+It is built to be safe to leave running:
+
+- **Your devices only.** It listens on this Mac's Tailscale address when there is one, so only your own devices on your tailnet can reach it, over Tailscale's encryption. Without Tailscale it listens on this Mac alone (127.0.0.1).
+- **The link is the key.** Every request must carry a random secret that is made fresh each time fleet starts; without it the answer is 403.
+- **Read-only.** It serves the page and its data and nothing else; it cannot type into a session. The page shows prompts and replies, so treat the link like a password.
+- It stops when fleet quits.
+
 ## Deploys
 
 A merged pull request can say whether it is live yet. List each repository's deploy target in `~/.config/claude-fleet/deploys.json` (or under `$XDG_CONFIG_HOME`):
@@ -251,6 +262,8 @@ These environment variables exist for tests and screenshots only:
 | `FLEET_DEPLOYS_FILE` | Read deploy targets from this file instead of `~/.config/claude-fleet/deploys.json`. |
 | `FLEET_DEPLOY_FIXTURE` | Take each deploy target's revision from this JSON file (URL to revision) instead of asking the URL. |
 | `FLEET_ATTACH_CMD` | Run this instead of `claude` when `r` opens a session (tests use `true`). |
+| `FLEET_WEB_HOST` | Serve the phone page on this address instead of the Tailscale one (or 127.0.0.1). Only for testing: anyone who can reach the address and has the link can read your sessions. |
+| `FLEET_WEB_PORT` | The first port to try for the phone page (default 4777). |
 | `FLEET_PARTY` | Start a celebration at launch, as `session id=what it finished`, so a single frame can show one (the demo's `--party`). |
 | `FLEET_FOCUS` | Start focused on the session with this id, so a single frame can show focus (the demo's `--focus`). |
 | `FLEET_GIT_FIXTURE` | Take each checkout's `git status --porcelain -b` output from this JSON file (folder to text) instead of running git. |
