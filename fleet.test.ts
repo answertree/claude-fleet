@@ -1224,3 +1224,90 @@ describe("demo", () => {
     expect(frame.remote).toContain("securityunlock-keychain~/library/keychains/login.keychain-db"); // the remedy
   }, SLOW);
 });
+
+describe("the login stays inside the process", () => {
+  // The whole usage read, entry point included, with stand-ins for the two things it must not touch here:
+  // a made-up `security` first (and alone) on PATH, and a preload that answers every fetch(). The "login" is a
+  // made-up word, so if it leaks anywhere it can be found by searching for it.
+  const CANARY = "CANARY-LOGIN-0000";
+  const dir = path.join(SCRATCH, "login-e2e");
+  const bin = path.join(dir, "bin");
+  const log = path.join(dir, "calls.log");
+  const cache = path.join(dir, "cache");
+  const login = JSON.stringify({ claudeAiOauth: { accessToken: CANARY, refreshToken: CANARY + "-refresh", expiresAt: 99999999999999 } });
+  const setUp = () => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.mkdirSync(bin, { recursive: true });
+    fs.mkdirSync(path.join(dir, "home", "sessions"), { recursive: true });
+    // On a Mac the dashboard asks the keychain tool; elsewhere it reads the login file. Both are made up here.
+    fs.writeFileSync(path.join(bin, "security"), `#!/bin/sh\necho "security $*" >> "$CALLS_LOG"\nprintf '%s\\n' '${login}'\n`, { mode: 0o755 });
+    fs.writeFileSync(path.join(dir, "home", ".credentials.json"), login);
+    fs.writeFileSync(path.join(dir, "machine.json"), JSON.stringify({ cpu: 5, cores: [5, 5], hist: [5], memTotal: 1000, memUsed: 100, load: 1, procs: [] }));
+    fs.writeFileSync(
+      path.join(dir, "preload.ts"),
+      `import * as fs from "node:fs";
+(globalThis as any).fetch = async (url: any, init: any = {}) => {
+  const auth = String(init?.headers?.Authorization ?? "");
+  fs.appendFileSync(process.env.CALLS_LOG!, "fetch " + JSON.stringify({ url: String(url), auth: auth === "Bearer ${CANARY}" ? "the login" : auth ? "something else" : "none", verbose: init.verbose }) + "\\n");
+  const status = Number(process.env.FAKE_STATUS);
+  // An answer that repeats the login back in places that are not figures: none of it may be kept.
+  if (status === 200) return Response.json({ five_hour: { utilization: 38, resets_at: new Date(Date.now() + 130 * 60000).toISOString(), echo: "${CANARY}" }, seven_day: { utilization: 21, resets_at: new Date(Date.now() + 3 * 86400000).toISOString() }, access_token: "${CANARY}", account: { token: "${CANARY}" } });
+  return new Response(JSON.stringify({ error: { message: "${CANARY} was rejected" } }), { status });
+};
+`,
+    );
+  };
+  const run = (args: string[], status = 200, extra: Record<string, string> = {}) => {
+    fs.rmSync(log, { force: true });
+    fs.rmSync(cache, { recursive: true, force: true });
+    const r = Bun.spawnSync([process.execPath, "--preload", path.join(dir, "preload.ts"), path.join(here, "fleet.ts"), "--once", ...args], {
+      env: { PATH: bin, HOME: path.join(dir, "nobody"), TZ: "UTC", COLUMNS: "150", LINES: "12", FLEET_HOME: path.join(dir, "home"), XDG_CACHE_HOME: cache, FLEET_MACHINE_FIXTURE: path.join(dir, "machine.json"), CALLS_LOG: log, FAKE_STATUS: String(status), ...extra },
+      timeout: 30_000,
+    });
+    const calls = fs.existsSync(log) ? fs.readFileSync(log, "utf8").trim().split("\n") : [];
+    const written: string[] = [];
+    const walk = (d: string) => {
+      for (const e of fs.existsSync(d) ? fs.readdirSync(d, { withFileTypes: true }) : []) e.isDirectory() ? walk(path.join(d, e.name)) : written.push(path.join(d, e.name));
+    };
+    walk(cache);
+    const ours = written.filter((f) => !f.startsWith(path.join(cache, "bun") + path.sep)); // all but the runtime's own cache of compiled scripts
+    return { code: r.exitCode, out: r.stdout.toString(), err: r.stderr.toString(), security: calls.filter((c) => c.startsWith("security ")), fetches: calls.filter((c) => c.startsWith("fetch ")).map((c) => JSON.parse(c.slice(6))), ours, everything: r.stdout.toString() + r.stderr.toString() + written.map((f) => fs.readFileSync(f, "latin1")).join("") };
+  };
+
+  test("a working read: one request, to Anthropic, with the runtime's request printing turned off; the login is not printed or saved", () => {
+    setUp();
+    // BUN_CONFIG_VERBOSE_FETCH=curl makes the runtime print every request as a curl command, Authorization header and all, unless the request says no.
+    const r = run(["--usage"], 200, { BUN_CONFIG_VERBOSE_FETCH: "curl" });
+    expect(r.code).toBe(0);
+    expect(strip(r.out)).toContain("38%");
+    if (process.platform === "darwin") expect(r.security).toEqual(["security find-generic-password -s Claude Code-credentials -w"]);
+    expect(r.fetches).toEqual([{ url: "https://api.anthropic.com/api/oauth/usage", auth: "the login", verbose: false }]);
+    expect(r.everything).not.toContain(CANARY);
+    expect(r.err).toBe("");
+    expect(r.out).not.toContain("\x1b]"); // and no title either
+    // The one file written: figures and when they were fetched, readable only by its owner.
+    expect(r.ours).toEqual([path.join(cache, "claude-fleet", "usage.json")]);
+    expect(fs.statSync(r.ours[0]).mode & 0o777).toBe(0o600);
+    expect(Object.keys(JSON.parse(fs.readFileSync(r.ours[0], "utf8"))).sort()).toEqual(["fetchedAt", "five_hour", "seven_day"]);
+  }, 60_000);
+
+  test("a refused read says so exactly, and still neither prints nor saves anything of the login or the answer", () => {
+    setUp();
+    for (const status of [401, 429]) {
+      const r = run(["--usage"], status);
+      expect(strip(r.out)).toContain(`no reading yet: Anthropic answered ${status}`);
+      expect(r.fetches.length).toBe(1);
+      expect(r.everything).not.toContain(CANARY);
+      expect(r.ours).toEqual([]);
+    }
+  }, 60_000);
+
+  test("without --usage the keychain is not asked and no request is made, in any mode", () => {
+    setUp();
+    for (const mode of ["detail", "compact", "far"]) {
+      const r = run(["--mode", mode]);
+      expect(r.code).toBe(0);
+      expect([r.security, r.fetches, r.ours]).toEqual([[], [], []]);
+    }
+  }, 60_000);
+});

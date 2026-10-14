@@ -1552,6 +1552,7 @@ async function readUsage(now: number): Promise<Reading | { reason: string }> {
     res = await fetch("https://api.anthropic.com/api/oauth/usage", {
       headers: { Authorization: `Bearer ${found.login.token}`, "anthropic-beta": "oauth-2025-04-20" },
       signal: AbortSignal.timeout(10_000),
+      verbose: false, // with BUN_CONFIG_VERBOSE_FETCH=curl set, Bun would print this request, login and all, to the terminal
     });
   } catch (e: any) {
     return { reason: e?.name === "TimeoutError" || e?.name === "AbortError" ? REASON.timedOut : REASON.network(String(e?.code || "no connection").slice(0, 40)) };
