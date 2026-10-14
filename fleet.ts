@@ -1431,7 +1431,7 @@ export type FileOutcome = LoginParse | "missing";
 /** True when this process was reached over ssh or mosh, where macOS will not hand out keychain content. */
 export function isRemoteSession(env: Record<string, string | undefined>, ancestors: string[]): boolean {
   if (env.SSH_CONNECTION || env.SSH_TTY || env.SSH_CLIENT) return true;
-  if (Object.keys(env).some((k) => k.startsWith("MOSH_"))) return true;
+  if (Object.keys(env).some((k) => k.startsWith("MOSH_SERVER_"))) return true; // not MOSH_ESCAPE_KEY and the like: those configure the mosh client, and sit in a local shell's profile
   return ancestors.some((name) => /^(mosh-server|sshd)/.test(name));
 }
 

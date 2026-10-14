@@ -1830,3 +1830,19 @@ describe("what turns the usage read on", () => {
     expect(readme).not.toMatch(/Without `--usage`, Claude Fleet makes no network requests/);
   });
 });
+
+describe("a remote session is told apart from one that merely uses mosh", () => {
+  test("mosh's own client settings in the environment do not make a local session remote", () => {
+    // MOSH_ESCAPE_KEY, MOSH_PREDICTION_DISPLAY and MOSH_TITLE_NOPREFIX configure the mosh client. Someone who
+    // sets them in a shell profile has them in every local terminal on the Mac too.
+    const local = ["zsh", "login", "Terminal"];
+    expect(F.isRemoteSession({ MOSH_ESCAPE_KEY: "~", MOSH_PREDICTION_DISPLAY: "always", MOSH_TITLE_NOPREFIX: "1" }, local)).toBe(false);
+    expect(F.isRemoteSession({ MOSH_SERVER_NETWORK_TMOUT: "604800" }, local)).toBe(true); // set for the server side of a session
+    expect(F.isRemoteSession({ MOSH_SERVER_SIGNAL_TMOUT: "60" }, local)).toBe(true);
+    expect(F.isRemoteSession({ MOSH_ESCAPE_KEY: "~" }, ["zsh", "mosh-server"])).toBe(true); // the ancestor still says so
+    // So a local keychain that does not answer is reported as that, not as closed to remote sessions.
+    const silent: F.KeychainOutcome = { status: null, stderr: "", timedOut: true, parse: "empty" };
+    const d = F.loginDecision(silent, "missing", F.isRemoteSession({ MOSH_ESCAPE_KEY: "~" }, local));
+    expect("reason" in d && d.reason).toBe("keychain: no answer in 5s");
+  });
+});
