@@ -15,7 +15,7 @@ bun demo.ts        # made-up sessions, so you can see everything straight away
 bun fleet.ts       # your real sessions
 ```
 
-You need [Bun](https://bun.sh) and a terminal with 24-bit colour. A wide pane (140 columns or more) shows the most; narrower panes drop columns.
+You need [Bun](https://bun.sh) and a terminal with 24-bit colour. The screen is laid out for anything from 80 columns by 24 rows up. At 150 by 44 three busy sessions show in full; a smaller pane gives things up in a fixed order (see below) instead of losing whatever happens to be at the bottom.
 
 To run it from anywhere, add an alias to your shell profile:
 
@@ -29,37 +29,63 @@ alias fleet='bun ~/path/to/claude-fleet/fleet.ts --usage'
 
 - **Counts:** how many sessions need you (the one amber thing on the row), how many are working, running agents and workflows, and how many idle or finished sessions are being kept off the screen. A red `◐ 1 stalled?` joins them while something looks stuck.
 - **The machine:** CPU with a short history, memory, one glyph per core, load, and the busiest processes.
-- **Your account** (with `--usage`): how much of the 5-hour and weekly limits you have used and when each resets, then extra usage. The white tick on each gauge is how far through that limit's window the clock is: a fill short of the tick is under pace, a fill past it is burning faster than the window refills. If a limit will be full before it resets, the reset time is replaced by `full in ~35m` in red. With extra usage off, that row shows the Opus and Sonnet weekly limits when Anthropic returns them. Without `--usage` this block lists the busiest processes instead.
+- **Your account** (with `--usage`): how much of the 5-hour and weekly limits you have used and when each resets, then extra usage. With extra usage off, that row shows the Opus and Sonnet weekly limits when Anthropic returns them. Without `--usage` this block lists the busiest processes instead.
 - **The fleet:** tool calls across the window as a chart, with the total, the output tokens and how long one bar is.
-- **The rule under it is the time axis** for every sparkline below: each sits in the same columns and counts the same bars. A white `▼` marks when you last pressed `space`, and while anything is new since then the left of the rule lists it (`since 23:04 · ▲ 1 asked · ✓ 3 agents done · ◆ 4 new replies`).
+- **The rule under it is the time axis** for every sparkline below: each sits in the same columns and counts the same bars, and the header's total is the sum of the sessions' own.
 
-The header is five rows on a terminal of 40 rows or more and three rows below that. Compact mode, and any terminal under 100 columns, keeps a plainer three-line header.
+The header is five rows on a terminal of 40 rows or more and three rows below that. Compact mode, and any terminal under 100 columns, keeps a plainer header: one line for the fleet, one for the machine, one for the account.
 
 **For each session** (detail mode)
 
 - **Two head rows:** a rail in the colour of the session's state, its name, its folder and branch, and the state with how long it has been so: `▲ NEEDS YOU`, `◐ STALLED?`, `● WORKING`, `▸ YOUR TURN`, `○ IDLE` or `✓ FINISHED`. Under that, one line saying what it is doing, a sparkline of its tool calls and their count. When the session needs you the line is the question itself, in full, on an amber band; those sessions sort to the top.
-- **Conversation:** `▸` your prompt, `◇` Claude's earlier replies (dimmed) and `◆` its newest reply with its bullets, code and tables kept, each with its age in a column of its own. A long reply is cut in the middle, never at the end: its last line stays and `… +5 lines` says how much is hidden. A reply that arrived since you last pressed `space` is marked `new`.
-- **Beside the conversation:** the context window split by category (system prompt, tools, MCP tools, agents, memory files, skills, messages), then output tokens and the CPU and memory of the session's processes. `full in ~40m` appears when the window is filling steadily and will be full within the hour. Below 130 columns these become one row under the head.
+- **Conversation:** `▸` your prompt, `◇` Claude's earlier replies (dimmed) and `◆` its newest reply with its bullets, code and tables kept, each with its age in a column of its own. A long reply is cut in the middle, never at the end: its last line stays and `… +5 lines` says how much is hidden.
+- **Beside the conversation:** the context window split by category (system prompt, tools, MCP tools, agents, memory files, skills, messages), then output tokens and the CPU and memory of the session's processes. Below 130 columns these become one row under the head.
 - **Tasks:** one glyph per task (`✓` done, `◐` in progress, `○` not started) and the one in progress.
-- **Threads:** the main thread, each workflow (`≡`, the phases it has been through, one glyph per agent) and each agent: a spinner if it wrote in the last minute, `◐` with the tool and what it is for if it is waiting on one, `○` if it is quiet. A thread that looks stuck reads `stalled?` in red.
+- **Threads:** the main thread, each workflow (`≡`, the phases it has been through, one glyph per agent) and each agent: a spinner if it wrote in the last minute, `◐` with the tool and what it is for if it is waiting on one, `○` if it is quiet.
 
-When the screen is too short for all of that, sessions give rows up in a fixed order, from the bottom session upward: earlier replies, the finished-agents line, most of each newest reply, the blank rows between sessions, prompts, main-thread rows, then per-agent rows. A session that needs you always keeps its whole question and two lines of the reply. Sessions that still do not fit become one line, `… 2 more: name, name`.
+When the screen is too short for all of that, sessions give rows up in a fixed order, from the bottom session upward: earlier replies, the finished-agents line, most of each newest reply, the blank rows between sessions, prompts, main-thread rows, then per-agent rows. A session that needs you always keeps its whole question and two lines of the reply. Sessions that still do not fit become one line, `… 2 more: name, name`. Rows left over are handed back in the reverse order, top session first.
 
-Only sessions that are working or waiting on you are shown. Idle and finished ones are counted on the top row and on the `a` button; press `a` to bring them back.
+Only sessions that are working or waiting on you are shown. Idle and finished ones are counted on the top row and on the `a` button (`a All · 1 idle`); press `a` to bring them back (in detail mode, as two rows each).
 
-The screen uses one small set of marks and no word labels. Press `?` for a one-screen legend of every mark and key.
+## The marks
+
+The screen uses one small set of marks, the same in all three modes, and no word labels. Press `?` for this list on the screen itself.
+
+| Mark | Means |
+| --- | --- |
+| `▲` | Needs you: the session is blocked on your answer. The only "look here" mark, and the only amber on the screen. |
+| `●` | Working: a session that is alive and busy. |
+| `▸` | You: something you typed, or a session whose turn is yours. |
+| `◆` | Claude: the name at the top left, and Claude's newest reply. Bold white while that reply is new since you last looked. |
+| `◇` | An earlier reply. |
+| `⠋` | Live: wrote within the last minute. It spins. |
+| `◐` | In progress: a task under way, a workflow's current phase, a thread with a tool call outstanding. Red when it looks stalled. |
+| `○` | Not started, quiet or idle. |
+| `✓` `✗` | Done; failed, stopped or unavailable. |
+| `≡` | Workflow. Purple means workflow and nothing else. |
+| `██` `▌` | The rail down the left of a session, in the colour of its state: thick on the two head rows, thin below. |
+| `▁▃▅█` | Activity over time. One cell is one bar of the window, oldest on the left; the rightmost bar is still filling. |
+| `━` `─` `╌` | A gauge: used, remaining, no reading. Calm below 60%, bold white from 60%, red from 80%. CPU is a rate, not a limit, and never turns warm. |
+| `┼` `┿` | The pace tick on a usage gauge: how far through that limit's window the clock is. |
+| `█` `▌` `░` `■` | The context window, filled by category; `░` is free space and `■` the colour key. |
+| `┴` `▼` | On the time axis: each third of the window, and when you last pressed `space`. |
+| `…` | Something was cut: `… +5 lines`, `… 2 more agents`. |
+
+One rule for colour: warm means you. Amber is spent only where you are needed and red only where something is broken, stalled or nearly out. Everything else is cool or grey.
+
+`bun fleet.ts --glyphs` prints a test card of every glyph, each between two bars, so you can check that your terminal (an iPad over mosh, say) draws each one a single cell wide. If one is out of line, `--plain-glyphs` swaps in fallbacks for the four that fonts most often lack: `≡` becomes `◇`, `┿` becomes `┼`, `╌` becomes `─` and `◇` becomes `◆`.
 
 ## View modes
 
 | Key | Mode | For |
 | --- | --- | --- |
 | `1` | Detail | Sitting at the screen. Everything above. |
-| `2` | Compact | Many sessions. One line per session and per agent. |
-| `3` | Far | A spare monitor across the room. Big cards where colour carries the state. |
+| `2` | Compact | Many sessions. One line per session and per agent, under the plainer header. |
+| `3` | Far | A spare monitor across the room. Big cards where colour and shape carry the state. |
 
 ![Far mode](docs/screenshot-far.svg)
 
-Click a session, or press `tab`, to focus on it alone; it then gets the whole screen for its conversation and agents. `esc` goes back.
+Click a session, or press `tab`, to focus on it alone; it then gets the whole screen, with every reply it still holds in full and every agent. `tab` again moves to the next session and `esc` goes back.
 
 ## Controls
 
@@ -69,23 +95,48 @@ Every control is a button on the bottom row, and each has a key.
 | --- | --- |
 | `1` `2` `3` | View mode |
 | `+` `-` | Sparkline window: 5, 15, 30, 60 or 180 minutes |
-| `a` | Show idle and finished sessions too |
+| `a` | Show idle and finished sessions too. The button carries how many there are |
 | `d` | List finished agents instead of counting them |
 | `tab` | Focus the next session |
-| `b` | Ring the terminal bell when a session starts waiting on you |
+| `b` | Ring the terminal bell when a session starts waiting on you, or when something stalls |
 | `u` | Retry the usage read now (the button appears only while it is failing) |
-| `space` | Seen it. The button counts what is new since you last pressed it: sessions that started waiting on you, things that failed, stalled or finished, and new replies |
+| `space` | Seen it. The button counts what is new since you last pressed it |
 | `?` | Legend: what every mark and key means. Any key closes it |
 | `esc` | Leave focus (or quit) |
 | `q` | Quit |
 
-Options: `--mode detail|compact|far`, `--all`, `--usage`, `--bell`, `--stall <minutes>`, `--no-mouse`, `--once` (print one frame and exit), and a number for the window in minutes. `bun fleet.ts --help` lists them. Setting `FLEET_HIDE_PROCESSES=1` in the environment leaves other programs' names off the machine row.
+| Option | Does |
+| --- | --- |
+| a number | The window in minutes (default 30) |
+| `--mode detail\|compact\|far` | Start in that view |
+| `--all` | Start with idle and finished sessions shown |
+| `--usage` | Show your account's usage limits (see below) |
+| `--bell` | Start with the bell on |
+| `--stall <minutes>` | How long a thread may sit on a tool call in silence before it is marked `stalled?` (default 10; 0 turns the watch off) |
+| `--glyphs` | Print the glyph test card and exit |
+| `--plain-glyphs` | Use the fallback glyphs |
+| `--no-mouse` | Do not capture clicks |
+| `--once` | Print one frame and exit |
 
-`bun fleet.ts --glyphs` prints a test card of every glyph the screen uses, each between two bars, so you can check that your terminal (an iPad over mosh, say) draws each one a single cell wide. If one is out of line, `--plain-glyphs` swaps in fallbacks for the four that fonts most often lack.
-
-While it runs, Claude Fleet sets the terminal's title to the fleet's state in the screen's own glyphs (`▲1 ●2 ≡1 Claude Fleet`: one waiting on you, two working, one workflow), so a tab or window switcher shows whether anything needs you. The title is cleared when you quit.
+`bun fleet.ts --help` prints the same list. Setting `FLEET_HIDE_PROCESSES=1` in the environment leaves other programs' names off the screen.
 
 Capturing clicks means a plain drag no longer selects text. Hold Shift (Option in iTerm2 and Terminal.app) while dragging, or start with `--no-mouse`.
+
+## Three things it watches for you
+
+Each stays silent until it has something to say.
+
+**Runway: will it hit the wall before the work is done?** Two gauges become forecasts.
+
+- *Context.* When a session's context window has grown steadily and would be full within the hour, `full in ~40m` appears beside its context key (red under 15 minutes; in far mode it follows the `CTX` figure). It is a straight line through the last ten minutes, and it needs five minutes of history. A compaction starts the history again.
+- *Account.* Each usage gauge has a white tick where the clock stands in that limit's window. A fill short of the tick is under pace; a fill past it is burning faster than the window refills. If the pace so far reaches 100% before the reset, `resets in 2h10` is replaced by `full in ~35m` in bold red. Nothing is forecast in the first 15% of a window or under 5% used.
+
+**Stall watch: not working, not asking, just stuck.** A thread is marked when it has had a tool call outstanding and has written nothing for ten minutes (`--stall <minutes>`) while the session's whole process tree is under 1% CPU. Its `◐` and its age turn red and its action reads `stalled? Bash  Run the refund tests…`. The session's rail turns red, its state reads `◐ STALLED?  ·  14m`, it sorts directly under the sessions that need you, the top row gains `◐ 1 stalled?`, and with the bell on it rings once. It is worded as a question because the evidence is circumstantial: a tool waiting on another machine looks exactly the same.
+
+**Since you looked: unread marks for a screen you walk away from.**
+
+- *Away.* The terminal's title is set to the fleet's state in the screen's own glyphs (`▲1 ●2 ≡1 Claude Fleet`: one waiting on you, two working, one workflow), so a tab or window switcher shows whether anything needs you. It is cleared when you quit.
+- *Back.* `space` means "seen it". Until you press it again, a newest reply that arrived since then gets a bold white `◆` and the word `new` where its age would be; the left of the header's rule lists what has happened (`since 23:04 · ▲ 1 asked · ✓ 3 agents done · ◆ 4 new replies`); the `space` button carries the total; and a white `▼` on the time axis shows where your last look falls, so every sparkline below reads as before and after. It is a key of its own, so switching view to read something does not clear the marks.
 
 ## Account usage and your login
 
@@ -93,31 +144,52 @@ Usage figures are off unless you pass `--usage` (or set `FLEET_USAGE=1` in the e
 
 Without `--usage` or `FLEET_USAGE=1`, Claude Fleet makes no network requests at all and does not ask the keychain for anything.
 
-**When the read fails, the screen says exactly why:** `keychain: item not found`, `keychain: no answer in 5s`, `keychain: exit N`, `keychain: entry is not JSON`, `keychain: no claude.ai login in entry`, `keychain: closed to remote sessions (ssh/mosh)`, `login file: not found`, `login file: no claude.ai login in it`, `token expired · any Claude Code session renews it`, `Anthropic answered 401` (or whatever status it gave), `network: timed out`. It says `no Claude Code login found` only when the keychain and the login file both answered "not found". It tries again by itself, a minute after a failure and then less often, and `u` retries at once.
+**When the read fails, the screen says exactly why:** `keychain: item not found`, `keychain: no answer in 5s`, `keychain: exit N`, `keychain: entry is not JSON`, `keychain: no claude.ai login in entry`, `keychain: closed to remote sessions (ssh/mosh)`, `login file: not found`, `login file: no claude.ai login in it`, `token expired · any Claude Code session renews it`, `Anthropic answered 401` (or whatever status it gave), `network: timed out`. It says `no Claude Code login found` only when the keychain and the login file both answered "not found". It tries again by itself, a minute after a failure and then less often (every five minutes while the keychain is closed or not answering), and `u` retries at once.
 
-**Over ssh or mosh on a Mac** the read fails with `keychain: closed to remote sessions (ssh/mosh)`: macOS finds the keychain item but will not hand its content to a remote login. There are two standard remedies, and neither has been tested here:
+### In a remote session (ssh or mosh)
 
-- run `security unlock-keychain ~/Library/Keychains/login.keychain-db` in the remote session, or
+On a Mac, a dashboard started over ssh or mosh cannot read the login, and says `keychain: closed to remote sessions (ssh/mosh)`.
+
+The cause, as found on the machine this was written on: the keychain call Claude Fleet makes (`security find-generic-password -s "Claude Code-credentials" -w`) finds the item, but macOS refuses to return its content to a remote login session. The command exits non-zero, and the system log records `CSSMERR_CSP_NO_USER_INTERACTION` and `error while checking integrity, denying access`. The fallback file `~/.claude/.credentials.json` existed there but held no claude.ai login. From a terminal opened on the Mac itself, or from a Claude Code background session, the same read works.
+
+Claude Fleet gives this reason when the keychain call fails and either its error says that user interaction is not allowed, or the dashboard can see it is in a remote session: `SSH_CONNECTION`, `SSH_TTY`, `SSH_CLIENT` or a `MOSH_SERVER_…` variable is set, or one of its parent processes is `sshd` or `mosh-server`.
+
+There are two standard remedies. **Neither has been tested here:**
+
+- run `security unlock-keychain ~/Library/Keychains/login.keychain-db` in the remote session, then press `u`; or
 - run Claude Fleet inside a tmux that was started on the Mac itself.
 
-While the read is failing for this reason, the screen prints these on one dim line under the account figures.
+While the read is failing for this reason, the screen prints them on one dim line under the header's figures.
 
-**Shared figures.** So that a dashboard in a remote terminal can still show usage, a dashboard that reads the figures successfully saves them to `${XDG_CACHE_HOME:-~/.cache}/claude-fleet/usage.json` (readable only by you). It holds Anthropic's figures and the time they were fetched, and never the login. This is the one file Claude Fleet ever writes. A dashboard whose own read fails shows the figures from that file, or failing that the ones Claude Code itself last cached (the `cachedUsageUtilization` entry of `~/.claude.json`; no other key is read). Figures under ten minutes old are shown as current. Older ones are shown dim with the time they date from and the reason the read is failing. Figures more than a day old are not shown.
+Claude Fleet does not work around the refusal. It has no helper process and no password prompt, it does not refresh the token, and it reads no other program's credentials. The one read it makes is the one above.
+
+### Shared figures
+
+What a remote dashboard can do is show figures that another dashboard has already fetched. A dashboard that reads the figures successfully saves them to `${XDG_CACHE_HOME:-~/.cache}/claude-fleet/usage.json` (readable only by you, and replaced in one step so a reader never sees half a file). It holds Anthropic's figures and the time they were fetched, and never the login. **This is the one file Claude Fleet ever writes.** (Bun, which runs it, may keep a compiled copy of the script in its own cache; that is the runtime's file and holds nothing of yours.)
+
+A dashboard whose own read fails shows the figures from that file, or failing that the ones Claude Code itself last cached (the `cachedUsageUtilization` entry of `~/.claude.json`; no other key is read), whichever is newer. So one dashboard left running in a terminal on the Mac keeps a remote one supplied.
+
+- Figures under ten minutes old are shown as current.
+- Older ones are shown dim, with the time they date from and the reason the read is failing.
+- Figures more than a day old, or stamped in the future, are not shown: the block reads `no reading yet`, the reason, and when the next try is.
 
 ## Things to know
 
 - **It reads Claude Code's on-disk files, which are not a documented interface.** It was written against Claude Code 2.1.296 on macOS. Another version may move things, and parts of the screen will then come up empty. Linux should work but has not been tried.
-- **"Stalled?" is a question, not a finding.** A thread is marked when it has had a tool call outstanding and written nothing for ten minutes (`--stall <minutes>`; 0 turns it off) while the session's whole process tree is under 1% CPU. A tool that is waiting on another machine looks exactly the same. Only a session that is working can be marked.
-- **Agent status is inferred.** A spinner means the agent wrote to its transcript in the last minute. A white `◐` means a tool call has been outstanding longer than that (red, with `stalled?`, once the stall watch marks it). A grey circle means quiet with nothing outstanding.
-- **Context categories are estimates (marked `≈`).** They are sized from the length of the prompt, tool definitions, memory files and skill listing recorded in the transcript, with the rest counted as messages. They will not match `/context` exactly, and small categories are drawn slightly larger than scale so they stay visible.
+- **"Stalled?" is a question, not a finding.** See the stall watch above. Only a session that is working can be marked, and nothing is claimed when its process was not found. Once something is marked it stays marked until it writes again or its process tree is properly busy (5% CPU), so a tree idling either side of 1% does not make the mark blink.
+- **Agent status is inferred.** A spinner means the agent wrote to its transcript in the last minute. A white `◐` means a tool call has been outstanding longer than that. A grey `○` means quiet with nothing outstanding.
+- **Graphs sit on clock edges.** A bar covers a fixed stretch of wall-clock time, so a sparkline changes only when a tool call lands in it, and steps one cell left when a bar closes. The price is that a "30m" window shows between 29 and 30 minutes, ending with the bar still filling. Every total on the screen is counted on the same bars.
+- **Context categories are estimates.** They are sized from the length of the prompt, tool definitions, memory files and skill listing recorded in the transcript, with the rest counted as messages. They will not match `/context` exactly, and small categories are drawn slightly larger than scale so they stay visible.
 - **The window size is assumed:** 1M tokens for Opus, Sonnet and Fable 5 models, or anything already past 200k; otherwise 200k.
-- **The summary and the question are not generated here.** They come from the status a background session records about itself, or from a pending question in the transcript. Sessions that record neither show no summary.
+- **The summary and the question are not generated here.** They come from the status a background session records about itself, or from a pending question in the transcript. Sessions that record neither show your last prompt or Claude's last reply on that line.
+- **Text from a session is reduced to plain one-cell characters** before it is drawn, so nothing in it can push a column out of line: `✅` becomes `✓`, other emoji are dropped, and wide characters outside Latin (Chinese, Japanese, Korean) become `?`.
 - **Only the last 2 MB of each transcript is read,** so a long window on a very busy session can undercount early activity.
+- **Under 80 columns the layout is not designed.** Rows are cut at the right edge so that none wraps.
 - **Your screen shows prompt and reply text from every session.** Mind who can see it.
 
 ## Development
 
-`bun demo.ts` builds a throwaway set of fake sessions and runs the dashboard against it; it accepts the same options. `bun run screenshots` regenerates the images above from that demo.
+`bun demo.ts` builds a throwaway set of fake sessions on a made-up machine and runs the dashboard against it; it accepts the same options. `bun run screenshots` regenerates the images above from that demo, with the clock pinned so they come out the same every time.
 
 The demo has options of its own, so every state can be seen without waiting for it to happen:
 
@@ -133,7 +205,7 @@ The demo has options of its own, so every state can be seen without waiting for 
 | `--surprise` | `--stalled --runway --account early --seen 18` together. |
 | `--real-machine` | This machine's CPU, memory and load instead of the made-up ones. |
 
-`bun test` runs the tests in `fleet.test.ts` (Bun's built-in runner, no packages). `tools/check-frames` renders the demo at seven terminal sizes in all three modes and fails if a frame has the wrong number of rows, a line wider than the terminal, or the text "undefined" or "NaN" on it. `bun run check` runs both.
+`bun test` runs the tests in `fleet.test.ts` (Bun's built-in runner, no packages). `tools/check-frames` renders the demo at seven terminal sizes in all three modes and fails if a frame has the wrong number of rows, a line wider than the terminal, or the text "undefined" or "NaN" on it. `bun run check` runs both. `tools/shot.sh out.png 150 44` renders one demo frame to a PNG for looking at (it needs `rsvg-convert`).
 
 These environment variables exist for tests and screenshots only:
 
