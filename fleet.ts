@@ -5950,7 +5950,7 @@ tick(); setInterval(tick, 2000);
 </script></body></html>`;
 
 /** The web server, once key w has started it: where it listens and the link to open. */
-export const web: { url?: string; host?: string; onTailnet?: boolean; server?: { stop: () => void }; error?: string; send?: typeof sendToSession } = {};
+export const web: { url?: string; host?: string; onTailnet?: boolean; server?: { stop: () => void }; error?: string; send?: typeof sendToSession; shared?: boolean; retake?: () => void } = {};
 const sameToken = (a: string, b: string) => a.length === b.length && crypto.timingSafeEqual ? (() => { try { return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b)); } catch { return false; } })() : a === b;
 /** This Mac's Tailscale IPv4 address, when it has one. */
 function tailnetAddress(): string | undefined {
@@ -6114,7 +6114,7 @@ export function sendToSession(s: Session, raw: string): Promise<{ ok: boolean; v
 
 /** Start serving the page (once). Every request must carry the secret; anything but the page and its data is a 404. */
 export function startWeb(getSessions: () => Session[], now: () => number = clock): typeof web {
-  if (web.server || web.error) return web;
+  if (web.server || web.error || web.shared) return web;
   let token: string;
   try {
     token = webToken();
@@ -6125,7 +6125,8 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
   const tail = tailnetAddress();
   const host = tail ?? "127.0.0.1";
   const headers = { "cache-control": "no-store", "referrer-policy": "no-referrer", "x-frame-options": "DENY", "x-content-type-options": "nosniff", "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" };
-  for (let port = Number(process.env.FLEET_WEB_PORT) || 4777, tries = 0; tries < 20; port++, tries++) {
+  const base = Number(process.env.FLEET_WEB_PORT) || 4777;
+  const serveOn = (port: number) => {
     try {
       const server = Bun.serve({
         hostname: host,
@@ -6158,11 +6159,28 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
           return new Response("not found", { status: 404, headers });
         },
       });
-      Object.assign(web, { server, host, onTailnet: !!tail, url: `http://${host}:${port}/?t=${token}` });
-      return web;
-    } catch {}
-  }
-  web.error = "could not find a free port from 4777";
+      Object.assign(web, { server, host, onTailnet: !!tail, url: `http://${host}:${port}/?t=${token}`, shared: false });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (serveOn(base)) return web;
+  // The port is taken, most likely by another fleet, which keeps the same secret and so answers the same link: use
+  // that, so the link (and a home-screen icon) is the same whichever fleet serves it. Check it really is a fleet; if
+  // not, serve on the next free port. And take the page over when the other fleet quits.
+  Object.assign(web, { host, onTailnet: !!tail, url: `http://${host}:${base}/?t=${token}`, shared: true });
+  const fallBack = () => {
+    for (let port = base + 1; port < base + 20; port++) if (serveOn(port)) return;
+    Object.assign(web, { url: undefined, shared: false, error: `could not find a free port from ${base}` });
+  };
+  fetch(`http://${host}:${base}/manifest.webmanifest?t=${token}`, { signal: AbortSignal.timeout(2000) })
+    .then((r) => r.json())
+    .then((m) => (m?.name === "Claude Fleet" ? undefined : fallBack()))
+    .catch(fallBack);
+  web.retake = () => {
+    if (web.shared && serveOn(base)) web.retake = undefined;
+  };
   return web;
 }
 
@@ -6177,6 +6195,7 @@ export function webScreen(cols: number, rows: number): string[] {
     for (const line of qr) out.push("  " + line);
     out.push("", fg(C.text, "  " + web.url));
     out.push(
+      ...(web.shared ? [fg(C.dim, "  Another fleet on this Mac is serving it (same link); this one takes over if that one quits.")] : []),
       fg(C.dim, web.onTailnet ? "  On your tailnet: any of your Tailscale devices can open it, nothing else can." : "  No Tailscale here, so it is open on this Mac only (127.0.0.1)."),
       fg(C.dim, "  The link is the key and stays the same, so add it to your home screen. It can type messages into your"),
       fg(C.dim, "  sessions, so keep it to yourself. Delete ~/.config/claude-fleet/web-token to change it."),
@@ -6366,7 +6385,12 @@ let sessions: Session[] = [];
 const needing = new Set<string>(); // sessions that were waiting on the person at the last scan
 const askedAt = new Map<string, number>(); // …and when each one's question was asked, the last time the bell rang for it
 const stalledNow = new Map<string, number>();
+let retakeAt = 0;
 function refresh() {
+  if (web.retake && Date.now() >= retakeAt) {
+    retakeAt = Date.now() + 10_000; // when the fleet serving the page quits, this one takes it over
+    web.retake();
+  }
   const now = clock();
   sessions = scan(now);
   prune(now);
@@ -6407,6 +6431,9 @@ if (import.meta.main) {
     process.stdout.write(render(sessions, cols, rows, clock()).join("\n") + "\n");
     process.exit(0);
   }
+
+  // The phone page is always on (key w shows its link), except for made-up sessions (the demo and tests) or FLEET_WEB=0.
+  if (!process.env.FLEET_HOME && process.env.FLEET_WEB !== "0") startWeb(() => sessions);
 
   const out = process.stdout;
   let onScreen: string[] | undefined; // the frame the terminal shows, so the next writes only the rows that differ
