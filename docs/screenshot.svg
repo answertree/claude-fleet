@@ -684,29 +684,26 @@
 <text x="22.4" y="801" fill="#0c1014" font-weight="700" textLength="84.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> 1 Detail </text>
 <rect x="114.8" y="788" width="92.4" height="18" fill="#282d36"/>
 <text x="114.8" y="801" fill="#c6cdd7" textLength="92.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> 2 Compact </text>
-<rect x="215.6" y="788" width="58.8" height="18" fill="#282d36"/>
-<text x="215.6" y="801" fill="#c6cdd7" textLength="58.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> 3 Far </text>
-<rect x="282.8" y="788" width="100.8" height="18" fill="#282d36"/>
-<text x="282.8" y="801" fill="#c6cdd7" textLength="100.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> 4 Timeline </text>
+<rect x="215.6" y="788" width="100.8" height="18" fill="#282d36"/>
+<text x="215.6" y="801" fill="#c6cdd7" textLength="100.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> 3 Timeline </text>
+<rect x="333.2" y="788" width="25.2" height="18" fill="#282d36"/>
+<text x="333.2" y="801" fill="#c6cdd7" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> − </text>
+<text x="366.8" y="801" fill="#5c6370" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">30m </text>
 <rect x="400.4" y="788" width="25.2" height="18" fill="#282d36"/>
-<text x="400.4" y="801" fill="#c6cdd7" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> − </text>
-<text x="434.0" y="801" fill="#5c6370" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">30m </text>
-<rect x="467.6" y="788" width="25.2" height="18" fill="#282d36"/>
-<text x="467.6" y="801" fill="#c6cdd7" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> + </text>
-<rect x="509.6" y="788" width="75.6" height="18" fill="#282d36"/>
-<text x="509.6" y="801" fill="#c6cdd7" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> a All·1 </text>
-<rect x="593.6" y="788" width="67.2" height="18" fill="#282d36"/>
-<text x="593.6" y="801" fill="#c6cdd7" textLength="67.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> d Done </text>
-<rect x="669.2" y="788" width="25.2" height="18" fill="#282d36"/>
-<text x="669.2" y="801" fill="#c6cdd7" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> b </text>
-<rect x="702.8" y="788" width="92.4" height="18" fill="#282d36"/>
-<text x="702.8" y="801" fill="#c6cdd7" textLength="92.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> ␣ Seen·12 </text>
-<rect x="803.6" y="788" width="67.2" height="18" fill="#282d36"/>
-<text x="803.6" y="801" fill="#c6cdd7" textLength="67.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> / Find </text>
-<rect x="879.2" y="788" width="75.6" height="18" fill="#282d36"/>
-<text x="879.2" y="801" fill="#c6cdd7" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> r Reply </text>
-<rect x="963.2" y="788" width="25.2" height="18" fill="#282d36"/>
-<text x="963.2" y="801" fill="#c6cdd7" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> ? </text>
-<rect x="1005.2" y="788" width="67.2" height="18" fill="#282d36"/>
-<text x="1005.2" y="801" fill="#c6cdd7" textLength="67.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> q Quit </text>
+<text x="400.4" y="801" fill="#c6cdd7" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> + </text>
+<rect x="442.4" y="788" width="75.6" height="18" fill="#282d36"/>
+<text x="442.4" y="801" fill="#c6cdd7" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> a All·1 </text>
+<rect x="526.4" y="788" width="67.2" height="18" fill="#282d36"/>
+<text x="526.4" y="801" fill="#c6cdd7" textLength="67.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> d Done </text>
+<rect x="602.0" y="788" width="25.2" height="18" fill="#282d36"/>
+<text x="602.0" y="801" fill="#c6cdd7" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> b </text>
+<rect x="635.6" y="788" width="92.4" height="18" fill="#282d36"/>
+<text x="635.6" y="801" fill="#c6cdd7" textLength="92.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> ␣ Seen·12 </text>
+<rect x="736.4" y="788" width="75.6" height="18" fill="#282d36"/>
+<text x="736.4" y="801" fill="#c6cdd7" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> r Reply </text>
+<rect x="820.4" y="788" width="25.2" height="18" fill="#282d36"/>
+<text x="820.4" y="801" fill="#c6cdd7" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> ? </text>
+<rect x="862.4" y="788" width="67.2" height="18" fill="#282d36"/>
+<text x="862.4" y="801" fill="#c6cdd7" textLength="67.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> q Quit </text>
+<text x="938.0" y="801" fill="#3a404a" textLength="327.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">            click a session to focus it</text>
 </svg>

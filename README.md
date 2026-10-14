@@ -88,16 +88,14 @@ One rule for colour: warm means you. Amber is spent only where you are needed an
 | Key | Mode | For |
 | --- | --- | --- |
 | `1` | Detail | Sitting at the screen. Everything above. |
-| `2` | Compact | Many sessions. One line per session and per agent, under the plainer header. |
-| `3` | Far | A spare monitor across the room. Big cards where colour and shape carry the state. |
+| `2` | Compact | Many sessions. The detail view without the conversation or the lines under tasks: head rows, side facts, the task list and every thread, under the plainer header. |
+| `3` | Timeline | A spare monitor across the room. Big cards where colour and shape carry the state, each with its activity chart and, under the chart, what happened when: `▸` you typed to it, `⇡` it linked a pull request, `≡` a workflow started, `✓` a task was finished. |
 
-![Far mode](docs/screenshot-far.svg)
+![Timeline mode](docs/screenshot-far.svg)
+
+In detail mode, while there is room to spare, a block breathes: a blank row between one message and the next, before the tasks and before the threads. These are the first rows to go when the screen fills.
 
 Click a session, or press `tab`, to focus on it alone; it then gets the whole screen, with its whole question, every reply it still holds in full and every agent. `tab` again moves to the next session and `esc` goes back.
-
-**4, Timeline.** Each session's last hours as a swim-lane: how busy it was (shaded, brighter for more), amber from when it began waiting on you, red from when it stalled; under it what happened, `▸` when you typed to it, `⇡` a pull request linked, `≡` a workflow started, `✓` a task finished. One hour axis for all of them. `+` and `-` change its window: 1, 3, 6 (the default), 12 or 24 hours.
-
-**Search.** `/` and type: the screen narrows to the sessions whose name, folder, branch, tasks, agents, workflows or pull requests match every word, idle and finished ones included. Enter keeps the search, Esc clears it.
 
 **Reply.** `r` opens the session that has waited on you longest (or the one in focus) with `claude attach`, so you can answer it; leave it with `←` or Ctrl+Z and the dashboard comes back. Claude Code has no way to put a line into a running session from outside, so this is the shortest way in.
 
@@ -107,7 +105,8 @@ Every control has a key, and all but `tab` and `esc` are also buttons on the bot
 
 | Key | Does |
 | --- | --- |
-| `1` `2` `3` | View mode |
+| `1` `2` `3` | View mode: detail, compact, timeline |
+| `r` | Open the session that has waited on you longest (or the one in focus) to answer it |
 | `+` `-` | Sparkline window: 5, 15, 30, 60 or 180 minutes (from another window given on the command line, the next of these up or down) |
 | `a` | Show idle and finished sessions too. The button carries how many there are |
 | `d` | List finished agents instead of counting them |
@@ -122,7 +121,7 @@ Every control has a key, and all but `tab` and `esc` are also buttons on the bot
 | Option | Does |
 | --- | --- |
 | a number | The window in minutes (default 30) |
-| `--mode detail\|compact\|far` | Start in that view |
+| `--mode detail\|compact\|timeline` | Start in that view (`far` also works for the timeline) |
 | `--all` | Start with idle and finished sessions shown |
 | `--no-usage` | Do not show your account's usage limits (see below); `FLEET_USAGE=0` in the environment does the same |
 | `--no-prs` | Do not ask GitHub, through `gh`, for the CI state of each session's pull requests (by default it asks every two minutes per open pull request, every 15 once merged or closed) |

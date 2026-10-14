@@ -221,7 +221,7 @@ describe("graphs hold still", () => {
       for (const mode of ["detail", "compact", "far"] as F.Mode[]) {
         F.opt.mode = mode;
         const a = frameAt(now);
-        expect(a).toContain(mode === "compact" ? "flaky test hunt" : "F L A K Y");
+        expect(a).toContain("F L A K Y");
         expect(frameAt(now + 1000)).toBe(a);
         // Sanity: the test can see movement. Half an hour later every bar has emptied.
         expect(frameAt(now + 31 * MIN)).not.toBe(a);
@@ -1669,12 +1669,12 @@ describe("since you looked", () => {
   test("the buttons carry the hidden count and the count of new things", () => {
     resetSeen(NOW);
     expect(strip(F.buttonBar(200, 44, 1))).toContain(" a All · 1 idle ");
-    expect(strip(F.buttonBar(150, 44, 1))).toContain(" a All·1 "); // the shorter labels at 150
+    expect(strip(F.buttonBar(110, 44, 1))).toContain(" a All·1 "); // the shorter labels at 110
     expect(strip(F.buttonBar(200, 44, 0))).toContain(" a All ");
     expect(strip(F.buttonBar(200, 44))).toContain(" space Seen ");
     F.seen.events.push(...Array.from({ length: 4 }, (_, i) => ({ kind: "reply" as F.EventKind, t: NOW + i, sid: "a", key: "k" })));
     expect(strip(F.buttonBar(210, 44, 1))).toContain(" space Seen · 4 new ");
-    expect(strip(F.buttonBar(150, 44, 1))).toContain(" ␣ Seen·4 ");
+    expect(strip(F.buttonBar(110, 44, 1))).toContain(" ␣ Seen·4 ");
     expect(strip(F.buttonBar(210, 44, 1))).not.toContain("Retry usage"); // only while a usage read is failing
     for (const W of [80, 100, 110, 130, 150, 200]) expect(F.cells(F.buttonBar(W, 44, 3))).toBeLessThanOrEqual(W);
     resetSeen(NOW);
@@ -2057,9 +2057,9 @@ describe("header and chrome", () => {
 
   test("the button bar carries the hidden count, and its labels shorten in two steps", () => {
     const bar = (W: number, idle = 1, account = "current") => draw(account, () => strip(F.buttonBar(W, 44, idle)).trimEnd());
-    expect(bar(200)).toBe("  1 Detail   2 Compact   3 Far   4 Timeline    −  30m  +    a All · 1 idle   d Finished agents   b Bell   space Seen   / Search   r Reply   ? Legend    q Quit              click a session to focus it");
-    expect(bar(150)).toBe("  1 Detail   2 Compact   3 Far   4 Timeline    −  30m  +    a All·1   d Done   b   ␣ Seen   / Find   r Reply   ?    q Quit");
-    expect(bar(80, 1, "remote")).toBe("  1   2   3   4    −  30m  +    a   d   b   u   ␣   /   r   ?    q");
+    expect(bar(150)).toBe("  1 Detail   2 Compact   3 Timeline    −  30m  +    a All · 1 idle   d Finished agents   b Bell   space Seen   r Reply   ? Legend    q Quit");
+    expect(bar(110)).toBe("  1 Detail   2 Compact   3 Timeline    −  30m  +    a All·1   d Done   b   ␣ Seen   r Reply   ?    q Quit");
+    expect(bar(80, 1, "remote")).toBe("  1   2   3    −  30m  +    a   d   b   u   ␣   r   ?    q");
     // "u Retry usage" is there only while a usage read is failing, whatever figures are on screen.
     expect([bar(220, 1, "none"), bar(220, 1, "stale"), bar(220, 1, "shared")].map((b) => b.includes(" u Retry usage "))).toEqual([true, true, true]);
     expect([bar(220), bar(220, 1, "off")].map((b) => b.includes("Retry"))).toEqual([false, false]);
@@ -2070,7 +2070,7 @@ describe("header and chrome", () => {
       const frame = draw("current", () => F.render(fleet(), 150, 44, NOW).map(strip), { mode });
       expect(frame.length).toBe(44);
       expect(frame.join("\n")).not.toMatch(/hidden|a shows/);
-      expect(frame.at(-1)).toContain(" a All·1 ");
+      expect(frame.at(-1)).toContain(" a All · 1 idle ");
     }
   });
 
@@ -2082,7 +2082,7 @@ describe("header and chrome", () => {
       const text = lines.join("\n");
       for (const word of ["needs you", "stalled?", "working", "your turn", "idle", "finished", "you", "Claude", "earlier", "live", "in progress", "not started", "done", "failed", "workflow", "no reading", "pace", "context", "rail"]) expect([cols, word, text.includes(word)]).toEqual([cols, word, true]);
       for (const glyph of ["▲", "◐", "●", "▸", "○", "✓", "✗", "◆", "◇", "⠋", "≡", "━", "┼", "┿", "╌", "█", "▌", "░", "■", "•", "…", "┴", "▼"]) expect([cols, glyph, text.includes(glyph)]).toEqual([cols, glyph, true]);
-      for (const key of ["1 2 3 4", "+ -", "a ", "d ", "tab", "esc", "b u", "/ r", "space", "? ", "q "]) expect([cols, key, lines.some((l) => l.includes(key))]).toEqual([cols, key, true]);
+      for (const key of ["1 2 3", "+ -", "a ", "d ", "tab", "esc", "b u", "r ", "space", "? ", "q "]) expect([cols, key, lines.some((l) => l.includes(key))]).toEqual([cols, key, true]);
       expect(lines.at(-1)).toContain("any key or click returns");
     }
     // With --plain-glyphs it shows the stand-ins the screen is drawing.
@@ -2140,39 +2140,19 @@ describe("header and chrome", () => {
     for (const l of frame) expect(F.width(l)).toBeLessThanOrEqual(150);
   });
 
-  test("compact rows keep today's columns with the new glyphs and words", () => {
-    const rawFrame = screen("compact");
-    const frame = rawFrame.map(strip);
-    const text = frame.join("\n");
-    const line = (part: string) => frame.find((l) => l.includes(part)) ?? "";
-    // Session rows: the lead glyph is the state; the place uses @; the status cell has no second warning glyph.
-    expect(line("checkout flow")).toMatch(/^ ▲ checkout flow red…  bg aaaaaaaa    work\/shop @ feature\/c…  NEEDS YOU · 6m       [▁▂▃▄▅▆▇█]{25} +\d+ tools +\S+ out   ctx 37%/);
-    expect(line("flaky test hunt")).toMatch(/^ ● flaky test hunt     bg bbbbbbbb    work\/shop @ fix\/flaky…  working · up 1h04    /);
-    expect(line("docs site search")).toMatch(/^ ● docs site search    interactive …  work\/docs @ main        working · up 22m     /); // "busy" reads "working"
-    expect(line("release notes")).toMatch(/^ ▸ release notes dra…  interactive …  work\/docs @ docs\/rele…  your turn · 12m      /);
-    expect(line("rename billing")).toMatch(/^ ✓ rename billing mo…  bg dddddddd    work\/shop @ main        finished · 50m       /);
-    expect(rawFrame.join("\n")).toContain(F.bold(F.fg(F.C.amber, "NEEDS YOU · 6m     ")));
-    expect(rawFrame.join("\n")).toContain(F.fg(F.C.blue, "▸") + " "); // a your-turn row leads with a blue ▸
-    expect(rawFrame.join("\n")).toContain(F.fg(F.C.dim, "work/shop @ feature/c…")); // the place is dim, no longer blue
-    // The question: ▲ and bold white on the amber tint, under the session.
-    expect(line("Approve dropping")).toBe("   └─ ▲ Approve dropping the legacy coupon_code column before I run the migration? ");
-    expect(rawFrame.join("\n")).toContain(`\x1b[48;2;52;38;0m${F.bold(F.fg(F.C.amber, "▲"))}${F.bold(F.fg(F.C.white, " Approve dropping the legacy coupon_code column before I run the migration? "))}\x1b[49m`);
-    // Workflow row: ≡, the current phase as ◐ and its name, steps as ticks.
-    expect(line("bisect-and-fix")).toMatch(/^   └─ ≡ bisect-and-fix                     ◐ Fix                        ✓✓◐◐◐                2\/5     [▁▂▃▄▅▆▇█]{25}     up 14m/);
-    expect(rawFrame.join("\n")).toContain(F.fg(F.C.green, "✓✓") + F.fg(F.C.white, "◐◐◐"));
-    // Agent rows: live is a green spinner; a tool call outstanding is a white ◐ with the tool's name in cyan and its hint after it.
-    expect(line("fix:retry-backoff")).toMatch(/^      ├─ ⠋ fix:retry-backoff +workflow · opus +[▁▂▃▄▅▆▇█]{25}  thinking +live$/);
-    expect(line("review:clock-in-refund")).toMatch(/^      └─ ◐ review:clock-in-refund +workflow · opus +[▁▂▃▄▅▆▇█]{25}  Bash  Run the refund tests 200 times un… +4m$/);
-    expect(rawFrame.join("\n")).toContain(F.fg(F.C.white, "◐") + " " + F.fg(F.C.text, "review:clock-in-refund").slice(0, -5));
-    expect(rawFrame.join("\n")).toContain(F.fg(F.C.cyan, "Bash") + "  " + F.fg(F.C.text, "Run the refund tests 200 times un…"));
-    expect(line("agent finished")).toBe("   └─ ✓ 1 agent finished in the last 30m  ·  d lists them");
-    // None of the old vocabulary is left, and nothing but the needs-you marks is amber.
-    for (const old of ["⚠", "⚙", "⎇", "? needs you", "(d to list)", "busy ·", "phase ", "●●"]) expect([old, text.includes(old)]).toEqual([old, false]);
-    const amber = "\x1b[38;2;229;181;68m";
-    const amberText = rawFrame.join("\n").split(amber).slice(1).map((piece) => strip(piece.split("\x1b[39m")[0]).trim());
-    expect([...new Set(amberText)].sort()).toEqual(["NEEDS YOU · 6m", "▲", "▲ 1 needs you"]);
-    for (const l of frame) expect(F.width(l)).toBeLessThanOrEqual(150);
-  });
+  test("compact is the detail view without the conversation or the lines under tasks: head rows, side facts, the task list and the threads stay", () => {
+    const demoFrame = (mode: string) => strip(Bun.spawnSync([process.execPath, path.join(here, "demo.ts"), "--plain", "--once", "--mode", mode], { env: { ...process.env, COLUMNS: "150", LINES: "44", TZ: "UTC", FLEET_NOW: String(NOW) } }).stdout.toString()).split("\n").filter((l, i, all) => i < all.length - 1 || l);
+    const compact = demoFrame("compact");
+    const detail = demoFrame("detail");
+    const text = compact.join("\n");
+    expect(compact.filter((l) => /^ ██ [A-Z0-9](?: [A-Z0-9 ])+/.test(l)).length).toBe(detail.filter((l) => /^ ██ [A-Z0-9](?: [A-Z0-9 ])+/.test(l)).length); // the same head rows
+    expect(compact.some((l) => /^ ▌  [⠋◐○✓≡]/.test(l))).toBe(true); // and threads
+    expect(compact.filter((l) => /^ ▌  [◇◆] /.test(l))).toEqual([]); // no replies
+    expect(detail.filter((l) => /^ ▌  [◇◆] /.test(l)).length).toBeGreaterThan(0);
+    expect(compact.length).toBe(44);
+    expect(compact.some((l) => /^ ▌    [◐○] /.test(l))).toBe(true); // the task list, its names only
+    expect(compact.some((l) => /^ ▌        \S/.test(l))).toBe(false); // no lines under the tasks
+  }, 30_000);
 
   test("an ended workflow shows ✓ or ✗ in place of ≡, and step glyphs are ticks, never dots", () => {
     expect(strip(F.pips(2, 1, 6, 6))).toBe("✓✓◐○○○");
@@ -2185,8 +2165,8 @@ describe("header and chrome", () => {
       return s;
     };
     const row = (status: string) => draw("off", () => F.render(ended(status), 150, 44, NOW).map(strip).find((l) => l.includes("bisect-and-fix")) ?? "", { mode: "compact" });
-    expect(row("completed")).toMatch(/^   └─ ✓ bisect-and-fix +✓✓✓✓✓ +5\/5 +[▁▂▃▄▅▆▇█]{25}  completed   412k tok$/);
-    expect(row("failed")).toMatch(/^   └─ ✗ bisect-and-fix .* failed/);
+    expect(row("completed")).toMatch(/^ ▌  ✓ bisect-and-fix +completed · 412k tok +✓ ✓ ✓ ✓ ✓  5\/5 /);
+    expect(row("failed")).toMatch(/^ ▌  ✗ bisect-and-fix .*failed/);
     expect(row("completed")).not.toContain("◐");
   });
 
@@ -2203,6 +2183,10 @@ describe("header and chrome", () => {
 });
 
 describe("the detail view", () => {
+  // These tests pin exact layouts drawn without the blank rows that spacing adds while there is room; spacing has its own tests below.
+  const airyWas = F.opt.airy;
+  beforeAll(() => (F.opt.airy = false));
+  afterAll(() => (F.opt.airy = airyWas));
   const plain = (rows: string[]) => rows.map((r) => strip(r).trimEnd());
   const text = (segs: F.Seg[]) => segs.map((s) => s[0]).join("");
   /** A transcript's rows with the branch it was on, as Claude Code writes them. */
@@ -2903,21 +2887,17 @@ describe("the detail view", () => {
     }
   });
 
-  test("render() draws detail mode with this view and leaves compact mode's tree alone", () => {
-    const before = { ...F.opt };
+  test("render() draws detail and compact with this view, and the timeline with its cards", () => {
+    const saved = { ...F.opt };
     try {
-      F.opt.mode = "detail";
-      const detail = F.render(three(NOW), 150, 44, NOW).map(strip);
-      expect(detail.length).toBe(44);
-      expect(detail.some((r) => r.startsWith(" ██ C H E C K O U T   F L O W   R E D E S I G N"))).toBe(true);
-      expect(detail.some((r) => r.startsWith(" ▌  ≡ bisect-and-fix"))).toBe(true);
-      expect(detail.join("\n")).not.toMatch(/[├└]/);
-      F.opt.mode = "compact";
-      const compact = F.render(three(NOW), 150, 44, NOW).map(strip);
-      expect(compact.join("\n")).toMatch(/[├└]─/);
-      expect(compact.join("\n")).not.toContain("C H E C K O U T");
+      for (const mode of ["detail", "compact"] as F.Mode[]) {
+        Object.assign(F.opt, { mode, usage: false });
+        expect([mode, F.render(three(NOW), 150, 44, NOW).map(strip).some((l) => l.startsWith(" ██ F L A K Y"))]).toEqual([mode, true]);
+      }
+      Object.assign(F.opt, { mode: "far" });
+      expect(F.render(three(NOW), 150, 44, NOW).map(strip).some((l) => /^ ██ +.*[▁▂▃▄▅▆▇█]/.test(l))).toBe(true);
     } finally {
-      Object.assign(F.opt, before);
+      Object.assign(F.opt, saved);
     }
   });
 
@@ -3109,6 +3089,35 @@ describe("the detail view", () => {
       const title = draw([s], 200, 60)[0];
       expect(title).toContain("work/shop @ fix/flaky-payments · bg bbbbbbbb · 2.4M tok · 5 agents · compacted 2×");
       expect(draw([s], 150, 60)[0]).not.toContain("2.4M tok"); // too long here: the totals go first
+    });
+  });
+
+  // ── spacing ──
+
+  test("with room to spare a block breathes: a blank row between messages, before the tasks and before the threads; it is the first thing to go", () => {
+    quietly(() => {
+      F.opt.airy = true;
+      try {
+        const s = withTasks(busy(NOW), tasksOf("ddrp", ["Alpha", "Bravo", "Charlie", "Delta"]));
+        const rows = draw([s], 150, 80).map((r) => r.slice(0, 104).trimEnd());
+        const blank = (i: number) => rows[i] === " ▌";
+        const replies = rows.map((r, i) => (/^ ▌  [◇◆▸] /.test(r) ? i : -1)).filter((i) => i > 0);
+        expect(replies.length).toBeGreaterThan(1);
+        for (const i of replies.slice(1)) expect([i, blank(i - 1)]).toEqual([i, true]); // each message after the first has a blank row above it
+        const strip = rows.findIndex((r) => /^ ▌  ([✓◐○] ?)+ +\d+\/\d+/.test(r));
+        expect(blank(strip - 1)).toBe(true);
+        const main = rows.findIndex((r) => r.includes("main thread"));
+        expect(blank(main - 1)).toBe(true);
+        // Short of rows, the blank rows go before anything else: the conversation and the list are untouched.
+        const keepAt = (avail: number) => plan([s], 150, avail).blocks[0].keep;
+        let h = 200;
+        while (keepAt(h).airy) h--;
+        const k = keepAt(h);
+        const full = keepAt(200);
+        expect([k.airy, k.earlier, k.reply, k.prompt, k.taskDetail, k.taskList]).toEqual([false, full.earlier, full.reply, full.prompt, full.taskDetail, full.taskList]);
+      } finally {
+        F.opt.airy = false;
+      }
     });
   });
 
@@ -3519,18 +3528,9 @@ describe("the detail view", () => {
   });
 });
 
-describe("search, reply, deploys and the timeline", () => {
+describe("reply, deploys and the timeline cards", () => {
   const sess = (o: Partial<F.Session>): F.Session => ({ sid: "s1", pid: 1, name: "party", kind: "bg", status: "busy", cwd: "/w", startedAt: NOW - 60 * MIN, mains: [], agents: [], workflows: [], ...o }) as F.Session;
 
-  test("a search finds a session by any of its words: name, folder, task, agent, workflow, pull request", () => {
-    const s = sess({
-      name: "flaky test hunt", cwd: "/work/shop",
-      tasks: { done: 0, doing: 1, total: 1, active: "", items: [{ id: "1", subject: "Fix the refund tests", activeForm: "Fixing", status: "in_progress", blocked: false, description: "clock" }] },
-      side: { prs: [{ repo: "o/r", number: 413, url: "", t: NOW }], bg: [], fails: [], edits: [], compactions: 0 },
-    });
-    for (const text of ["flaky", "SHOP", "refund", "#413", "flaky refund", ""]) expect([text, F.matchesSearch(s, text)]).toEqual([text, true]);
-    for (const text of ["checkout", "flaky checkout", "#41"]) expect([text, F.matchesSearch(s, text) && text !== "#41"]).toEqual([text, false]);
-  });
 
   test("r opens the session in focus, else the one that has waited on you longest", () => {
     const blocked = (sid: string, since: number) => sess({ sid, status: "idle", job: { state: "blocked", detail: "", needs: "Approve?", since } });
@@ -3559,79 +3559,26 @@ describe("search, reply, deploys and the timeline", () => {
     expect(strip(out)).toContain("#412 ✓ merged · ✓ live on staging");
   }, 30_000);
 
-  test("the timeline: a swim-lane per session shaded by activity, the marks of what happened, an hour axis, exactly the rows it is given", () => {
+  test("timeline cards mark what happened under their chart, each mark where its time falls, newest at the right", () => {
     const main = F.newTail("/nowhere/tl.jsonl");
-    for (const m of [10, 11, 12, 30, 31, 200]) F.noteHist(main, NOW - m * MIN);
-    main.askLog.push(NOW - 31 * MIN);
-    main.taskLog.set("1", { started: NOW - 40 * MIN, finished: NOW - 12 * MIN });
-    const s = sess({ name: "flaky test hunt", mains: [main], side: { prs: [{ repo: "o/r", number: 9, url: "", t: NOW - 100 * MIN }], bg: [], fails: [], edits: [], compactions: 0 } });
+    main.askLog.push(NOW - 25 * MIN);
+    main.taskLog.set("1", { started: NOW - 20 * MIN, finished: NOW - 3 * MIN });
+    const s = sess({ name: "flaky test hunt", mains: [main], side: { prs: [{ repo: "o/r", number: 9, url: "", t: NOW - 14 * MIN }], bg: [], fails: [], edits: [], compactions: 0 } });
+    expect(F.marksOf(s).map((m) => m[2]).sort()).toEqual(["⇡", "▸", "✓"].sort());
     const saved = { ...F.opt };
     try {
-      Object.assign(F.opt, { mode: "timeline", timelineMin: 360 });
-      const views = F.buildViews([s], NOW);
-      for (const [W, avail] of [[150, 30], [100, 10], [200, 60]]) {
-        const rows = F.timelineView(views, W, avail, NOW, 0).map(strip);
-        expect([W, rows.length]).toEqual([W, avail]);
-        expect(rows.every((r) => F.width(r) <= W)).toBe(true);
-        expect(rows[0]).toContain("flaky test hunt");
-        expect(rows.some((r) => /[▁▂▃▄▅▆▇█]/.test(r))).toBe(true); // the lane's bars
-        expect(rows.some((r) => /─{5}/.test(r))).toBe(true); // and its baseline where nothing happened
-        expect(rows.some((r) => /[▸✓⇡]/.test(r))).toBe(true); // the marks
-        expect(rows.at(-1)).toMatch(/┴\d\d:00.*now$/);
-      }
-      // Six hours on 150 columns: the marks fall where their times put them, newest at the right.
-      const r = F.timelineView(views, 150, 30, NOW, 0).map(strip);
-      const marks = r.find((x) => /[▸✓⇡]/.test(x))!;
-      expect(marks.lastIndexOf("✓")).toBeGreaterThan(marks.indexOf("⇡"));
-      expect(r.slice(0, 4).every((x) => /^ (██|▌ )/.test(x))).toBe(true); // a tall screen gives one session four rows of bars
+      Object.assign(F.opt, { mode: "far", windowMin: 30, usage: false });
+      const frame = F.render([s], 150, 40, NOW).map(strip);
+      const marks = frame.find((l) => /[▸✓⇡]/.test(l) && l.startsWith(" ██ "))!;
+      expect(marks.indexOf("▸")).toBeLessThan(marks.indexOf("⇡"));
+      expect(marks.indexOf("⇡")).toBeLessThan(marks.indexOf("✓"));
+      const at = frame.indexOf(marks);
+      expect(frame[at + 1]).toBe(""); // and a blank row still parts the cards
     } finally {
       Object.assign(F.opt, saved);
     }
   });
 
-  test("live: / types a search that narrows the screen, Esc clears it; r with nothing waiting says so", async () => {
-    const live = await liveDemo();
-    try {
-      expect(await live.until(() => strip(live.after()).includes("D O C S"))).toBe(true);
-      live.write("/");
-      for (const ch of "docs") live.write(ch);
-      live.write("\r");
-      expect(await live.until(() => strip(live.after()).includes("/docs") && !strip(live.after()).includes("F L A K Y"))).toBe(true);
-      live.write("\x1b");
-      expect(await live.until(() => strip(live.after()).includes("F L A K Y"))).toBe(true);
-    } finally {
-      await live.stop();
-    }
-  }, 60_000);
-});
-
-describe("celebrations", () => {
-  const sess = (o: Partial<F.Session>): F.Session => ({ sid: "p1", pid: 1, name: "party", kind: "bg", status: "busy", cwd: "/w", startedAt: NOW - 60 * MIN, mains: [], agents: [], workflows: [], ...o }) as F.Session;
-  const side = (n: number): F.Side => ({ prs: [{ repo: "o/r", number: n, url: "", t: NOW }], bg: [], fails: [], edits: [], compactions: 0 });
-  const pr = (state: string, pass: number, fail: number, pending: number) => ({ at: NOW, state: { state, draft: false, pass, fail, pending } });
-
-  test("a pull request merged or gone green, a workflow completed, a task list all done: each starts one, and what was already so at launch does not", () => {
-    F.parties.clear();
-    const wf = (status: string) => ({ id: "wf_p", name: "bisect", status, phase: "", phases: [], seen: [], started: NOW, finished: 0, agents: [], lastT: NOW }) as unknown as F.Workflow;
-    const tasks = (done: number) => ({ done, doing: 0, total: 3, active: "", items: [] });
-    F.prState.set("o/r#9", pr("OPEN", 3, 0, 2));
-    F.prState.set("o/r#8", pr("MERGED", 0, 0, 0)); // merged before launch: no party
-    try {
-      const at = (now: number, wfStatus: string, done: number) => F.noteParties([sess({ side: { ...side(9), prs: [...side(9).prs, { repo: "o/r", number: 8, url: "", t: NOW }] }, workflows: [wf(wfStatus)], tasks: tasks(done) })], now);
-      expect(at(NOW, "running", 2)).toEqual([]); // the first scan only takes note
-      F.prState.set("o/r#9", pr("OPEN", 5, 0, 0));
-      expect(at(NOW + 2000, "running", 2)).toEqual(["p1 #9 CI green"]);
-      F.prState.set("o/r#9", pr("MERGED", 5, 0, 0));
-      expect(at(NOW + 4000, "completed", 3)).toEqual(["p1 #9 merged", "p1 bisect done", "p1 all 3 tasks done"]);
-      expect(F.partyOn("p1", NOW + 4000)?.text).toBe("all 3 tasks done"); // the latest wins
-      expect(at(NOW + 6000, "completed", 3)).toEqual([]); // once each
-      expect(F.partyOn("p1", NOW + 4000 + F.PARTY_MS + 1)).toBeUndefined(); // and it ends
-    } finally {
-      F.prState.delete("o/r#9");
-      F.prState.delete("o/r#8");
-      F.parties.clear();
-    }
-  });
 
   test("while it celebrates, the title shimmers through the rainbow and what it finished stands where the place was", () => {
     const frame = (W: number) => Bun.spawnSync([process.execPath, path.join(here, "demo.ts"), "--plain", "--party", "--once"], { env: { ...process.env, COLUMNS: String(W), LINES: "44", TZ: "UTC", FLEET_NOW: String(NOW) } }).stdout.toString();
@@ -3905,10 +3852,11 @@ describe("one program: the header, the sessions and the buttons agree", () => {
         // Detail and far count on the same bars, so a figure does not change when the view does.
         expect(sumOf(far.slice(1, 2), / (\d+) tools$/g)).toBe(sumOf(detail.slice(1, 2), / (\d+) tools$/g));
       }
+      // Compact is the detail view without the conversation: its sessions' figures add up to its header's total too.
       const compact = frame("compact", 200, 60, now);
       const total = sumOf(compact.slice(0, 1), / (\d+) tool calls \/ 30m/g);
       expect(total).toBeGreaterThan(100);
-      expect([now, sumOf(compact.slice(3), / (\d+) tools /g)]).toEqual([now, total]);
+      expect([now, sumOf(compact.slice(3), / (\d+) tools\s*$/g)]).toEqual([now, total]);
     }
   });
 
@@ -3916,7 +3864,7 @@ describe("one program: the header, the sessions and the buttons agree", () => {
     const lines = frame("detail", 150, 44, NOW, false);
     expect(lines[0]).toContain("▲ 1 needs you    ● 2 working    ⠋ 4 agents    ≡ 1 workflow    ○ 1 idle");
     expect(lines.filter((l) => l.startsWith(" ██ ")).length).toBe(3 * 2); // three sessions on screen, two head rows each
-    expect(lines[43]).toContain(" a All·1 ");
+    expect(lines[43]).toContain(" a All · 1 idle ");
     expect(lines.join("\n")).not.toContain("hidden"); // the line that used to say so is gone from every mode
     for (const mode of MODES) expect([mode, frame(mode, 150, 44, NOW, false).join("\n").includes("hidden")]).toEqual([mode, false]);
 
@@ -3932,7 +3880,7 @@ describe("one program: the header, the sessions and the buttons agree", () => {
     };
     expect([withAgent(edge - 10_000), withAgent(edge + 10_000)]).toEqual([["4", false], ["5", true]]);
     // The frame's window is the lane's in detail and far mode, and the rows' own shorter strips in compact mode.
-    expect([F.frameWindow(NOW, 150, "detail"), F.frameWindow(NOW, 150, "far"), F.frameWindow(NOW, 110, "detail").n, F.frameWindow(NOW, 150, "compact").n]).toEqual([F.laneWindow(NOW, 150), F.laneWindow(NOW, 150), 20, 25]);
+    expect([F.frameWindow(NOW, 150, "detail"), F.frameWindow(NOW, 150, "far"), F.frameWindow(NOW, 110, "detail").n, F.frameWindow(NOW, 150, "compact").n]).toEqual([F.laneWindow(NOW, 150), F.laneWindow(NOW, 150), 20, 30]);
   });
 
   test("tab walks the sessions in the order the screen lists them, and passes over the ones it keeps off", () => {
@@ -3964,7 +3912,7 @@ describe("one program: the header, the sessions and the buttons agree", () => {
     try {
       for (const [cols, rows] of [[150, 34], [150, 44], [110, 44], [200, 60]]) {
         const at = (mode: F.Mode) => (Object.assign(F.opt, { mode, usage: false, windowMin: 30, showAll: true }), F.render(crowd(NOW), cols, rows, NOW).map(strip));
-        expect([cols, rows, at("detail")[rows - 2].trim() !== "", at("compact")[rows - 2].trim(), at("far")[rows - 2].trim()]).toEqual([cols, rows, true, "", ""]);
+        expect([cols, rows, at("detail")[rows - 2].trim() !== "", at("far")[rows - 2].trim()]).toEqual([cols, rows, true, ""]); // compact's shorter blocks may leave rows to spare
         for (const mode of MODES) expect(at(mode).length).toBe(rows);
       }
     } finally {
@@ -4872,9 +4820,9 @@ describe("graphs hold still, checked independently", () => {
       for (const mode of ["detail", "compact"] as F.Mode[]) {
         F.opt.mode = mode;
         // The detail view folds an agent group only once it is longer than three (and then shows as many as fit), so there six idle agents stand ahead of the busy one.
-        const session = () => twoAgents(mode === "detail" ? 6 : 0);
+        const session = () => twoAgents(6);
         const tall = F.render([session()], 150, 30, NOW);
-        const short = F.render([session()], 150, mode === "compact" ? 8 : 15, NOW);
+        const short = F.render([session()], 150, mode === "compact" ? 13 : 15, NOW);
         expect(barsOf(tall, "the busy one")).toBeDefined(); // on the tall screen every thread has its row
         expect(barsOf(short, "the busy one")).toBeUndefined(); // on the short one the quiet agent has folded away
         expect(short.map(strip).join("\n")).toContain("more agent");
