@@ -2,10 +2,12 @@
 // Claude Fleet: one screen showing every live Claude Code session on this
 // machine and the subagents, workflows and tasks under each.
 //
-// Read-only: it tails the transcripts under ~/.claude/projects and reads the
-// session registry, workflow journals and task files. With --usage it also
-// asks Anthropic for your account's usage figures, using the Claude Code login
-// already stored on this machine.
+// It only reads Claude Code's files: it tails the transcripts under
+// ~/.claude/projects and reads the session registry, workflow journals and
+// task files. With --usage it also asks Anthropic for your account's usage
+// figures, using the Claude Code login already stored on this machine, and
+// saves those figures (never the login) for other dashboards: the one file it
+// ever writes.
 //
 // Usage: bun fleet.ts [minutes] [options]     (see --help)
 
