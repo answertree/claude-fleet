@@ -89,12 +89,12 @@ Click a session, or press `tab`, to focus on it alone; it then gets the whole sc
 
 ## Controls
 
-Every control is a button on the bottom row, and each has a key.
+Every control has a key, and all but `tab` and `esc` are also buttons on the bottom row (a click on a session does what `tab` does for it).
 
 | Key | Does |
 | --- | --- |
 | `1` `2` `3` | View mode |
-| `+` `-` | Sparkline window: 5, 15, 30, 60 or 180 minutes |
+| `+` `-` | Sparkline window: 5, 15, 30, 60 or 180 minutes (from another window given on the command line, the next of these up or down) |
 | `a` | Show idle and finished sessions too. The button carries how many there are |
 | `d` | List finished agents instead of counting them |
 | `tab` | Focus the next session |

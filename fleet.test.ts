@@ -1558,7 +1558,7 @@ describe("header and chrome", () => {
       const text = lines.join("\n");
       for (const word of ["needs you", "stalled?", "working", "your turn", "idle", "finished", "you", "Claude", "earlier", "live", "in progress", "not started", "done", "failed", "workflow", "no reading", "pace", "context", "rail"]) expect([cols, word, text.includes(word)]).toEqual([cols, word, true]);
       for (const glyph of ["▲", "◐", "●", "▸", "○", "✓", "✗", "◆", "◇", "⠋", "≡", "━", "┼", "╌", "█", "▌", "░", "┴", "▼"]) expect([cols, glyph, text.includes(glyph)]).toEqual([cols, glyph, true]);
-      for (const key of ["1 2 3", "+ -", "a ", "d ", "tab", "b ", "u ", "space", "? ", "q "]) expect([cols, key, lines.some((l) => l.includes(key))]).toEqual([cols, key, true]);
+      for (const key of ["1 2 3", "+ -", "a ", "d ", "tab", "esc", "b ", "u ", "space", "? ", "q "]) expect([cols, key, lines.some((l) => l.includes(key))]).toEqual([cols, key, true]);
       expect(lines.at(-1)).toContain("any key or click returns");
     }
     // With --plain-glyphs it shows the stand-ins the screen is drawing.
@@ -2679,6 +2679,98 @@ describe("the login stays inside the process", () => {
       const r = run(["--mode", mode]);
       expect(r.code).toBe(0);
       expect([r.security, r.fetches, r.ours]).toEqual([[], [], []]);
+    }
+  }, 60_000);
+});
+
+/**
+ * The live dashboard on a pseudo-terminal, against the demo's made-up sessions and a pinned clock. `after()`
+ * is what has been written since the screen was last cleared: every change of view clears it and draws in full.
+ */
+async function liveDemo(args: string[] = [], cols = 150, rows = 44) {
+  let out = "";
+  const proc = Bun.spawn([process.execPath, path.join(here, "demo.ts"), ...args], {
+    env: { ...process.env, TZ: "UTC", FLEET_NOW: String(NOW) },
+    terminal: { cols, rows, data: (_t: unknown, d: Uint8Array) => void (out += new TextDecoder().decode(d)) },
+  } as any);
+  const t = (proc as any).terminal;
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  let exited = false;
+  void proc.exited.then(() => (exited = true));
+  const until = async (ok: () => boolean, ms = 15_000) => {
+    for (const end = Date.now() + ms; Date.now() < end && !ok(); ) await sleep(25);
+    return ok();
+  };
+  await until(() => out.includes("q Quit"));
+  return {
+    write: (s: string) => t.write(s),
+    sleep,
+    until,
+    all: () => out,
+    after: () => out.slice(out.lastIndexOf("\x1b[2J")),
+    alive: () => !exited,
+    stop: async () => {
+      if (!exited) proc.kill();
+      await proc.exited;
+    },
+  };
+}
+
+describe("keys and clicks", () => {
+  test("a read is split into keys, left-button presses and sequences that do nothing; a sequence cut off at the end is kept for the next read", () => {
+    const keys = (s: string) => F.inputEvents(s).events.map((e) => (e.kind === "key" ? e.key : e.kind === "press" ? `press ${e.col},${e.row}` : "other"));
+    expect(keys("q")).toEqual(["q"]);
+    expect(keys("23")).toEqual(["2", "3"]); // two keys that arrived together both count
+    expect(keys("++")).toEqual(["+", "+"]);
+    expect(keys("\x1b[<0;108;44M")).toEqual(["press 108,44"]);
+    expect(keys("\x1b[<0;108;44m")).toEqual(["other"]); // the release of the same click
+    expect(keys("\x1b[<0;108;44M\x1b[<0;108;44m")).toEqual(["press 108,44", "other"]);
+    expect(keys("\x1b[<64;10;10M\x1b[<2;10;10M")).toEqual(["other", "other"]); // the wheel, the right button
+    expect(keys("\x1b[A\x1bOP\x1b[5~\x1b[I")).toEqual(["other", "other", "other", "other"]); // arrow, F1, page down, focus in
+    expect(keys("\x1bx")).toEqual(["other"]); // alt+x
+    expect(keys("\x1b\x1b")).toEqual(["\x1b"]); // two escapes: the first is Esc, the second may yet begin a sequence
+    expect(F.inputEvents("\x1b\x1b").rest).toBe("\x1b");
+    for (const cut of ["\x1b", "\x1b[", "\x1b[<0;40", "\x1bO"]) expect(F.inputEvents("a" + cut)).toEqual({ events: [{ kind: "key", key: "a" }], rest: cut });
+    expect(F.inputEvents("\x1b[<0;40;6M").rest).toBe("");
+  });
+
+  test("- and + step to the next listed window, from any window given on the command line", () => {
+    expect([F.stepWindow(30, -1), F.stepWindow(30, 1)]).toEqual([15, 60]);
+    expect([F.stepWindow(5, -1), F.stepWindow(180, 1)]).toEqual([5, 180]);
+    expect([F.stepWindow(10, -1), F.stepWindow(10, 1)]).toEqual([5, 15]); // never the wrong way
+    expect([F.stepWindow(120, -1), F.stepWindow(120, 1)]).toEqual([60, 180]);
+    expect([F.stepWindow(1, -1), F.stepWindow(1, 1)]).toEqual([1, 5]);
+    expect([F.stepWindow(45, -1), F.stepWindow(45, 1)]).toEqual([30, 60]);
+    expect([F.stepWindow(300, -1), F.stepWindow(300, 1)]).toEqual([180, 300]);
+  });
+
+  test("live: a click on the legend button keeps the legend up after the button is let go; two keys in one read both act", async () => {
+    const saved = { events: F.seen.events };
+    F.seen.events = [];
+    F.buttonBar(150, 44, 1); // the bar the live demo draws: one idle session kept off the screen, nothing new yet
+    F.seen.events = saved.events;
+    const button = F.clickTargets().filter((h) => h.act === "legend").pop()!;
+    const live = await liveDemo();
+    try {
+      live.write(`\x1b[<0;${button.x0 + 2};${button.row}M`);
+      expect(await live.until(() => live.after().includes("returns to the fleet"))).toBe(true);
+      await live.sleep(150);
+      live.write(`\x1b[<0;${button.x0 + 2};${button.row}m`); // the release, in a read of its own, as a real click sends it
+      await live.sleep(1500); // a redraw or two
+      expect(live.after()).toContain("returns to the fleet");
+      live.write("x"); // any key closes it
+      expect(await live.until(() => live.after().includes("q Quit"))).toBe(true);
+      live.write("++"); // 30m, 60m, 180m
+      expect(await live.until(() => strip(live.after()).includes(" 180m "))).toBe(true);
+      live.write("\x1b"); // an arrow key whose escape arrived on its own: not a bare Esc, which would quit
+      await live.sleep(10);
+      live.write("[A");
+      await live.sleep(400);
+      expect(live.alive()).toBe(true);
+      live.write("aq"); // q in a read with another key still quits
+      expect(await live.until(() => !live.alive(), 5000)).toBe(true);
+    } finally {
+      await live.stop();
     }
   }, 60_000);
 });

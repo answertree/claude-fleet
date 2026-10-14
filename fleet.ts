@@ -55,7 +55,8 @@ Usage: bun fleet.ts [minutes] [options]
 
 Keys: 1 2 3 view mode · + - window · a all sessions · d finished agents
       tab focus next session · b bell · u retry the usage read
-      space seen it (marks what is new from now on) · esc leave focus · q quit
+      space seen it (marks what is new from now on) · esc leave focus (with
+      nothing focused, quit) · q quit
       ? what every mark and key means (any key closes it)
 `;
 
@@ -4381,7 +4382,8 @@ export function legend(cols: number, rows: number): string[] {
     key("+ -", "window: 5 15 30 60 180 minutes"),
     key("a", "idle and finished sessions too"),
     key("d", "list finished agents"),
-    key("tab", "focus the next session; esc back"),
+    key("tab", "focus the next session"),
+    key("esc", "leave focus; with none, quit"),
     key("b", "bell for needs-you and stalls"),
     key("u", "retry the usage read now"),
     key("space", "seen it: clears the new marks"),
@@ -4413,6 +4415,46 @@ export function legend(cols: number, rows: number): string[] {
   out.push(fg(C.dim, "  any key or click returns to the fleet"));
   hits.length = 0;
   return out.map((line) => clipRow(line, cols));
+}
+
+// ───────────────────────── keys and clicks ─────────────────────────
+
+/** One thing read from the keyboard or mouse. */
+export type InputEvent =
+  | { kind: "key"; key: string } // one character, or "\x1b" for Esc
+  | { kind: "press"; col: number; row: number } // the left button going down, in 1-based cells
+  | { kind: "other" }; // a release, another button, the wheel, or a key sequence the dashboard has no use for
+/**
+ * One read from the terminal, as the events it holds, in order. Keys that arrive together (key repeat, a
+ * laggy link) are each a key. Mouse reports are SGR (ESC [ < button ; column ; row, then M for a press or m
+ * for a release); only a left-button press is a click. An escape sequence cut off at the end of the read is
+ * returned as `rest`, to be joined to the next read: a lone ESC is Esc only if nothing follows it soon.
+ */
+export function inputEvents(chunk: string): { events: InputEvent[]; rest: string } {
+  const events: InputEvent[] = [];
+  for (let i = 0; i < chunk.length; ) {
+    if (chunk[i] !== "\x1b") {
+      events.push({ kind: "key", key: chunk[i++] });
+      continue;
+    }
+    const at = chunk.slice(i);
+    const mouse = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])/.exec(at);
+    const seq = mouse ?? /^\x1b\[[0-?]*[ -\/]*[@-~]/.exec(at) ?? /^\x1bO[\s\S]/.exec(at);
+    if (seq) {
+      events.push(mouse && mouse[4] === "M" && mouse[1] === "0" ? { kind: "press", col: +mouse[2], row: +mouse[3] } : { kind: "other" });
+      i += seq[0].length;
+    } else if (/^\x1b(\[[0-?]*[ -\/]*|O)?$/.test(at)) return { events, rest: at }; // cut off: the rest is in the next read
+    else if (at[1] === "\x1b") (events.push({ kind: "key", key: "\x1b" }), i++); // Esc, and the next one may begin a sequence
+    else (events.push({ kind: "other" }), (i += 2)); // alt and a key
+  }
+  return { events, rest: "" };
+}
+/** Keys that arrive together beyond this many are a paste, not commands: a pasted word must not quit or toggle anything. */
+const PASTE_KEYS = 8;
+
+/** Key + and -: the next window in WINDOWS above or below `min`, which need not be one of them (a window given on the command line). */
+export function stepWindow(min: number, dir: 1 | -1): number {
+  return (dir > 0 ? WINDOWS.find((w) => w > min) : [...WINDOWS].reverse().find((w) => w < min)) ?? min;
 }
 
 // ───────────────────────── main loop ─────────────────────────
@@ -4473,11 +4515,10 @@ if (import.meta.main) {
 
   /** Every control, whether it came from a key or a click. */
   const act = (name: string) => {
-    const i = WINDOWS.indexOf(opt.windowMin);
     if (name === "quit") return quit();
     if (name.startsWith("mode:")) opt.mode = name.slice(5) as Mode;
-    else if (name === "win+") opt.windowMin = WINDOWS[Math.min(WINDOWS.length - 1, (i < 0 ? 2 : i) + 1)];
-    else if (name === "win-") opt.windowMin = WINDOWS[Math.max(0, (i < 0 ? 2 : i) - 1)];
+    else if (name === "win+") opt.windowMin = stepWindow(opt.windowMin, 1);
+    else if (name === "win-") opt.windowMin = stepWindow(opt.windowMin, -1);
     else if (name === "done") opt.showDone = !opt.showDone;
     else if (name === "all") opt.showAll = !opt.showAll;
     else if (name === "bell") opt.bell = !opt.bell;
@@ -4524,21 +4565,38 @@ if (import.meta.main) {
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(true);
     process.stdin.resume();
+    const handle = (events: InputEvent[]) => {
+      const keys = events.filter((e) => e.kind === "key");
+      if (keys.some((e) => e.kind === "key" && e.key === "\x03")) return quit(); // Ctrl-C quits from anywhere in a read
+      for (const e of events) {
+        if (e.kind === "other" || (e.kind === "key" && keys.length > PASTE_KEYS)) continue;
+        // The legend is closed by a key or a click, which then does nothing else. A button's release is not a click, so the click that opened it does not close it.
+        if (legendOn) {
+          legendOn = false;
+          out.write("\x1b[2J");
+          draw();
+          continue;
+        }
+        if (e.kind === "press") {
+          const hit = hits.find((h) => h.row === e.row && e.col >= h.x0 && e.col <= h.x1);
+          if (hit) act(hit.act);
+        } else if (KEYS[e.key]) act(KEYS[e.key]);
+      }
+    };
+    let held = ""; // an escape sequence cut off at the end of the last read
+    let heldTimer: ReturnType<typeof setTimeout> | undefined;
     process.stdin.on("data", (d: Buffer) => {
-      const k = d.toString();
-      // The legend is closed by any key or click, which then does nothing else. Ctrl-C still quits.
-      if (legendOn && k !== "\x03") {
-        legendOn = false;
-        out.write("\x1b[2J");
-        return draw();
-      }
-      // A left click, as the terminal reports it: ESC [ < button ; column ; row M
-      for (const m of k.matchAll(/\x1b\[<(\d+);(\d+);(\d+)M/g)) {
-        if (m[1] !== "0") continue;
-        const hit = hits.find((h) => h.row === +m[3] && +m[2] >= h.x0 && +m[2] <= h.x1);
-        if (hit) return act(hit.act);
-      }
-      if (KEYS[k]) act(KEYS[k]);
+      clearTimeout(heldTimer);
+      const { events, rest } = inputEvents(held + d.toString());
+      held = rest;
+      // Nothing more came: a lone ESC was the Esc key after all, and anything else cut off is dropped.
+      if (rest)
+        heldTimer = setTimeout(() => {
+          const was = held;
+          held = "";
+          if (was === "\x1b") handle([{ kind: "key", key: "\x1b" }]);
+        }, 60);
+      handle(events);
     });
   }
 }
