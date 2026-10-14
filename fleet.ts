@@ -2035,6 +2035,16 @@ export function bucketsIn(lists: number[][], win: Win): number[] {
 export const tailsOf = (s: Session): Tail[] => [...s.mains, ...s.agents.map((a) => a.tail), ...s.workflows.flatMap((w) => w.agents.map((a) => a.tail))];
 /** The window every sparkline in the lane shows at a terminal `W` cells wide: one bar per lane cell. */
 export const laneWindow = (now: number, W: number): Win => timeWindow(now, opt.windowMin * 60_000, grid(W).laneW);
+/**
+ * A far card's chart: `n` bars of `w` cells each in `cells` cells, so that no bar is shorter than the two
+ * seconds between data reads. One bar a cell, as everywhere else, unless the window is too short for that;
+ * then fewer, wider bars, and the strip steps at most once a read.
+ */
+export function farBars(cells: number, windowMs: number): { n: number; w: number } {
+  let w = 1;
+  while (Math.floor(cells / w) > 1 && windowMs / Math.floor(cells / w) < 2000) w++;
+  return { n: Math.max(1, Math.floor(cells / w)), w };
+}
 /** Bars in a compact row's sparkline at a terminal `W` cells wide. */
 const stripBars = (W: number) => Math.min(32, Math.max(12, Math.floor(W / 6)));
 /**
@@ -4250,7 +4260,9 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
     const fitCount = Math.max(1, Math.floor(avail / H));
     const cards = shown.slice(0, fitCount);
     const CW = Math.max(10, W - 40);
-    const farBuckets = new Map(cards.map((v) => [v.s.sid, buckets(tailsOf(v.s).map((t) => t.tools), now, CW)]));
+    const bars = farBars(CW, opt.windowMin * 60_000);
+    const chartAt = 5 + CW - bars.n * bars.w; // a chart of fewer, wider bars keeps to the right edge of its space
+    const farBuckets = new Map(cards.map((v) => [v.s.sid, buckets(tailsOf(v.s).map((t) => t.tools), now, bars.n)]));
     const farMax = Math.max(1, ...[...farBuckets.values()].map((b) => Math.max(...b)));
     const sideAt = 5 + CW + 3; // the side column: 32 cells, ending one short of the edge
     for (const v of cards) {
@@ -4268,7 +4280,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
         return r;
       };
       const top = out.length;
-      hits.push({ row: top + 1, x0: 1, x1: W, act: "focus:" + s.sid });
+      for (const row of [top + 1, top + 2]) hits.push({ row, x0: 1, x1: W, act: "focus:" + s.sid }); // the title and the subheading, as in detail mode
 
       // Title: the name in letter-spaced capitals. The state, its glyph first, ends at the right edge and never shrinks.
       const stateText = st.word.split("").join(" ");
@@ -4290,7 +4302,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
 
       const chartH = Math.max(1, H - 3);
       const cardBuckets = farBuckets.get(s.sid)!;
-      const chart = tallSpark(cardBuckets, farMax, chartH, ...RAMP.session);
+      const chart = tallSpark(cardBuckets.flatMap((v) => new Array(bars.w).fill(v)), farMax, chartH, ...RAMP.session);
       const agentsLive = [...s.agents, ...s.workflows.flatMap((w) => w.agents)].filter((a) => !a.done && lastWriteOf(a.tail) >= since).length;
       const wfLive = s.workflows.filter((w) => w.status === "running" && w.lastT >= since).length;
       const ctx = f.main?.ctx;
@@ -4329,7 +4341,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
         });
       for (let i = 0; i < chartH; i++) {
         const r = row();
-        r.paste(5, chart[i], CW);
+        r.paste(chartAt, chart[i], bars.n * bars.w);
         side[i]?.(r);
         out.push(r.toString());
       }
@@ -4720,6 +4732,19 @@ export function guardTerminal(restore: () => void): () => void {
   return once;
 }
 
+/**
+ * What to write to turn the screen from `prev` into `next` (both whole frames, a row each): only the rows
+ * that changed, each from its first column and erased to its end, and rows `next` no longer has cleared.
+ * With no `prev` (a cleared screen) every row is written. Most seconds only the clock, the spinners and a
+ * waiting session's rail change, so this is a few rows, where writing every row was 30 to 90 KB a second.
+ */
+export function frameDiff(prev: string[] | undefined, next: string[]): string {
+  let out = "";
+  for (let i = 0; i < next.length; i++) if (!prev || prev[i] !== next[i]) out += `\x1b[${i + 1};1H${next[i]}\x1b[K`;
+  if (prev) for (let i = next.length; i < prev.length; i++) out += `\x1b[${i + 1};1H\x1b[K`;
+  return out;
+}
+
 // ───────────────────────── main loop ─────────────────────────
 
 let sessions: Session[] = [];
@@ -4750,6 +4775,7 @@ if (import.meta.main) {
   }
 
   seen.at = Number(process.env.FLEET_SEEN) || clock(); // FLEET_SEEN (test only) starts the mark in the past
+  if (!process.stdout.isTTY) opt.once = true; // output to a file or a pipe: one frame, not screen codes for ever
   if (opt.once) {
     sampleMachine();
     if (opt.usage) await fetchUsage();
@@ -4762,9 +4788,16 @@ if (import.meta.main) {
   }
 
   const out = process.stdout;
+  let onScreen: string[] | undefined; // the frame the terminal shows, so the next writes only the rows that differ
   const draw = () => {
     const lines = legendOn ? legend(out.columns || 140, out.rows || 45) : render(sessions, out.columns || 140, out.rows || 45, clock());
-    out.write("\x1b[H" + lines.map((l) => l + "\x1b[K").join("\n"));
+    out.write(frameDiff(onScreen, lines));
+    onScreen = lines;
+  };
+  /** Clear the screen, so the next draw writes every row: on a change of view, a resize, and once a minute in case anything else wrote to the terminal. */
+  const clear = () => {
+    out.write("\x1b[2J");
+    onScreen = undefined;
   };
   /** The tab title follows the fleet's state. It is written only when it changes, and put back (or cleared) on the way out. */
   const retitle = () => out.write(titleChange(titleFor(fleetCounts(sessions, clock(), frameWindow(clock(), Math.max(60, out.columns || 140)).start)))); // the same window the screen's own counts use
@@ -4796,7 +4829,7 @@ if (import.meta.main) {
       if (!focusSid) return quit();
       focusSid = null;
     }
-    out.write("\x1b[2J");
+    clear();
     draw();
   };
 
@@ -4810,10 +4843,11 @@ if (import.meta.main) {
       refresh();
       retitle();
     }
+    if (frame % 60 === 0) onScreen = undefined; // a full repaint once a minute (without clearing, so nothing flickers)
     draw();
   }, 1000);
   out.on("resize", () => {
-    out.write("\x1b[2J");
+    clear();
     draw();
   });
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) process.on(signal, quit);
@@ -4835,7 +4869,7 @@ if (import.meta.main) {
         // The legend is closed by a key or a click, which then does nothing else. A button's release is not a click, so the click that opened it does not close it.
         if (legendOn) {
           legendOn = false;
-          out.write("\x1b[2J");
+          clear();
           draw();
           continue;
         }

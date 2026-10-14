@@ -3333,6 +3333,68 @@ describe("keys and clicks", () => {
   }, 60_000);
 });
 
+describe("what is written to the terminal", () => {
+  test("only the rows that changed are rewritten; a cleared screen gets every row", () => {
+    expect(F.frameDiff(undefined, ["a", "b"])).toBe("\x1b[1;1Ha\x1b[K\x1b[2;1Hb\x1b[K");
+    expect(F.frameDiff(["a", "b", "c"], ["a", "B", "c"])).toBe("\x1b[2;1HB\x1b[K");
+    expect(F.frameDiff(["a", "b"], ["a", "b"])).toBe("");
+    expect(F.frameDiff(["a", "b", "c"], ["a"])).toBe("\x1b[2;1H\x1b[K\x1b[3;1H\x1b[K"); // rows it no longer has are cleared
+  });
+
+  test("live: a second of the demo writes a fraction of a frame, and the screen still changes view in full", async () => {
+    const once = Bun.spawnSync([process.execPath, path.join(here, "demo.ts"), "--once"], { env: { ...process.env, TZ: "UTC", FLEET_NOW: String(NOW), COLUMNS: "150", LINES: "44" }, timeout: 20_000 });
+    const frame = once.stdout.length; // one whole frame
+    const live = await liveDemo();
+    try {
+      await live.sleep(1200); // past the first redraw
+      const from = live.all().length;
+      await live.sleep(3000);
+      const perSecond = (live.all().length - from) / 3;
+      expect(perSecond).toBeLessThan(frame / 2);
+      live.write("2");
+      expect(await live.until(() => live.after().includes("2 Compact") && strip(live.after()).includes("active session"))).toBe(true);
+    } finally {
+      await live.stop();
+    }
+  }, 60_000);
+
+  test("with its output going to a file or a pipe, it draws one frame and exits, as --once does", () => {
+    const r = Bun.spawnSync([process.execPath, path.join(here, "demo.ts")], { env: { ...process.env, TZ: "UTC", FLEET_NOW: String(NOW), COLUMNS: "120", LINES: "30" }, timeout: 20_000 });
+    expect(r.exitCode).toBe(0);
+    const out = r.stdout.toString();
+    expect(out).not.toContain("\x1b[?1049h");
+    expect(strip(out).split("\n").length).toBe(31);
+  }, 30_000);
+
+  test("far mode: a card's title row and its subheading row both focus it", () => {
+    const saved = { ...F.opt };
+    try {
+      Object.assign(F.opt, { mode: "far", usage: false });
+      const sessions = [sessionOf({ sid: "one", mains: [tailOf([prompt(NOW - 9 * MIN, "first"), toolCall(NOW - MIN)])] }), sessionOf({ sid: "two", mains: [tailOf([prompt(NOW - 9 * MIN, "second"), toolCall(NOW - MIN)])] })];
+      const frame = F.render(sessions, 150, 30, NOW).map(strip);
+      for (const sid of ["one", "two"]) {
+        const rows = F.clickTargets().filter((h) => h.act === `focus:${sid}`).map((h) => h.row);
+        const title = frame.findIndex((l) => l.includes([...sid.toUpperCase()].join(" "))) + 1;
+        expect([sid, rows]).toEqual([sid, [title, title + 1]]);
+      }
+    } finally {
+      Object.assign(F.opt, saved);
+    }
+  });
+
+  test("far charts never have bars shorter than the two seconds between data reads: on a short window they draw fewer, wider bars", () => {
+    expect(F.farBars(110, 30 * MIN)).toEqual({ n: 110, w: 1 });
+    expect(F.farBars(110, 5 * MIN)).toEqual({ n: 110, w: 1 }); // 2.7 s bars
+    expect(F.farBars(180, 5 * MIN)).toEqual({ n: 90, w: 2 }); // 1.7 s would be too short: 3.3 s, two cells each
+    expect(F.farBars(360, 5 * MIN)).toEqual({ n: 120, w: 3 });
+    for (const cells of [10, 50, 110, 180, 360, 1000]) for (const min of [5, 15, 30, 60, 180]) {
+      const { n, w } = F.farBars(cells, min * MIN);
+      expect(n * w).toBeLessThanOrEqual(cells);
+      expect((min * MIN) / n).toBeGreaterThanOrEqual(2000);
+    }
+  });
+});
+
 describe("the demo never reads the real login", () => {
   // A made-up `security` alone on PATH (beside bun itself) records every call. Whatever usage switch is given, the demo,
   // the frame checker and the screenshots must draw made-up figures and never ask it.
