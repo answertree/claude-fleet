@@ -1276,108 +1276,108 @@ export function scan(now: number): Session[] {
     const sid: string = reg.sessionId;
     // One entry that cannot be read is left out; the rest of the fleet is still drawn.
     try {
-    const loc = locate(sid, now);
-    const mains = loc.mains.map((m) => pump(m, true)).filter(Boolean) as Tail[];
-    const agents: Agent[] = [];
-    const workflows: Workflow[] = [];
+      const loc = locate(sid, now);
+      const mains = loc.mains.map((m) => pump(m, true)).filter(Boolean) as Tail[];
+      const agents: Agent[] = [];
+      const workflows: Workflow[] = [];
 
-    for (const dir of loc.dirs) {
-      const sub = path.join(dir, "subagents");
-      for (const name of ls(sub)) {
-        if (!name.startsWith("agent-") || !name.endsWith(".jsonl")) continue;
-        const a = loadAgent(path.join(sub, name));
-        if (a) agents.push(a);
-      }
-      const scripts = ls(path.join(dir, "workflows", "scripts"));
-      for (const wfId of ls(path.join(sub, "workflows"))) {
-        if (!wfId.startsWith("wf_")) continue;
-        const wfDir = path.join(sub, "workflows", wfId);
-        const j = journal(path.join(wfDir, "journal.jsonl"));
-        const state = readJson(path.join(dir, "workflows", wfId + ".json"));
-        const wfAgents: Agent[] = [];
-        for (const name of ls(wfDir)) {
+      for (const dir of loc.dirs) {
+        const sub = path.join(dir, "subagents");
+        for (const name of ls(sub)) {
           if (!name.startsWith("agent-") || !name.endsWith(".jsonl")) continue;
-          const id = name.slice(6, -6);
-          const a = loadAgent(path.join(wfDir, name), wfId, j.started.get(id), j.results.has(id) || !!state);
-          if (a) wfAgents.push(a);
+          const a = loadAgent(path.join(sub, name));
+          if (a) agents.push(a);
         }
-        const lastT = Math.max(j.mtime, ...wfAgents.map((a) => a.tail.mtime), 0);
-        const running = wfAgents.filter((a) => !a.done);
-        const script = scripts.find((x) => x.endsWith(`-${wfId}.js`));
-        const phases: string[] = Array.isArray(state?.phases) ? state.phases.map((p: any) => safeLine(p?.title)).filter(Boolean) : [];
-        workflows.push({
-          id: wfId,
-          name: safeLine(state?.workflowName || (script ? script.slice(0, -(wfId.length + 4)) : wfId)),
-          // The state file is written when a workflow ends. Without it the workflow is still going, even at a moment when no agent
-          // is (just launched, between two agents, the last one just reported), unless it has written nothing for minutes.
-          status: state?.status ? safeLine(state.status) : running.length || now - lastT < WF_QUIET_MS ? "running" : "stopped",
-          phase: currentPhase(j.phases, running),
-          phases,
-          seen: j.phases,
-          started: count(state?.startTime) || Math.min(...wfAgents.map((a) => a.tail.birth), now),
-          finished: state ? count(state.startTime) + count(state.durationMs) : 0,
-          agents: wfAgents,
-          lastT,
-          tokens: typeof state?.totalTokens === "number" ? state.totalTokens : undefined,
-        });
+        const scripts = ls(path.join(dir, "workflows", "scripts"));
+        for (const wfId of ls(path.join(sub, "workflows"))) {
+          if (!wfId.startsWith("wf_")) continue;
+          const wfDir = path.join(sub, "workflows", wfId);
+          const j = journal(path.join(wfDir, "journal.jsonl"));
+          const state = readJson(path.join(dir, "workflows", wfId + ".json"));
+          const wfAgents: Agent[] = [];
+          for (const name of ls(wfDir)) {
+            if (!name.startsWith("agent-") || !name.endsWith(".jsonl")) continue;
+            const id = name.slice(6, -6);
+            const a = loadAgent(path.join(wfDir, name), wfId, j.started.get(id), j.results.has(id) || !!state);
+            if (a) wfAgents.push(a);
+          }
+          const lastT = Math.max(j.mtime, ...wfAgents.map((a) => a.tail.mtime), 0);
+          const running = wfAgents.filter((a) => !a.done);
+          const script = scripts.find((x) => x.endsWith(`-${wfId}.js`));
+          const phases: string[] = Array.isArray(state?.phases) ? state.phases.map((p: any) => safeLine(p?.title)).filter(Boolean) : [];
+          workflows.push({
+            id: wfId,
+            name: safeLine(state?.workflowName || (script ? script.slice(0, -(wfId.length + 4)) : wfId)),
+            // The state file is written when a workflow ends. Without it the workflow is still going, even at a moment when no agent
+            // is (just launched, between two agents, the last one just reported), unless it has written nothing for minutes.
+            status: state?.status ? safeLine(state.status) : running.length || now - lastT < WF_QUIET_MS ? "running" : "stopped",
+            phase: currentPhase(j.phases, running),
+            phases,
+            seen: j.phases,
+            started: count(state?.startTime) || Math.min(...wfAgents.map((a) => a.tail.birth), now),
+            finished: state ? count(state.startTime) + count(state.durationMs) : 0,
+            agents: wfAgents,
+            lastT,
+            tokens: typeof state?.totalTokens === "number" ? state.totalTokens : undefined,
+          });
+        }
       }
-    }
 
-    let tasks: Session["tasks"];
-    const taskFiles = ls(path.join(CLAUDE, "tasks", sid)).filter((n) => n.endsWith(".json"));
-    if (taskFiles.length) {
-      const all = taskFiles.map((n) => readJson(path.join(CLAUDE, "tasks", sid, n))).filter(Boolean);
-      const open = all.filter((t) => t.status !== "deleted");
-      const current = open.find((t) => t.status === "in_progress");
-      tasks = {
-        done: open.filter((t) => t.status === "completed").length,
-        doing: open.filter((t) => t.status === "in_progress").length,
-        total: open.length,
-        active: safeLine(current?.activeForm || current?.subject),
-      };
-    }
-
-    let job: Session["job"];
-    if (reg.jobId && /^[\w-]+$/.test(String(reg.jobId))) {
-      const st = readJson(path.join(CLAUDE, "jobs", String(reg.jobId), "state.json"));
-      if (st) job = { state: safeLine(st.state), detail: typeof st.detail === "string" ? safeText(capText(st.detail, NOTE_KEEP)) : "", needs: typeof st.needs === "string" ? safeText(capText(st.needs, NOTE_KEEP)) : "" };
-    }
-    // A blocked job's wait starts when it began waiting on this question, and is not moved by later writes to its transcript (an
-    // away summary, a title). Seen to change while the dashboard watched: its state file's time, written when it asked. Already
-    // waiting when first seen: the earlier of that and its transcript's last write, as the state file may have been written since.
-    const held = waitingSince.get(sid);
-    if (job?.state === "blocked") {
-      if (held?.needs === job.needs) job.since = held.since;
-      else {
-        let stamped = 0;
-        try {
-          stamped = fs.statSync(path.join(CLAUDE, "jobs", String(reg.jobId), "state.json")).mtimeMs;
-        } catch {}
-        const wrote = Math.max(0, ...mains.map(lastWriteOf));
-        job.since = (held ? Math.min(stamped || now, now) : Math.min(stamped || Infinity, wrote || Infinity)) || undefined;
-        if (job.since === Infinity) job.since = undefined;
+      let tasks: Session["tasks"];
+      const taskFiles = ls(path.join(CLAUDE, "tasks", sid)).filter((n) => n.endsWith(".json"));
+      if (taskFiles.length) {
+        const all = taskFiles.map((n) => readJson(path.join(CLAUDE, "tasks", sid, n))).filter(Boolean);
+        const open = all.filter((t) => t.status !== "deleted");
+        const current = open.find((t) => t.status === "in_progress");
+        tasks = {
+          done: open.filter((t) => t.status === "completed").length,
+          doing: open.filter((t) => t.status === "in_progress").length,
+          total: open.length,
+          active: safeLine(current?.activeForm || current?.subject),
+        };
       }
-    }
-    waitingSince.set(sid, { needs: job?.state === "blocked" ? job.needs : "", since: job?.since ?? 0, used: scanSeq });
 
-    const title = mains.map((m) => m.title).find(Boolean);
-    const named = safeLine(reg.name && reg.name !== sid.slice(0, 8) ? reg.name : title || (reg.name ?? sid.slice(0, 8)));
-    const startedAt = Number(reg.startedAt);
-    sessions.push({
-      sid,
-      pid: reg.pid,
-      name: named,
-      kind: safeLine(reg.kind),
-      status: safeLine(reg.status),
-      cwd: safeLine(reg.cwd),
-      startedAt: Number.isFinite(startedAt) && startedAt > 0 ? startedAt : now,
-      mains,
-      agents,
-      workflows,
-      tasks,
-      job,
-      jobId: job ? String(reg.jobId) : undefined,
-    });
+      let job: Session["job"];
+      if (reg.jobId && /^[\w-]+$/.test(String(reg.jobId))) {
+        const st = readJson(path.join(CLAUDE, "jobs", String(reg.jobId), "state.json"));
+        if (st) job = { state: safeLine(st.state), detail: typeof st.detail === "string" ? safeText(capText(st.detail, NOTE_KEEP)) : "", needs: typeof st.needs === "string" ? safeText(capText(st.needs, NOTE_KEEP)) : "" };
+      }
+      // A blocked job's wait starts when it began waiting on this question, and is not moved by later writes to its transcript (an
+      // away summary, a title). Seen to change while the dashboard watched: its state file's time, written when it asked. Already
+      // waiting when first seen: the earlier of that and its transcript's last write, as the state file may have been written since.
+      const held = waitingSince.get(sid);
+      if (job?.state === "blocked") {
+        if (held?.needs === job.needs) job.since = held.since;
+        else {
+          let stamped = 0;
+          try {
+            stamped = fs.statSync(path.join(CLAUDE, "jobs", String(reg.jobId), "state.json")).mtimeMs;
+          } catch {}
+          const wrote = Math.max(0, ...mains.map(lastWriteOf));
+          job.since = (held ? Math.min(stamped || now, now) : Math.min(stamped || Infinity, wrote || Infinity)) || undefined;
+          if (job.since === Infinity) job.since = undefined;
+        }
+      }
+      waitingSince.set(sid, { needs: job?.state === "blocked" ? job.needs : "", since: job?.since ?? 0, used: scanSeq });
+
+      const title = mains.map((m) => m.title).find(Boolean);
+      const named = safeLine(reg.name && reg.name !== sid.slice(0, 8) ? reg.name : title || (reg.name ?? sid.slice(0, 8)));
+      const startedAt = Number(reg.startedAt);
+      sessions.push({
+        sid,
+        pid: reg.pid,
+        name: named,
+        kind: safeLine(reg.kind),
+        status: safeLine(reg.status),
+        cwd: safeLine(reg.cwd),
+        startedAt: Number.isFinite(startedAt) && startedAt > 0 ? startedAt : now,
+        mains,
+        agents,
+        workflows,
+        tasks,
+        job,
+        jobId: job ? String(reg.jobId) : undefined,
+      });
     } catch {}
   }
   // What was read for sessions and agents that have gone (their transcripts stay on disk, but no scan asks for them) is let go.
