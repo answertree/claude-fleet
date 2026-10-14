@@ -135,7 +135,7 @@ Each stays silent until it has something to say.
 
 **Since you looked: unread marks for a screen you walk away from.**
 
-- *Away.* The terminal's title is set to the fleet's state in the screen's own glyphs (`▲1 ●2 ≡1 Claude Fleet`: one waiting on you, two working, one workflow), so a tab or window switcher shows whether anything needs you. It is cleared when you quit.
+- *Away.* The terminal's title is set to the fleet's state in the screen's own glyphs (`▲1 ●2 ≡1 Claude Fleet`: one waiting on you, two working, one workflow), so a tab or window switcher shows whether anything needs you. When you quit, the title it had before is put back where the terminal keeps a title stack (xterm, iTerm2, kitty and others), and cleared elsewhere.
 - *Back.* `space` means "seen it". Until you press it again, every reply that arrived since then gets a bold white `◆` (`◇` for an earlier one) and the word `new` where its age would be; the left of the header's rule lists what has happened (`since 23:04 · ▲ 1 asked · ✓ 3 agents done · ◆ 4 new replies`); the `space` button carries the total; and a white `▼` on the time axis shows where your last look falls, so every sparkline below reads as before and after. It is a key of its own, so switching view to read something does not clear the marks.
 
 ## Account usage and your login
@@ -175,7 +175,7 @@ A dashboard whose own read fails shows the figures from that file, or failing th
 
 ## Things to know
 
-- **It reads Claude Code's on-disk files, which are not a documented interface.** It was written against Claude Code 2.1.296 on macOS. Another version may move things, and parts of the screen will then come up empty. Linux should work but has not been tried.
+- **It reads Claude Code's on-disk files, which are not a documented interface.** It was written against Claude Code 2.1.296 on macOS. Another version may move things, and parts of the screen will then come up empty. Linux should work but has not been tried. Anything it cannot read sensibly (a session id that is not a plain id, a named pipe or a folder where a file should be, a number that is not a number) is left out rather than drawn; and if something does go wrong, the terminal is put back before the error is printed.
 - **"Stalled?" is a question, not a finding.** See the stall watch above. Only a session that is working can be marked, and nothing is claimed when its process was not found. Once something is marked it stays marked until it writes again or its process tree is properly busy (5% CPU), so a tree idling either side of 1% does not make the mark blink.
 - **Agent status is inferred.** A spinner means the agent wrote to its transcript in the last minute. A white `◐` means a tool call has been outstanding longer than that. A grey `○` means quiet with nothing outstanding.
 - **A workflow is running until its state file says otherwise.** Claude Code writes that file when a workflow ends, so between two agents, or just after the last one reports, the workflow still shows as running. Without the file it is shown as stopped (`✗`) only after five minutes with no agent running and nothing written, and if it then carries on after all, the stop is taken back out of the since-you-looked list.

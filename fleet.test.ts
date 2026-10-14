@@ -625,6 +625,177 @@ describe("workflow phase trail", () => {
   });
 });
 
+describe("the dashboard survives what it reads", () => {
+  const root = path.join(SCRATCH, "survive");
+  /** A home with one genuine waiting session, plus whatever `plant` adds; drawn once by fleet.ts in a child process under a time limit. */
+  const once = (name: string, plant: (home: string) => void, mode = "detail") => {
+    const home = path.join(root, name);
+    fs.rmSync(home, { recursive: true, force: true });
+    const sid = "good0000-0000-4000-8000-000000000001";
+    fs.mkdirSync(path.join(home, "sessions"), { recursive: true });
+    fs.mkdirSync(path.join(home, "projects", "-p"), { recursive: true });
+    fs.writeFileSync(path.join(home, "sessions", "1.json"), JSON.stringify({ pid: process.pid, sessionId: sid, name: "good", kind: "bg", status: "idle", cwd: "/work", jobId: "j1", startedAt: NOW - 60 * MIN }));
+    fs.mkdirSync(path.join(home, "jobs", "j1"), { recursive: true });
+    fs.writeFileSync(path.join(home, "jobs", "j1", "state.json"), JSON.stringify({ state: "blocked", detail: "", needs: "Approve the plan?" }));
+    fs.writeFileSync(path.join(home, "projects", "-p", `${sid}.jsonl`), [prompt(NOW - 9 * MIN, "plan it"), reply(NOW - 6 * MIN, "Here is the plan.")].map((r) => JSON.stringify(r)).join("\n") + "\n");
+    plant(home);
+    const r = Bun.spawnSync([process.execPath, path.join(here, "fleet.ts"), "--once", "--mode", mode], { env: { PATH: process.env.PATH!, HOME: path.join(root, "nobody"), TZ: "UTC", FLEET_NOW: String(NOW), COLUMNS: "150", LINES: "44", FLEET_HOME: home, XDG_CACHE_HOME: path.join(root, "cache"), FLEET_HIDE_PROCESSES: "1" }, timeout: 15_000 });
+    return { code: r.exitCode, signal: r.signalCode ?? null, out: r.stdout.toString(), err: r.stderr.toString() };
+  };
+  const reg = (home: string, n: number, o: object) => fs.writeFileSync(path.join(home, "sessions", `${n}.json`), JSON.stringify({ pid: process.pid, status: "busy", cwd: "/x", ...o }));
+
+  test("a session id that is not a plain id is skipped: no escape reaches the terminal, no path leaves the projects folder, nothing throws", () => {
+    for (const [name, sessionId] of [["osc", "\u001b]2;OWN\u0007"], ["clear", "\u001b[2J\u001b[H"], ["number", 7], ["object", { a: 1 }], ["up", "../../outside/secret"], ["dotdot", ".."]] as [string, unknown][]) {
+      const r = once(`sid-${name}`, (home) => {
+        reg(home, 2, { sessionId, name: "planted" });
+        fs.mkdirSync(path.join(home, "outside"), { recursive: true });
+        fs.writeFileSync(path.join(home, "outside", "secret.jsonl"), JSON.stringify(reply(NOW - MIN, "TEXT-FROM-OUTSIDE")) + "\n");
+      });
+      expect([name, r.code, r.err]).toEqual([name, 0, ""]);
+      expect([name, r.out.includes("\u001b]2;"), r.out.includes("\u001b[2J"), r.out.includes("TEXT-FROM-OUTSIDE"), r.out.includes("PLANTED")]).toEqual([name, false, false, false, false]);
+      expect([name, strip(r.out).includes("Approve the plan?")]).toEqual([name, true]);
+    }
+  }, 60_000);
+
+  test("token counts that are not numbers are not drawn; human() never returns text it was not given", () => {
+    const t = F.newTail("x");
+    F.ingest(t, JSON.stringify({ type: "assistant", timestamp: iso(NOW - MIN), message: { id: "m1", model: "claude-opus-5-5", content: [{ type: "text", text: "hi" }], usage: { input_tokens: "\n\n\n\n\n\n\n\n\n\n5", cache_read_input_tokens: 90_000, output_tokens: 1 } } }));
+    expect(t.ctx?.used).toBe(90_000);
+    expect(F.human(Number.NaN)).toBe("?");
+    expect(F.human("\n\n5" as unknown as number)).toBe("?");
+  });
+
+  test("a named pipe, a directory where a file should be, or a tool schema nested 120,000 deep: drawn, never hung, never thrown", () => {
+    const sid2 = "other000-0000-4000-8000-000000000002";
+    const cases: [string, (home: string) => void][] = [
+      ["fifo-session", (home) => Bun.spawnSync(["mkfifo", path.join(home, "sessions", "pipe.json")])],
+      ["fifo-task", (home) => (fs.mkdirSync(path.join(home, "tasks", "good0000-0000-4000-8000-000000000001"), { recursive: true }), Bun.spawnSync(["mkfifo", path.join(home, "tasks", "good0000-0000-4000-8000-000000000001", "pipe.json")]))],
+      ["dir-journal", (home) => {
+        reg(home, 2, { sessionId: sid2, name: "wf" });
+        fs.mkdirSync(path.join(home, "projects", "-p", sid2, "subagents", "workflows", "wf_x", "journal.jsonl"), { recursive: true });
+      }],
+      ["dir-agent", (home) => {
+        reg(home, 2, { sessionId: sid2, name: "ag" });
+        fs.mkdirSync(path.join(home, "projects", "-p", sid2, "subagents", "agent-zz.jsonl"), { recursive: true });
+      }],
+      ["deep-schema", (home) => {
+        reg(home, 2, { sessionId: sid2, name: "deep" });
+        const deep = '{"type":"attachment","attachment":{"type":"prompt_snapshot","tools":[{"name":"x","schema":' + '{"a":'.repeat(120_000) + "1" + "}".repeat(120_000) + "}]}}";
+        fs.writeFileSync(path.join(home, "projects", "-p", `${sid2}.jsonl`), deep + "\n" + JSON.stringify(reply(NOW - MIN, "still here")) + "\n");
+      }],
+    ];
+    for (const [name, plant] of cases) {
+      const r = once(name, plant);
+      expect([name, r.signal, r.code, r.err.slice(0, 200)]).toEqual([name, null, 0, ""]);
+      expect([name, strip(r.out).includes("Approve the plan?")]).toEqual([name, true]);
+    }
+  }, 120_000);
+
+  test("whatever ends the program, the terminal is put back first", () => {
+    const script = `import { guardTerminal } from ${JSON.stringify(path.join(here, "fleet.ts"))};
+guardTerminal(() => process.stdout.write("RESTORED\\n"));
+setTimeout(() => { throw new Error("boom in a scan"); }, 5);`;
+    const r = Bun.spawnSync([process.execPath, "-e", script], { timeout: 15_000 });
+    expect(r.stdout.toString()).toBe("RESTORED\n");
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr.toString()).toContain("boom in a scan");
+    const rejected = Bun.spawnSync([process.execPath, "-e", script.replace('setTimeout(() => { throw new Error("boom in a scan"); }, 5);', 'void Promise.reject(new Error("rejected"));')], { timeout: 15_000 });
+    expect([rejected.stdout.toString(), rejected.exitCode]).toEqual(["RESTORED\n", 1]);
+    // Leaving puts the tab title back where the terminal keeps a title stack, and clears it where it does not.
+    expect(F.enterScreen(true)).toContain("\x1b[22;0t");
+    expect(F.leaveScreen(true)).toMatch(/\x1b\]2;\x07.*\x1b\[23;0t/);
+    expect(F.leaveScreen(true)).toContain("\x1b[?1049l");
+  }, 30_000);
+
+  test("split surrogates cannot join into an emoji, and characters above U+FFFF are never cut in half", () => {
+    expect(F.safeText("a\ud83d​\ude00b\ude00c\ud83d")).toBe("abc");
+    const lone = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]|�/;
+    const astral = "𝐀𝐁𝐂𝐃𝐄𝐅𝐆𝐇𝐈𝐉𝐊𝐋𝐌𝐍𝐎𝐏𝐐𝐑𝐒𝐓𝐔𝐕𝐖𝐗𝐘𝐙";
+    const s = sessionOf({ sid: "astral", name: astral + " name", agents: [agentOf("a", tailOf([toolCall(NOW - 2 * MIN, astral.repeat(3), { description: astral })]), { label: astral })] });
+    const saved = { opt: { ...F.opt }, procs: F.machine.procs };
+    try {
+      F.machine.procs = [{ pid: 9, ppid: 1, cpu: 212, rss: 1, name: F.procName("x" + astral.repeat(3)) }];
+      for (const mode of ["detail", "compact", "far"] as F.Mode[]) {
+        Object.assign(F.opt, { mode, usage: false });
+        for (const W of [80, 110, 150]) {
+          const frame = F.render([s], W, 30, NOW).join("\n");
+          expect([mode, W, lone.test(frame)]).toEqual([mode, W, false]);
+        }
+      }
+    } finally {
+      Object.assign(F.opt, saved.opt);
+      F.machine.procs = saved.procs;
+    }
+  });
+
+  test("a transcript replaced by a different file at the same path is read afresh", () => {
+    const home = path.join(root, "replaced");
+    fs.rmSync(home, { recursive: true, force: true });
+    const sid = "repl0000-0000-4000-8000-000000000001";
+    const file = path.join(home, "projects", "-p", `${sid}.jsonl`);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.mkdirSync(path.join(home, "sessions"), { recursive: true });
+    fs.writeFileSync(path.join(home, "sessions", "1.json"), JSON.stringify({ pid: process.pid, sessionId: sid, name: "r", kind: "bg", status: "idle", cwd: "/w", startedAt: NOW - 60 * MIN }));
+    const rows = (who: string, n: number) => [prompt(NOW - 20 * MIN, `the ${who} prompt`), ...Array.from({ length: n }, (_, i) => toolCall(NOW - 10 * MIN + i)), reply(NOW - 5 * MIN, `The ${who} reply`)].map((r) => JSON.stringify(r)).join("\n") + "\n";
+    const saved = process.env.FLEET_HOME;
+    process.env.FLEET_HOME = home;
+    try {
+      fs.writeFileSync(file, rows("first", 3));
+      expect(F.scan(NOW).find((x) => x.sid === sid)!.mains[0].says.map((x) => x.text)).toEqual(["The first reply"]);
+      fs.writeFileSync(file + ".new", rows("second", 40)); // longer, so a size check alone would read on from the old offset
+      fs.renameSync(file + ".new", file);
+      const t = F.scan(NOW + 2000).find((x) => x.sid === sid)!.mains[0];
+      expect([t.says.map((x) => x.text), t.ask?.text, t.tools.length]).toEqual([["The second reply"], "the second prompt", 40]);
+    } finally {
+      process.env.FLEET_HOME = saved;
+    }
+  });
+
+  test("what was read for sessions and agents that have gone is let go, so a dashboard left running does not grow", () => {
+    const home = path.join(root, "churn");
+    const saved = process.env.FLEET_HOME;
+    process.env.FLEET_HOME = home;
+    try {
+      fs.rmSync(home, { recursive: true, force: true });
+      for (let n = 0; n < 5; n++) {
+        const sid = `churn00${n}-0000-4000-8000-000000000001`;
+        const dir = path.join(home, "projects", "-p", sid);
+        fs.mkdirSync(path.join(dir, "subagents", "workflows", "wf_c"), { recursive: true });
+        fs.mkdirSync(path.join(home, "sessions"), { recursive: true });
+        fs.writeFileSync(path.join(home, "sessions", `${n}.json`), JSON.stringify({ pid: process.pid, sessionId: sid, name: `c${n}`, kind: "bg", status: "busy", cwd: "/w", startedAt: NOW - 60 * MIN }));
+        fs.writeFileSync(dir + ".jsonl", JSON.stringify(reply(NOW - MIN, "hello")) + "\n");
+        fs.writeFileSync(path.join(dir, "subagents", "agent-a.jsonl"), JSON.stringify(toolCall(NOW - MIN)) + "\n");
+        fs.writeFileSync(path.join(dir, "subagents", "agent-a.meta.json"), JSON.stringify({ agentType: "Explore" }));
+        fs.writeFileSync(path.join(dir, "subagents", "workflows", "wf_c", "journal.jsonl"), JSON.stringify({ type: "launched" }) + "\n");
+      }
+      const ours = () => F.cachedKeys().filter((k) => k.includes(home) || k.startsWith("churn00")).length;
+      F.scan(NOW);
+      expect(ours()).toBeGreaterThan(10);
+      fs.rmSync(path.join(home, "sessions"), { recursive: true, force: true }); // every session exits; their files stay on disk
+      for (let i = 1; i <= 12; i++) F.scan(NOW + i * 2000);
+      expect(ours()).toBe(0);
+    } finally {
+      process.env.FLEET_HOME = saved;
+    }
+  });
+
+  test("after the clock is set back, the usage figures are not current for hours and new things are marked new", () => {
+    const saved = { usage: { ...F.usage }, seen: { ...F.seen } };
+    try {
+      Object.assign(F.usage, { fetchedAt: NOW + 120 * MIN, nextTry: NOW + 125 * MIN, sharedAt: NOW + 120 * MIN, data: { five_hour: { utilization: 38, resets_at: null } }, reason: "" });
+      Object.assign(F.seen, { at: NOW + 120 * MIN });
+      F.steadyClock(NOW);
+      expect(F.usage.nextTry).toBeLessThanOrEqual(NOW); // a read is due now
+      expect(F.usage.fetchedAt).toBeLessThanOrEqual(NOW);
+      expect(F.seen.at).toBe(NOW);
+      expect(F.isNew(NOW + 10 * MIN)).toBe(true);
+    } finally {
+      Object.assign(F.usage, saved.usage);
+      Object.assign(F.seen, saved.seen);
+    }
+  });
+});
+
 describe("new since you looked, on the conversation", () => {
   test("every reply newer than the mark is marked new, earlier ones (◇) too, so the digest's count can be found", () => {
     const saved = { ...F.seen, events: [...F.seen.events], known: new Map(F.seen.known) };
@@ -3101,6 +3272,9 @@ describe("keys and clicks", () => {
       expect(live.alive()).toBe(true);
       live.write("aq"); // q in a read with another key still quits
       expect(await live.until(() => !live.alive(), 5000)).toBe(true);
+      // …and gives the terminal back: the title saved on entry is popped, mouse reports off, the main screen back.
+      expect(live.all().startsWith("\x1b[22;0t")).toBe(true);
+      expect(live.all()).toContain(F.leaveScreen(true));
     } finally {
       await live.stop();
     }

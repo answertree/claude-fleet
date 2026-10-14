@@ -215,7 +215,7 @@ export function safeText(s: string): string {
     const cp = ch.codePointAt(0)!;
     const swap = SAFE_SWAP[ch];
     if (cp === 0x0a) out += ch;
-    else if (cp < 0x20 || (cp >= 0x7f && cp < 0xa0)) continue;
+    else if (cp < 0x20 || (cp >= 0x7f && cp < 0xa0) || (cp >= 0xd800 && cp <= 0xdfff)) continue; // controls, and half of a character (whose other half may be across something removed)
     else if (swap !== undefined) out += swap;
     else if (cp < 0x300) out += cp === 0xa0 ? " " : cp === 0xad ? "" : ch;
     else if ((cp >= 0x2000 && cp <= 0x200a) || cp === 0x202f || cp === 0x205f || cp === 0x3000) out += " ";
@@ -270,6 +270,7 @@ export function ago(ms: number): string {
 }
 
 export function human(n: number): string {
+  if (typeof n !== "number" || !Number.isFinite(n)) return "?";
   if (n < 1000) return String(n);
   if (n < 10_000) return (n / 1000).toFixed(1) + "k";
   if (n < 1_000_000) return Math.round(n / 1000) + "k";
@@ -770,6 +771,8 @@ export interface Tail {
   ctx?: { used: number; model: string; req: string };
   ctxLog: [number, number][]; // its context readings over the last 15 minutes: [time, tokens used]
   parts?: Partial<Record<PartKey, number>>; // characters per context category, from the transcript's own attachments
+  ino?: number; // the file it is reading: another file at the same path is read afresh
+  used: number; // the scan that last asked for it; one no scan has wanted for a while is let go
 }
 export type PartKey = "system" | "tools" | "mcp" | "agents" | "memory" | "skills";
 const ATTACHMENT = /"attachment":\{"type":"(prompt_snapshot|instructions|skill_listing|agent_listing_delta)"/;
@@ -784,6 +787,11 @@ export function absorb(t: Tail, line: string) {
   } catch {
     return;
   }
+  try {
+    absorbParts(t, a);
+  } catch {} // a schema nested too deep to measure, say: that attachment is left out
+}
+function absorbParts(t: Tail, a: any) {
   const parts = (t.parts ??= {});
   if (a?.type === "prompt_snapshot") {
     if (Array.isArray(a.systemPrompt)) parts.system = a.systemPrompt.reduce((n: number, x: unknown) => n + len(x), 0);
@@ -811,6 +819,9 @@ export function hintFor(name: string, input: any): string {
   if (typeof input.skill === "string") return input.skill;
   return "";
 }
+
+/** A count read from a file: the number, or 0 for anything that is not a finite number. */
+const count = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
 
 /** Read one transcript line into the tail. Text a session wrote is made safe here, once, so everything drawn later already is. */
 export function ingest(t: Tail, line: string) {
@@ -862,7 +873,7 @@ export function ingest(t: Tail, line: string) {
     }
     const u = o.message?.usage;
     const out = u?.output_tokens;
-    if (typeof out === "number" && o.message?.id) t.tokens.set(o.message.id, [ts, out]);
+    if (typeof out === "number" && Number.isFinite(out) && o.message?.id) t.tokens.set(o.message.id, [ts, out]);
     if (!o.isSidechain) {
       if (Array.isArray(content)) for (const item of content) if (item?.type === "text" && typeof item.text === "string" && item.text.trim()) {
           t.say = { text: safeText(item.text), t: ts };
@@ -871,7 +882,7 @@ export function ingest(t: Tail, line: string) {
           t.sayTs.push(ts);
         }
       if (u) {
-        const used = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+        const used = count(u.input_tokens) + count(u.cache_read_input_tokens) + count(u.cache_creation_input_tokens);
         if (used > 0) {
           t.ctx = { used, model: String(o.message?.model ?? ""), req: String(o.requestedModel ?? "") };
           t.ctxLog.push([ts, used]);
@@ -912,6 +923,7 @@ function scanHead(t: Tail, upTo: number) {
       carry = lines.pop() ?? "";
       for (const line of lines) if (ATTACHMENT.test(line)) absorb(t, line);
     }
+  } catch {
   } finally {
     fs.closeSync(fd);
   }
@@ -933,6 +945,7 @@ export function newTail(file: string, start = 0, birth = 0): Tail {
     lastT: 0,
     mtime: 0,
     birth,
+    used: scanSeq,
   };
 }
 
@@ -951,13 +964,17 @@ function pump(file: string, isMain = false): Tail | undefined {
     tails.delete(file);
     return undefined;
   }
+  if (!st.isFile()) return void tails.delete(file); // a directory or a named pipe with a transcript's name: not one
   let t = tails.get(file);
-  if (!t || st.size < t.offset) {
+  // A file that shrank, or another file now at this path, is read afresh.
+  if (!t || st.size < t.offset || (t.ino !== undefined && t.ino !== st.ino)) {
     const start = Math.max(0, st.size - TAIL_BYTES);
     t = newTail(file, start, st.birthtimeMs);
+    t.ino = st.ino;
     tails.set(file, t);
     if (isMain && start > 0) scanHead(t, start);
   }
+  t.used = scanSeq;
   t.mtime = st.mtimeMs;
   if (st.size === t.offset) return t;
   let fd: number;
@@ -979,6 +996,8 @@ function pump(file: string, isMain = false): Tail | undefined {
         ingest(t, lines[i]);
       }
     }
+  } catch {
+    // The file went away or could not be read part way: what was read stands, and the next scan tries again.
   } finally {
     fs.closeSync(fd);
   }
@@ -1035,9 +1054,23 @@ export interface Session {
   jobId?: string;
 }
 
-const readJson = (f: string): any => {
+/**
+ * A file's text, only when it is a regular file of a sane size: reading a named pipe would block the
+ * dashboard for good, and a device or a huge file would freeze it. A symlink to a regular file is fine.
+ */
+function readText(f: string, max = 32 << 20): string | undefined {
   try {
-    return JSON.parse(fs.readFileSync(f, "utf8"));
+    const st = fs.statSync(f);
+    return st.isFile() && st.size <= max ? fs.readFileSync(f, "utf8") : undefined;
+  } catch {
+    return undefined;
+  }
+}
+const readJson = (f: string): any => {
+  const text = readText(f);
+  if (text === undefined) return undefined;
+  try {
+    return JSON.parse(text);
   } catch {
     return undefined;
   }
@@ -1077,6 +1110,7 @@ interface Journal {
   started: Map<string, any>; // agent id -> its "started" entry
   results: Set<string>; // agents that have reported a result
   phases: string[]; // the phases as they were visited, in order: one the workflow comes back to is listed again
+  used?: number; // the scan that last asked for it
 }
 /**
  * Read a workflow journal's text: who started, in which phase, and who has finished. The phases are a
@@ -1110,15 +1144,17 @@ export function readJournal(text: string, mtime = 0): Journal {
 }
 const journalCache = new Map<string, Journal>();
 function journal(file: string): Journal {
-  let mtime = 0;
+  let st: fs.Stats;
   try {
-    mtime = fs.statSync(file).mtimeMs;
+    st = fs.statSync(file);
   } catch {
     return readJournal("");
   }
+  if (!st.isFile()) return readJournal("");
   const hit = journalCache.get(file);
-  if (hit && hit.mtime === mtime) return hit;
-  const entry = readJournal(fs.readFileSync(file, "utf8"), mtime);
+  if (hit && hit.mtime === st.mtimeMs) return (hit.used = scanSeq), hit;
+  const entry = readJournal(readText(file, 256 << 20) ?? "", st.mtimeMs);
+  entry.used = scanSeq;
   journalCache.set(file, entry);
   return entry;
 }
@@ -1126,7 +1162,7 @@ function journal(file: string): Journal {
 let projectsRoot = "";
 let projectDirs: string[] = [];
 let projectDirsAt = 0;
-const sessionDirCache = new Map<string, { at: number; dirs: string[]; mains: string[] }>();
+const sessionDirCache = new Map<string, { at: number; dirs: string[]; mains: string[]; used?: number }>();
 function locate(sid: string, now: number) {
   const root = path.join(claudeHome(), "projects");
   if (root !== projectsRoot) {
@@ -1136,7 +1172,7 @@ function locate(sid: string, now: number) {
     sessionDirCache.clear();
   }
   const hit = sessionDirCache.get(sid);
-  if (hit && now - hit.at < 20_000) return hit;
+  if (hit && now - hit.at < 20_000) return (hit.used = scanSeq), hit;
   if (now - projectDirsAt > 20_000) {
     projectDirs = ls(root).map((d) => path.join(root, d));
     projectDirsAt = now;
@@ -1147,7 +1183,7 @@ function locate(sid: string, now: number) {
     if (fs.existsSync(path.join(p, sid))) dirs.push(path.join(p, sid));
     if (fs.existsSync(path.join(p, sid + ".jsonl"))) mains.push(path.join(p, sid + ".jsonl"));
   }
-  const entry = { at: now, dirs, mains };
+  const entry = { at: now, dirs, mains, used: scanSeq };
   sessionDirCache.set(sid, entry);
   return entry;
 }
@@ -1214,16 +1250,27 @@ function loadAgent(file: string, wf?: string, started?: any, done = false): Agen
 }
 
 /** When each blocked job began waiting, and on which question. */
-const waitingSince = new Map<string, { needs: string; since: number }>();
+const waitingSince = new Map<string, { needs: string; since: number; used?: number }>();
+let scanSeq = 0; // scans so far
+const FORGET_SCANS = 10; // what no scan has asked for in this many scans (20 seconds) is let go
+
+/** What is held in memory for the files the dashboard has read, by path (and by session id): for tests. */
+export const cachedKeys = (): string[] => [...tails.keys(), ...metaCache.keys(), ...journalCache.keys(), ...sessionDirCache.keys(), ...waitingSince.keys()];
+
+/** A session id as Claude Code writes them: letters, digits and dashes. Anything else is not drawn, nor used in a path. */
+const PLAIN_ID = /^[\w-]{1,64}$/;
 
 export function scan(now: number): Session[] {
+  scanSeq++;
   const sessions: Session[] = [];
   const CLAUDE = claudeHome();
   for (const f of ls(path.join(CLAUDE, "sessions"))) {
     if (!f.endsWith(".json")) continue;
     const reg = readJson(path.join(CLAUDE, "sessions", f));
-    if (!reg?.sessionId || !alive(reg.pid)) continue;
+    if (typeof reg?.sessionId !== "string" || !PLAIN_ID.test(reg.sessionId) || !alive(reg.pid)) continue;
     const sid: string = reg.sessionId;
+    // One entry that cannot be read is left out; the rest of the fleet is still drawn.
+    try {
     const loc = locate(sid, now);
     const mains = loc.mains.map((m) => pump(m, true)).filter(Boolean) as Tail[];
     const agents: Agent[] = [];
@@ -1262,8 +1309,8 @@ export function scan(now: number): Session[] {
           phase: currentPhase(j.phases, running),
           phases,
           seen: j.phases,
-          started: state?.startTime ?? Math.min(...wfAgents.map((a) => a.tail.birth), now),
-          finished: state ? (state.startTime ?? 0) + (state.durationMs ?? 0) : 0,
+          started: count(state?.startTime) || Math.min(...wfAgents.map((a) => a.tail.birth), now),
+          finished: state ? count(state.startTime) + count(state.durationMs) : 0,
           agents: wfAgents,
           lastT,
           tokens: typeof state?.totalTokens === "number" ? state.totalTokens : undefined,
@@ -1306,10 +1353,11 @@ export function scan(now: number): Session[] {
         if (job.since === Infinity) job.since = undefined;
       }
     }
-    waitingSince.set(sid, { needs: job?.state === "blocked" ? job.needs : "", since: job?.since ?? 0 });
+    waitingSince.set(sid, { needs: job?.state === "blocked" ? job.needs : "", since: job?.since ?? 0, used: scanSeq });
 
     const title = mains.map((m) => m.title).find(Boolean);
     const named = safeLine(reg.name && reg.name !== sid.slice(0, 8) ? reg.name : title || (reg.name ?? sid.slice(0, 8)));
+    const startedAt = Number(reg.startedAt);
     sessions.push({
       sid,
       pid: reg.pid,
@@ -1317,7 +1365,7 @@ export function scan(now: number): Session[] {
       kind: safeLine(reg.kind),
       status: safeLine(reg.status),
       cwd: safeLine(reg.cwd),
-      startedAt: Number(reg.startedAt ?? now),
+      startedAt: Number.isFinite(startedAt) && startedAt > 0 ? startedAt : now,
       mains,
       agents,
       workflows,
@@ -1325,7 +1373,13 @@ export function scan(now: number): Session[] {
       job,
       jobId: job ? String(reg.jobId) : undefined,
     });
+    } catch {}
   }
+  // What was read for sessions and agents that have gone (their transcripts stay on disk, but no scan asks for them) is let go.
+  for (const [file, t] of tails) if (scanSeq - t.used > FORGET_SCANS) tails.delete(file);
+  for (const file of metaCache.keys()) if (!tails.has(file)) metaCache.delete(file);
+  for (const [cache, entries] of [["journal", journalCache], ["dir", sessionDirCache], ["wait", waitingSince]] as const)
+    for (const [key, e] of entries as Map<string, { used?: number }>) if (scanSeq - (e.used ?? 0) > FORGET_SCANS) entries.delete(key), void cache;
   return sessions;
 }
 
@@ -1452,7 +1506,7 @@ function machineRow(W: number): string {
     fg(C.dim, "   mem ") + gauge(memPct, 10, limitTone(memPct)) + fg(C.text, ` ${gb(machine.memUsed)} of ${gb(machine.memTotal)}`) +
     fg(C.dim, `   load ${machine.load.toFixed(1)}`);
   const usedW = 5 + 10 + 5 + 2 + HW + (W >= 110 ? 8 + machine.cores.length : 0) + 7 + 10 + width(` ${gb(machine.memUsed)} of ${gb(machine.memTotal)}`) + width(`   load ${machine.load.toFixed(1)}`);
-  const topText = topProcs(4).map((p) => `${p.name.slice(0, 18)} ${Math.round(p.cpu)}%`).join(" · ");
+  const topText = topProcs(4).map((p) => `${[...p.name].slice(0, 18).join("")} ${Math.round(p.cpu)}%`).join(" · ");
   if (topText && W - usedW - 9 > 16) line += fg(C.dim, "   top ") + fg(C.text, fit(topText, W - usedW - 8));
   return line;
 }
@@ -1600,7 +1654,9 @@ function readLogin(): { login: Login } | { reason: string } {
   let fromFile: Login | undefined;
   if (!fromKeychain) {
     try {
-      const parsed = parseLogin(fs.readFileSync(path.join(claudeHome(), ".credentials.json"), "utf8"));
+      const file = path.join(claudeHome(), ".credentials.json");
+      if (!fs.statSync(file).isFile()) throw new Error("not a file"); // a named pipe here would block the dashboard for good
+      const parsed = parseLogin(fs.readFileSync(file, "utf8"));
       f = parsed.parse === "empty" ? "not-json" : parsed.parse;
       fromFile = parsed.login;
     } catch (e: any) {
@@ -1781,6 +1837,16 @@ export async function fetchUsage(now = clock(), read: (now: number) => Promise<R
     usage.busy = false;
     usage.nextTry = now + retryDelay(usage.reason, usage.failures);
   }
+}
+/**
+ * After the clock is set back, nothing may wait for the old time to come round: figures and a seen mark
+ * stamped more than a minute ahead are brought back to now, and a read due later than the longest back-off is due now.
+ */
+export function steadyClock(now: number) {
+  if (usage.fetchedAt > now + 60_000) usage.fetchedAt = now;
+  if (usage.nextTry > now + 31 * 60_000) usage.nextTry = now;
+  if (usage.sharedAt > now + 60_000) usage.sharedAt = 0;
+  if (seen.at > now + 60_000) seen.at = now;
 }
 /** Called on every refresh: start a read when one is due, and while ours is failing keep an eye on the shared figures. */
 function tickUsage(now: number) {
@@ -3721,7 +3787,7 @@ const dateText = (now: number): string => {
   return `${day} ${Number(date)} ${month}`;
 };
 /** A process's name (already made safe when it was sampled), cut to what the header has room for. */
-const shortProc = (p: Proc) => p.name.slice(0, 14);
+const shortProc = (p: Proc) => [...p.name].slice(0, 14).join("");
 /** "top bun 212% · node 88%": the busiest processes, as many whole ones as fit in `w` cells. */
 function topSegs(w: number): Seg[] {
   const parts: Seg[] = [["top ", C.dim]];
@@ -4182,7 +4248,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
       // Title: the name in letter-spaced capitals. The state, its glyph first, ends at the right edge and never shrinks.
       const stateText = st.word.split("").join(" ");
       const nameRoom = W - width(stateText) - 9;
-      const spaced = s.name.toUpperCase().split("").join(" ");
+      const spaced = [...s.name.toUpperCase()].join(" ");
       const title = row();
       title.put(5, fit(width(spaced) <= nameRoom ? spaced : s.name.toUpperCase(), nameRoom, "l", true).trimEnd(), quietened ? C.text : C.white, true);
       title.segsr(W - 1, [[`${st.glyph} `, st.color, true], [stateText, st.color, true]]);
@@ -4263,9 +4329,9 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
     if (ACT) {
       const lead = stalled ? "stalled? " : "";
       if (st !== "done" && pending) {
-        const name = pending.name.slice(0, Math.max(0, ACT - lead.length));
-        const hintW = Math.max(0, ACT - lead.length - name.length - 2);
-        doing = fg(C.red, lead) + fg(C.cyan, name) + (hintW ? "  " + fg(C.text, fit(pending.hint, hintW)) : " ".repeat(ACT - lead.length - name.length));
+        const name = [...pending.name].slice(0, Math.max(0, ACT - lead.length)).join("");
+        const hintW = Math.max(0, ACT - lead.length - width(name) - 2);
+        doing = fg(C.red, lead) + fg(C.cyan, name) + (hintW ? "  " + fg(C.text, fit(pending.hint, hintW)) : " ".repeat(ACT - lead.length - width(name)));
       } else doing = fg(stalled ? C.red : C.dim, fit(lead + (st === "done" ? "finished" : st === "quiet" ? "no activity" : "thinking"), ACT));
     }
     return (
@@ -4601,6 +4667,34 @@ export function stepWindow(min: number, dir: 1 | -1): number {
   return (dir > 0 ? WINDOWS.find((w) => w > min) : [...WINDOWS].reverse().find((w) => w < min)) ?? min;
 }
 
+// ───────────────────────── the terminal ─────────────────────────
+
+/** What is written to take over the terminal: the alternate screen, no cursor, mouse reports, and the tab title saved on the terminal's title stack. */
+export const enterScreen = (mouse: boolean): string => "\x1b[22;0t\x1b[?1049h\x1b[?25l\x1b[2J" + (mouse ? "\x1b[?1000h\x1b[?1006h" : "");
+/** …and to give it back: the title cleared, then popped (which puts the old one back where the terminal keeps a stack), mouse reports off, the cursor and the main screen back. */
+export const leaveScreen = (mouse: boolean): string => titleSequence("") + "\x1b[23;0t" + (mouse ? "\x1b[?1000l\x1b[?1006l" : "") + "\x1b[?25h\x1b[?1049l";
+/**
+ * Put the terminal back however the program ends: a normal exit, an uncaught error or a rejected promise
+ * (which are then printed, after the terminal is back, and end it with status 1). Returns the restore, run once at most.
+ */
+export function guardTerminal(restore: () => void): () => void {
+  let done = false;
+  const once = () => {
+    if (done) return;
+    done = true;
+    restore();
+  };
+  process.on("exit", once);
+  const fail = (e: unknown) => {
+    once();
+    process.stderr.write(`${(e as Error)?.stack ?? String(e)}\n`);
+    process.exit(1);
+  };
+  process.on("uncaughtException", fail);
+  process.on("unhandledRejection", fail);
+  return once;
+}
+
 // ───────────────────────── main loop ─────────────────────────
 
 let sessions: Session[] = [];
@@ -4613,6 +4707,7 @@ function refresh() {
   prune(now);
   sampleMachine();
   holdStalls(sessions, now);
+  steadyClock(now);
   if (opt.usage && !opt.once) tickUsage(now); // --once has already made its one read
   // Ring once when a session starts waiting on the person, and once for each thing that newly stalls.
   const facts = sessions.map((s) => ({ s, f: factsOf(s) }));
@@ -4646,12 +4741,12 @@ if (import.meta.main) {
     const lines = legendOn ? legend(out.columns || 140, out.rows || 45) : render(sessions, out.columns || 140, out.rows || 45, clock());
     out.write("\x1b[H" + lines.map((l) => l + "\x1b[K").join("\n"));
   };
-  /** The tab title follows the fleet's state. It is written only when it changes, and cleared on the way out. */
+  /** The tab title follows the fleet's state. It is written only when it changes, and put back (or cleared) on the way out. */
   const retitle = () => out.write(titleChange(titleFor(fleetCounts(sessions, clock(), frameWindow(clock(), Math.max(60, out.columns || 140)).start)))); // the same window the screen's own counts use
-  const restore = () => {
-    out.write(titleSequence("") + (opt.mouse ? "\x1b[?1000l\x1b[?1006l" : "") + "\x1b[?25h\x1b[?1049l");
+  const restore = guardTerminal(() => {
+    out.write(leaveScreen(opt.mouse));
     if (process.stdin.isTTY) process.stdin.setRawMode(false);
-  };
+  });
   const quit = () => {
     restore();
     process.exit(0);
@@ -4680,7 +4775,7 @@ if (import.meta.main) {
     draw();
   };
 
-  out.write("\x1b[?1049h\x1b[?25l\x1b[2J" + (opt.mouse ? "\x1b[?1000h\x1b[?1006h" : ""));
+  out.write(enterScreen(opt.mouse));
   refresh();
   retitle();
   draw();
@@ -4696,9 +4791,7 @@ if (import.meta.main) {
     out.write("\x1b[2J");
     draw();
   });
-  process.on("SIGINT", quit);
-  process.on("SIGTERM", quit);
-  process.on("SIGHUP", quit);
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) process.on(signal, quit);
 
   const KEYS: Record<string, string> = {
     q: "quit", "\x03": "quit", "\x1b": "back", "\t": "next",
