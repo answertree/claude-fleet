@@ -24,6 +24,7 @@ export const WINDOWS = [5, 15, 30, 60, 180];
 const TAIL_BYTES = 2 * 1024 * 1024;
 const ACTIVE_MS = 60_000;
 const FINAL_TOOLS = new Set(["SubagentHandback", "StructuredOutput"]);
+const CTX_LOG_MS = 15 * 60_000; // how far back a session's context readings are kept, for the runway forecast
 
 // ───────────────────────── options ─────────────────────────
 
@@ -654,6 +655,7 @@ export interface Tail {
   summary?: string; // the session's own "while you were away" summary
   summaryT?: number; // when it was written, so it can be compared with the last prompt
   ctx?: { used: number; model: string; req: string };
+  ctxLog: [number, number][]; // its context readings over the last 15 minutes: [time, tokens used]
   parts?: Partial<Record<PartKey, number>>; // characters per context category, from the transcript's own attachments
 }
 export type PartKey = "system" | "tools" | "mcp" | "agents" | "memory" | "skills";
@@ -756,7 +758,11 @@ export function ingest(t: Tail, line: string) {
         }
       if (u) {
         const used = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
-        if (used > 0) t.ctx = { used, model: String(o.message?.model ?? ""), req: String(o.requestedModel ?? "") };
+        if (used > 0) {
+          t.ctx = { used, model: String(o.message?.model ?? ""), req: String(o.requestedModel ?? "") };
+          t.ctxLog.push([ts, used]);
+          while (t.ctxLog[0][0] < ts - CTX_LOG_MS) t.ctxLog.shift();
+        }
       }
     }
   } else if (Array.isArray(content) && content.some((i: any) => i?.type === "tool_result")) {
@@ -806,6 +812,7 @@ export function newTail(file: string, start = 0, birth = 0): Tail {
     decoder: new StringDecoder("utf8"),
     tools: [],
     says: [],
+    ctxLog: [],
     tokens: new Map(),
     lastResultT: 0,
     lastT: 0,
@@ -1598,6 +1605,8 @@ export interface LimitView {
   pct: number;
   resetsAt: number; // 0 when unknown
   windowMs: number;
+  tick?: number; // pace tick: the share of the window that has passed, 0 to 1
+  fullIn?: number; // milliseconds until 100% at the current pace, when that is before the reset ("full in ~35m" replaces "resets in …")
 }
 /** Everything the account block draws, with no layout in it. */
 export interface AccountView {
@@ -1616,14 +1625,16 @@ const LIMITS: [key: string, label: string, windowMs: number][] = [
   ["seven_day_opus", "opus", 7 * 86_400_000],
   ["seven_day_sonnet", "sonnet", 7 * 86_400_000],
 ];
-export function accountViewOf(state: UsageState, u: { nextTry: number; busy: boolean }): AccountView {
+export function accountViewOf(state: UsageState, u: { nextTry: number; busy: boolean }, now: number): AccountView {
   const reason = state.kind === "current" ? state.failing : state.reason;
   const view: AccountView = { kind: state.kind, limits: [], asOf: state.kind === "none" ? 0 : state.asOf, reason, remedy: usageRemedy(reason), nextTry: u.nextTry, busy: u.busy };
   if (state.kind === "none") return view;
   for (const [key, label, windowMs] of LIMITS) {
     const w = state.data[key] as UsageWindow | undefined;
     if (!w || typeof w.utilization !== "number") continue;
-    view.limits.push({ key, label, pct: w.utilization, resetsAt: w.resets_at ? Date.parse(w.resets_at) || 0 : 0, windowMs });
+    const resetsAt = w.resets_at ? Date.parse(w.resets_at) || 0 : 0;
+    // A forecast is made only from current figures; the tick is just the clock, so stale figures keep it.
+    view.limits.push({ key, label, pct: w.utilization, resetsAt, windowMs, tick: paceTick(resetsAt, windowMs, now), fullIn: state.kind === "current" ? paceForecast(w.utilization, resetsAt, windowMs, now) : undefined });
   }
   const x = state.data.extra_usage;
   if (x) {
@@ -1635,7 +1646,7 @@ export function accountViewOf(state: UsageState, u: { nextTry: number; busy: boo
   }
   return view;
 }
-export const accountView = (now: number): AccountView => accountViewOf(usageState(now), usage);
+export const accountView = (now: number): AccountView => accountViewOf(usageState(now), usage, now);
 
 function usageRow(W: number, now: number): string {
   const lead = fg(C.dim, " account ");
@@ -1761,6 +1772,79 @@ export function contextSplit(t: Tail): { name: string; tokens: number; color: RG
   }
   out.push({ name: "Messages", tokens: t.ctx.used - fixed, color: PARTS[6].color });
   return out;
+}
+
+// ───────────────────────── runway ─────────────────────────
+//
+// Two gauges become forecasts, and stay silent unless trouble is coming: when a session's context
+// window will be full, and whether the account will hit a limit before the limit resets.
+
+const RUNWAY_USES_MS = 10 * 60_000; // the forecast is a straight line through the last ten minutes
+const RUNWAY_NEEDS_MS = 5 * 60_000; // …and needs at least five minutes of history
+const RUNWAY_HORIZON_MIN = 60; // nothing is said unless the window would be full within the hour
+
+/**
+ * Minutes until a context window of `max` tokens is full, or undefined when there is nothing to say.
+ * `log` is the tail's context readings ([time, tokens used], oldest first). It answers only when the
+ * window has grown steadily: at least five minutes of history in the last ten, no drop in it (a
+ * compaction starts the history again), growth in both its older and its newer half, and a straight
+ * line through it that reaches `max` within the hour.
+ */
+export function ctxRunway(log: [number, number][], max: number, now: number): number | undefined {
+  let pts = log.filter(([t]) => t >= now - RUNWAY_USES_MS && t <= now);
+  for (let i = pts.length - 1; i > 0; i--)
+    if (pts[i][1] < pts[i - 1][1] - Math.max(5_000, max * 0.02)) {
+      pts = pts.slice(i);
+      break;
+    }
+  if (pts.length < 3) return undefined;
+  const [t0, first] = pts[0];
+  const last = pts[pts.length - 1][1];
+  if (now - t0 < RUNWAY_NEEDS_MS) return undefined;
+  if (last >= max) return 0;
+  const mid = t0 + (now - t0) / 2;
+  const atMid = pts.filter(([t]) => t <= mid).pop()![1];
+  if (atMid <= first || last <= atMid) return undefined; // one jump, or growth that has stopped, is not a trend
+  const perMin = (last - first) / ((now - t0) / 60_000);
+  const minutes = (max - last) / perMin;
+  return minutes <= RUNWAY_HORIZON_MIN ? minutes : undefined;
+}
+/** The forecast for a session's main thread, from the readings its transcript holds. */
+export const sessionRunway = (main: Tail | undefined, now: number): number | undefined => (main?.ctx ? ctxRunway(main.ctxLog, ctxMax(main.ctx), now) : undefined);
+
+/** A forecast's length as the screen prints it: about so long, to the nearest five minutes once past ten. */
+export function roughly(minutes: number): string {
+  if (minutes < 10) return `${Math.max(1, Math.round(minutes))}m`;
+  const m = Math.round(minutes / 5) * 5;
+  if (m < 60) return `${m}m`;
+  if (m < 24 * 60) return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}`;
+  return `${Math.floor(m / 1440)}d${Math.floor((m % 1440) / 60)}h`;
+}
+/** "full in ~40m": bold white on a session's key row and red under 15 minutes; bold red in the account block. */
+export const fullInText = (minutes: number): string => `full in ~${roughly(minutes)}`;
+export const runwayTone = (minutes: number): RGB => (minutes < 15 ? C.red : C.white);
+
+/** Where the pace tick sits on a limit's gauge: the share of the limit's window that has passed (0 to 1), from its reset time and its length. */
+export function paceTick(resetsAt: number, windowMs: number, now: number): number | undefined {
+  if (!resetsAt || !(windowMs > 0) || now >= resetsAt) return undefined; // no reset time, or figures from a window that has already rolled over
+  return Math.max(0, Math.min(1, (now - (resetsAt - windowMs)) / windowMs));
+}
+/** The gauge cell a pace tick lands on, and its glyph: ┿ inside the filled part, ┼ on the empty track. */
+export function paceCell(tick: number, pct: number, w: number): { cell: number; glyph: string } {
+  const filled = Math.max(pct > 0 ? 1 : 0, Math.min(w, Math.round((pct / 100) * w)));
+  const cell = Math.min(w - 1, Math.floor(tick * w));
+  return { cell, glyph: cell < filled ? ICON.paceFilled : ICON.pace };
+}
+/**
+ * Milliseconds until a limit reaches 100% at the pace it has kept so far, but only when that comes
+ * before the reset. Says nothing in the first 15% of a window or under 5% used, where the pace means little.
+ */
+export function paceForecast(pct: number, resetsAt: number, windowMs: number, now: number): number | undefined {
+  const tick = paceTick(resetsAt, windowMs, now);
+  if (tick === undefined || tick < 0.15 || pct < 5) return undefined;
+  if (pct >= 100) return 0;
+  const toFull = ((100 - pct) / pct) * tick * windowMs;
+  return now + toFull < resetsAt ? toFull : undefined;
 }
 
 export const clean = (s: string) => s.replace(/[*`#>]+/g, "").replace(/\s+/g, " ").trim();
@@ -2214,7 +2298,10 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
         const BW = W >= 140 ? 32 : 20;
         const label = fit(`${Math.round(pct * 100)}% · ${human(ctx.used)} of ${human(max)}`, 19);
         let legend = "";
-        let room = rest - 8 - BW - 1 - 19 - 1;
+        // Runway: say when the window will be full, but only when that is within the hour.
+        const runway = sessionRunway(f.main, now);
+        const runwayText = runway === undefined ? "" : fullInText(runway);
+        let room = rest - 8 - BW - 1 - 19 - 1 - (runwayText ? width(runwayText) + 2 : 0);
         const approx = f.main!.parts ? "≈" : "";
         for (const part of [...split].filter((x) => x.tokens > 0).sort((x, y) => y.tokens - x.tokens)) {
           const item = `${part.name} ${approx}${human(part.tokens)}`;
@@ -2222,7 +2309,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
           legend += " " + fg(part.color, "●") + " " + fg(C.dim, item) + " ";
           room -= width(item) + 4;
         }
-        out.push(fg(C.faint, elbow) + fg(C.dim, "context ") + stacked(split, max, BW) + " " + fg(tone, label) + legend);
+        out.push(fg(C.faint, elbow) + fg(C.dim, "context ") + stacked(split, max, BW) + " " + fg(tone, label) + legend + (runwayText ? "  " + bold(fg(runwayTone(runway!), runwayText)) : ""));
       } else if (c.kind === "now") {
         out.push(fg(C.faint, elbow) + fg(C.dim, "now    ▸ ") + fg(C.text, fit(f.now, rest - 9)));
       } else if (c.kind === "you") {

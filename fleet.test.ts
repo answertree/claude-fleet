@@ -607,18 +607,18 @@ describe("usage read tells the truth", () => {
   });
 
   test("the account view carries limits, extra usage, the reason and its remedy", () => {
-    const current = F.accountViewOf({ kind: "current", data: { ...figures(), seven_day_opus: { utilization: 12, resets_at: null } }, asOf: NOW, failing: "" }, { nextTry: NOW + 5 * MIN, busy: false });
+    const current = F.accountViewOf({ kind: "current", data: { ...figures(), seven_day_opus: { utilization: 12, resets_at: null } }, asOf: NOW, failing: "" }, { nextTry: NOW + 5 * MIN, busy: false }, NOW);
     expect(current.limits.map((l) => [l.label, l.pct, l.windowMs / 3600_000])).toEqual([["5h", 38, 5], ["7d", 21, 168], ["opus", 12, 168]]);
     expect(current.limits[0].resetsAt).toBe(NOW + 130 * MIN);
     expect(current.limits[2].resetsAt).toBe(0);
     expect(current.extra).toEqual({ enabled: true, pct: 24, used: "£12", limit: "£50" });
     expect(current).toMatchObject({ kind: "current", reason: "", remedy: "", asOf: NOW });
-    const off = F.accountViewOf({ kind: "current", data: { ...figures(), extra_usage: { is_enabled: false } }, asOf: NOW, failing: "" }, { nextTry: 0, busy: false });
+    const off = F.accountViewOf({ kind: "current", data: { ...figures(), extra_usage: { is_enabled: false } }, asOf: NOW, failing: "" }, { nextTry: 0, busy: false }, NOW);
     expect(off.extra).toEqual({ enabled: false, pct: 0, used: "$0", limit: "$0" });
-    const none = F.accountViewOf({ kind: "none", reason: F.REASON.keychainRemote, nextTry: NOW + MIN }, { nextTry: NOW + MIN, busy: false });
+    const none = F.accountViewOf({ kind: "none", reason: F.REASON.keychainRemote, nextTry: NOW + MIN }, { nextTry: NOW + MIN, busy: false }, NOW);
     expect(none).toMatchObject({ kind: "none", limits: [], asOf: 0, reason: "keychain: closed to remote sessions (ssh/mosh)", nextTry: NOW + MIN });
     expect(none.remedy).toContain("unlock-keychain");
-    const stale = F.accountViewOf({ kind: "stale", data: figures(), asOf: NOW - 39 * MIN, reason: "Anthropic answered 429" }, { nextTry: NOW, busy: true });
+    const stale = F.accountViewOf({ kind: "stale", data: figures(), asOf: NOW - 39 * MIN, reason: "Anthropic answered 429" }, { nextTry: NOW, busy: true }, NOW);
     expect(stale).toMatchObject({ kind: "stale", asOf: NOW - 39 * MIN, reason: "Anthropic answered 429", busy: true });
     expect(stale.limits.length).toBe(2);
   });
@@ -740,5 +740,121 @@ describe("usage read tells the truth", () => {
       delete process.env.FLEET_USAGE_FAIL;
       resetUsage();
     }
+  });
+});
+
+describe("runway", () => {
+  const MAX = 1_000_000;
+  /** Readings every `stepMin` minutes from `fromMin` minutes ago to `toMin` minutes ago, growing by `perMin` tokens a minute from `start`. */
+  const grow = (start: number, perMin: number, fromMin: number, toMin = 0, stepMin = 1): [number, number][] => {
+    const out: [number, number][] = [];
+    for (let m = fromMin; m >= toMin; m -= stepMin) out.push([NOW - m * MIN, start + (fromMin - m) * perMin]);
+    return out;
+  };
+
+  test("steady growth gives the minutes until the window is full", () => {
+    // 600k ten minutes ago, 10k a minute since: 700k now, 300k left, 30 minutes.
+    expect(F.ctxRunway(grow(600_000, 10_000, 10), MAX, NOW)).toBeCloseTo(30, 6);
+    // 611k used and "full in ~40m", as in the design: 389k left at 9,725 a minute.
+    expect(F.fullInText(F.ctxRunway(grow(611_000 - 97_250, 9_725, 10), MAX, NOW)!)).toBe("full in ~40m");
+    expect(F.ctxRunway(grow(190_000, 1_000, 8), 200_000, NOW)).toBeCloseTo(2, 6); // a 200k window nearly full
+  });
+
+  test("it needs five minutes of history and uses the last ten", () => {
+    expect(F.ctxRunway(grow(600_000, 10_000, 4), MAX, NOW)).toBeUndefined();
+    expect(F.ctxRunway(grow(600_000, 10_000, 5), MAX, NOW)).toBeCloseTo(35, 6);
+    // Fast growth more than ten minutes ago is ignored: only the slow last ten count, and they are over the hour.
+    const log = [...grow(100_000, 50_000, 15, 11), ...grow(300_000, 1_000, 10)];
+    expect(F.ctxRunway(log, MAX, NOW)).toBeUndefined();
+    expect(F.ctxRunway([], MAX, NOW)).toBeUndefined();
+    expect(F.ctxRunway(grow(600_000, 10_000, 10).slice(0, 2), MAX, NOW)).toBeUndefined();
+  });
+
+  test("it stays silent beyond the hour, when flat, and when shrinking", () => {
+    expect(F.ctxRunway(grow(600_000, 1_000, 10), MAX, NOW)).toBeUndefined(); // 390 minutes away
+    expect(F.ctxRunway(grow(700_000, 5_000, 10), MAX, NOW)).toBeCloseTo(50, 6);
+    expect(F.ctxRunway(grow(700_000, 4_000, 10), MAX, NOW)).toBeUndefined(); // 65 minutes away
+    expect(F.ctxRunway(grow(600_000, 0, 10), MAX, NOW)).toBeUndefined();
+    expect(F.ctxRunway(grow(600_000, -3_000, 10), MAX, NOW)).toBeUndefined();
+  });
+
+  test("one jump, growth that has stopped, and a compaction are not a trend", () => {
+    const jump: [number, number][] = grow(600_000, 0, 10).map(([t, u]) => [t, t >= NOW - 2 * MIN ? u + 150_000 : u]);
+    expect(F.ctxRunway(jump, MAX, NOW)).toBeUndefined();
+    expect(F.ctxRunway(grow(600_000, 20_000, 10, 6), MAX, NOW)).toBeUndefined(); // nothing written for six minutes
+    // Compacted four minutes ago: the history starts again there, so there is not yet five minutes of it.
+    const compacted: [number, number][] = [...grow(800_000, 15_000, 10, 5), ...grow(120_000, 15_000, 4)];
+    expect(F.ctxRunway(compacted, MAX, NOW)).toBeUndefined();
+    // Six minutes after a compaction the new history is enough, though this one is far from full.
+    expect(F.ctxRunway([...grow(800_000, 15_000, 10, 7), ...grow(120_000, 15_000, 6)], MAX, NOW)).toBeCloseTo((MAX - 210_000) / 15_000, 6);
+    expect(F.ctxRunway(grow(995_000, 1_000, 10), MAX, NOW)).toBe(0); // already full
+  });
+
+  test("the transcript's own readings feed it", () => {
+    const rows = Array.from({ length: 21 }, (_, i) => reply(NOW - (20 - i) * MIN, `step ${i}`, 500_000 + i * 12_000));
+    const main = tailOf(rows);
+    expect(main.ctxLog.length).toBe(16); // fifteen minutes are kept
+    expect(main.ctxLog[0]).toEqual([NOW - 15 * MIN, 560_004]);
+    expect(F.sessionRunway(main, NOW)).toBeCloseTo((1_000_000 - 740_004) / 12_000, 6);
+    expect(F.sessionRunway(undefined, NOW)).toBeUndefined();
+    expect(F.sessionRunway(tailOf([toolResult(NOW)]), NOW)).toBeUndefined();
+  });
+
+  test("forecasts are worded roughly, and turn red under fifteen minutes", () => {
+    expect([0.2, 3.4, 9.4, 12.4, 14, 38, 57, 58, 85, 600, 1500, 3000].map(F.roughly)).toEqual(["1m", "3m", "9m", "10m", "15m", "40m", "55m", "1h00", "1h25", "10h00", "1d1h", "2d2h"]);
+    expect(F.fullInText(35)).toBe("full in ~35m");
+    expect(F.runwayTone(14.9)).toEqual(F.C.red);
+    expect(F.runwayTone(15)).toEqual(F.C.white);
+  });
+
+  const H = 60 * MIN;
+  test("the pace tick is the share of the limit's window that has passed", () => {
+    expect(F.paceTick(NOW + 130 * MIN, 5 * H, NOW)).toBeCloseTo(170 / 300, 9); // 5h window, resets in 2h10
+    expect(F.paceTick(NOW + 5 * H, 5 * H, NOW)).toBe(0);
+    expect(F.paceTick(NOW + 1, 5 * H, NOW)).toBeCloseTo(1, 6);
+    expect(F.paceTick(NOW + 6 * H, 5 * H, NOW)).toBe(0); // a reset further off than the window is long: clamped
+    expect(F.paceTick(NOW - MIN, 5 * H, NOW)).toBeUndefined(); // the window has rolled over since the figures were read
+    expect(F.paceTick(0, 5 * H, NOW)).toBeUndefined();
+    const week = 7 * 24 * H;
+    expect(F.paceTick(NOW + 0.36 * week, week, NOW)).toBeCloseTo(0.64, 9);
+  });
+
+  test("the tick's cell and glyph: ┿ once the fill has passed it, ┼ on the empty track", () => {
+    expect(F.paceCell(0.57, 38, 12)).toEqual({ cell: 6, glyph: "┼" }); // ━━━━━─┼─────
+    expect(F.paceCell(0.64, 21, 12)).toEqual({ cell: 7, glyph: "┼" }); // ━━━────┼────
+    expect(F.paceCell(0.57, 86, 12)).toEqual({ cell: 6, glyph: "┿" }); // ━━━━━━┿━━━──
+    expect(F.paceCell(0.57, 38, 8)).toEqual({ cell: 4, glyph: "┼" }); // ━━━─┼───
+    expect(F.paceCell(1, 100, 12)).toEqual({ cell: 11, glyph: "┿" });
+  });
+
+  test("an account forecast appears only when the pace reaches 100% before the reset", () => {
+    // 38% after 2h50 of 5h: at that pace full in 4h37, but the limit resets in 2h10. Nothing to say.
+    expect(F.paceForecast(38, NOW + 130 * MIN, 5 * H, NOW)).toBeUndefined();
+    // 86% after 3h35, resetting in 1h25: full in 35 minutes.
+    const fullIn = F.paceForecast(86, NOW + 85 * MIN, 5 * H, NOW)!;
+    expect(fullIn / MIN).toBeCloseTo(35, 9);
+    expect(F.fullInText(fullIn / MIN)).toBe("full in ~35m");
+    expect(F.paceForecast(100, NOW + 85 * MIN, 5 * H, NOW)).toBe(0);
+    expect(F.paceForecast(50, NOW - MIN, 5 * H, NOW)).toBeUndefined();
+  });
+
+  test("the account forecast is suppressed early in a window and under 5% used", () => {
+    expect(F.paceForecast(40, NOW + 4.5 * H, 5 * H, NOW)).toBeUndefined(); // 10% of the window gone: too early, however fast
+    expect(F.paceForecast(40, NOW + 4.25 * H - 1, 5 * H, NOW)! / MIN).toBeCloseTo(67.5, 3); // 15% gone: now it counts
+    expect(F.paceForecast(4.9, NOW + 0.2 * H, 5 * H, NOW)).toBeUndefined();
+    const week = 7 * 24 * H;
+    expect(F.paceForecast(60, NOW + 5 * 24 * H, week, NOW)! / H).toBeCloseTo(32, 6); // two days in at 60%: full in 32 hours
+  });
+
+  test("the account view carries the tick and the forecast for each limit", () => {
+    const data: F.UsageFigures = { five_hour: { utilization: 86, resets_at: iso(NOW + 85 * MIN) }, seven_day: { utilization: 21, resets_at: iso(NOW + 0.36 * 7 * 24 * H) } };
+    const view = F.accountViewOf({ kind: "current", data, asOf: NOW, failing: "" }, { nextTry: 0, busy: false }, NOW);
+    expect(view.limits[0].tick).toBeCloseTo(215 / 300, 9);
+    expect(view.limits[0].fullIn! / MIN).toBeCloseTo(35, 9);
+    expect(view.limits[1].tick).toBeCloseTo(0.64, 9);
+    expect(view.limits[1].fullIn).toBeUndefined();
+    const stale = F.accountViewOf({ kind: "stale", data, asOf: NOW - 30 * MIN, reason: "network: timed out" }, { nextTry: 0, busy: false }, NOW);
+    expect(stale.limits[0].tick).toBeCloseTo(215 / 300, 9);
+    expect(stale.limits[0].fullIn).toBeUndefined(); // no forecast from figures that are not current
   });
 });
