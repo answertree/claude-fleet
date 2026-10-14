@@ -3130,7 +3130,7 @@ describe("the detail view", () => {
       const shape = rows.slice(at, at + 7).map((r) => r.replace(/ {2,}(\S+)$/, " … $1"));
       expect(shape).toEqual([
         " ▌    ◐ Working on Alpha … 19m",
-        " ▌      ◇ Alpha is half done. … 12m",
+        " ▌      ◇ Alpha is half done. The rest needs a fake clock. … 12m", // its opening lines, while there is room
         " ▌    ◐ Working on Bravo … 9m",
         " ▌        What bravo is for",
         " ▌    ○ Charlie",
@@ -3140,6 +3140,22 @@ describe("the detail view", () => {
       // Ages end where the conversation's ages end; the ◇ hangs at column 9 and every line under a task starts at column 11.
       expect([rows[at].length, rows[at + 1].length]).toEqual([104, 104]);
       expect([[...rows[at + 1]].indexOf("◇"), rows[at + 1].indexOf("Alpha"), rows[at + 3].indexOf("What")]).toEqual([8, 10, 10]);
+    });
+  });
+
+  test("while there is room a task's line runs to three rows, and comes down to one before any of them goes", () => {
+    quietly(() => {
+      const s = detailed();
+      s.tasks!.items[2].description = "What charlie is for, " + "and then some more words ".repeat(12);
+      const rows = draw([s], 150, 80).map((r) => r.slice(0, 104).trimEnd());
+      const at = rows.findIndex((r) => r.includes("○ Charlie"));
+      expect(rows.slice(at + 1, at + 4).every((r) => r.startsWith(" ▌        "))).toBe(true);
+      expect(rows[at + 3]).toMatch(/…$/); // more than three rows' worth: the third ends with …
+      expect(rows[at + 4]).toMatch(/^ ▌    ○ Delta/);
+      const keepAt = (avail: number) => plan([s], 150, avail).blocks[0].keep;
+      let h = 200;
+      while (keepAt(h).taskDetailRows === 3) h--;
+      expect([keepAt(h).taskDetailRows, keepAt(h).taskDetail]).toEqual([1, "all"]);
     });
   });
 
@@ -4202,7 +4218,7 @@ describe("what is written to the terminal", () => {
     expect(F.frameDiff(["a", "b", "c"], ["a"])).toBe("\x1b[2;1H\x1b[K\x1b[3;1H\x1b[K"); // rows it no longer has are cleared
   });
 
-  test("live: a second of the demo writes a fraction of a frame, and the screen still changes view in full", async () => {
+  test("live: a second of the demo (four frames) writes less than one whole frame, and the screen still changes view in full", async () => {
     const once = Bun.spawnSync([process.execPath, path.join(here, "demo.ts"), "--once"], { env: { ...process.env, TZ: "UTC", FLEET_NOW: String(NOW), COLUMNS: "150", LINES: "44" }, timeout: 20_000 });
     const frame = once.stdout.length; // one whole frame
     const live = await liveDemo();
@@ -4211,7 +4227,7 @@ describe("what is written to the terminal", () => {
       const from = live.all().length;
       await live.sleep(3000);
       const perSecond = (live.all().length - from) / 3;
-      expect(perSecond).toBeLessThan(frame / 2);
+      expect(perSecond).toBeLessThan(frame); // four frames a second, each only the rows that changed: under a quarter of drawing each in full
       live.write("2");
       expect(await live.until(() => live.after().includes("2 Compact") && strip(live.after()).includes("active session"))).toBe(true);
     } finally {

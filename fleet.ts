@@ -110,6 +110,9 @@ export function parseArgs(argv: string[]): "help" | "glyphs" | undefined {
 
 let focusSid: string | null = null;
 let frame = 0;
+export const FPS = 4; // frames a second
+/** Once-a-second beats, for what should blink slowly however fast the frames come: a waiting session's rail. */
+const beat = () => Math.floor(frame / FPS);
 /** Clickable regions of the last frame, in 1-based terminal cells. */
 const hits: { row: number; x0: number; x1: number; act: string }[] = [];
 
@@ -1268,6 +1271,7 @@ export interface TaskItem {
   say?: { text: string; t: number }; // the latest thing Claude wrote while it was the task in hand
 }
 const TASK_KEEP = 300; // a task's subject or active form: one row outside focus, a few rows in it
+const TASK_DESC_KEEP = 900; // a task's description: up to three rows under it, while there is room
 /** Task order: by number when the id is one, then by the id's text. */
 const taskOrder = (a: TaskItem, b: TaskItem): number => {
   const n = (id: string) => (/^\d+$/.test(id) ? Number(id) : Infinity);
@@ -1719,7 +1723,7 @@ export function scan(now: number): Session[] {
               activeForm: text(x.t.activeForm),
               status,
               blocked: Array.isArray(x.t.blockedBy) && x.t.blockedBy.some((b: unknown) => (typeof b === "string" || typeof b === "number") && unfinished.has(safeLine(String(b)))),
-              description: text(x.t.description),
+              description: typeof x.t.description === "string" ? safeLine(capText(x.t.description, TASK_DESC_KEEP)) : "",
               since: status === "in_progress" ? trace?.started : undefined,
               say: trace?.say,
             };
@@ -3445,6 +3449,7 @@ export interface Keep {
   taskScope: "all" | "open" | "doing"; // the tasks it lists: every one (focus), those not done, or only those in progress
   taskWrap: boolean; // each task's text on as many rows as it takes (focus), rather than one row cut with …
   taskDetail: "all" | "doing" | "none"; // the line under each listed task: under every one, under those in progress only, or under none
+  taskDetailRows: number; // how many rows each of those lines may take: 3 while there is room, then 1
   trouble: boolean; // the row of tool calls that failed in the last ten minutes
   bgRow: boolean; // the row of background commands still running
   prs: boolean; // the row of its pull requests
@@ -3524,6 +3529,7 @@ export function blockOf(v: View, g: Grid, now: number, win: Win, focus = false):
       taskScope: focus ? "all" : "open",
       taskWrap: focus,
       taskDetail: "all",
+      taskDetailRows: 3,
       trouble: body,
       bgRow: body,
       prs: body,
@@ -3769,16 +3775,18 @@ function taskDetailOf(b: Block, t: TaskItem): { lines: string[]; say?: { text: s
   const level = b.keep.taskDetail;
   if (level === "none" || (level === "doing" && t.status !== "in_progress")) return undefined;
   const say = t.say && !replyTimes(b).has(t.say.t) ? t.say : undefined;
-  const text = say ? firstLine(say.text) : t.description;
+  // A message is read as its opening lines, each made plain; a description as it is.
+  const text = say ? say.text.split("\n").map((l) => firstLine(l)).filter(Boolean).join(" ").slice(0, 1200) : t.description;
   if (!text) return undefined;
   const room = Math.max(1, b.taskRoom - 2);
-  const key = `${room} ${b.keep.taskWrap} ${say ? say.t : "d"}`;
+  const most = b.keep.taskWrap ? 3 : b.keep.taskDetailRows;
+  const key = `${room} ${most} ${say ? say.t : "d"}`;
   let at = detailCut.get(t);
   if (!at) detailCut.set(t, (at = new Map()));
   let lines = at.get(key);
   if (!lines) {
-    const all = b.keep.taskWrap ? wrap(text, room) : [text];
-    lines = all.slice(0, b.keep.taskWrap ? 3 : 1).map((line, i, shown) => (i === shown.length - 1 && all.length > shown.length ? cutTo(`${line} ${ICON.cut}`, room) : cutTo(line, room)));
+    const all = most > 1 ? wrap(text, room) : [text];
+    lines = all.slice(0, most).map((line, i, shown) => (i === shown.length - 1 && all.length > shown.length ? cutTo(`${line} ${ICON.cut}`, room) : cutTo(line, room)));
     at.set(key, lines);
   }
   return { lines, say };
@@ -4022,6 +4030,17 @@ function taskScopeTo(b: Block, scope: "open" | "doing"): Change | undefined {
   if (after >= before) return undefined;
   return change(() => (b.keep.taskScope = scope), () => (b.keep.taskScope = from), () => b.keep.taskScope === scope && (from === "all" ? b.keep.taskList === Infinity : b.keep.taskList > 0));
 }
+/** The lines under the listed tasks down to one row each, before any of them goes. */
+function taskDetailRowsTo(b: Block, rows: number): Change | undefined {
+  const from = b.keep.taskDetailRows;
+  if (from <= rows) return undefined;
+  const before = taskDetailRows(b);
+  b.keep.taskDetailRows = rows;
+  const after = taskDetailRows(b);
+  b.keep.taskDetailRows = from;
+  if (after >= before) return undefined;
+  return change(() => (b.keep.taskDetailRows = rows), () => (b.keep.taskDetailRows = from), () => b.keep.taskDetailRows === rows);
+}
 /** Fewer lines under the listed tasks: what the tasks still to start are for ("doing"), then the latest message under each task in progress ("none"). */
 function taskDetailTo(b: Block, level: "doing" | "none"): Change | undefined {
   const from = b.keep.taskDetail;
@@ -4053,6 +4072,7 @@ const LADDER: { step: number; cut: "gaps" | ((b: Block) => Change | undefined) }
   { step: 0, cut: (b) => (b.focus ? earlierTo(b, 2) : undefined) },
   { step: 0, cut: (b) => (b.focus ? taskUnwrap(b) : undefined) }, // each task on one row
   { step: 0, cut: (b) => (b.focus ? taskScopeTo(b, "open") : undefined) }, // the done tasks leave the list; the strip still counts them
+  { step: 0.4, cut: (b) => taskDetailRowsTo(b, 1) }, // the lines under the tasks down to one row each
   { step: 0.5, cut: (b) => taskDetailTo(b, "doing") }, // the lines under tasks still to start: what each is for
   { step: 0.7, cut: (b) => taskDetailTo(b, "none") }, // the latest message under each task in progress
   { step: 0.8, cut: (b) => sideOff(b, "changes") }, // the row of files changed and the checkout's state
@@ -4207,7 +4227,7 @@ function headRows(b: Block, p: Paint): Row[] {
   const dim = needs ? C.warmDim : C.dim;
   const start = () => {
     const r = new Row(g.W, needs ? C.tint : undefined);
-    r.put(g.rail, ICON.railThick, railTone(state, true, frame));
+    r.put(g.rail, ICON.railThick, railTone(state, true, beat()));
     return r;
   };
   // Title row. The state never shrinks; the place gives way first, then the title's letter-spacing, then the title is cut.
@@ -5046,7 +5066,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
       const quietened = isReceded(v.state);
       const dimHere = waiting ? C.warmDim : C.dim; // dim text on the amber tint is a warm dim
       // The thick rail runs the card's full height in the state's colour; a waiting card is tinted across its whole width.
-      const railColor = railTone(v.state, true, frame);
+      const railColor = railTone(v.state, true, beat());
       const row = () => {
         const r = new Row(W, waiting ? C.tint : undefined);
         r.put(2, ICON.railThick, railColor);
@@ -5618,19 +5638,17 @@ if (import.meta.main) {
   refresh();
   retitle();
   draw();
+  // Four frames a second, so spinners and celebrations move smoothly; the data is read every two seconds,
+  // and only the rows that change are written (a frame takes a couple of milliseconds to lay out).
   setInterval(() => {
     frame++;
-    if (frame % 2 === 0) {
+    if (frame % (FPS * 2) === 0) {
       refresh();
       retitle();
     }
-    if (frame % 60 === 0) onScreen = undefined; // a full repaint once a minute (without clearing, so nothing flickers)
+    if (frame % (FPS * 60) === 0) onScreen = undefined; // a full repaint once a minute (without clearing, so nothing flickers)
     draw();
-  }, 1000);
-  // While something celebrates, its shimmer moves eight times a second; only the rows that change are written.
-  setInterval(() => {
-    if (parties.size && [...parties.values()].some((p) => clock() - p.at <= PARTY_MS)) draw();
-  }, 125);
+  }, 1000 / FPS);
   out.on("resize", () => {
     clear();
     draw();
