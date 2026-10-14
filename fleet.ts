@@ -2072,6 +2072,23 @@ export function stallOf(s: Session, f: Facts, now: number, treeCpu: number | und
 }
 /** One name per stalled thing, so the bell rings once for each: "sid" for a session, "sid/thread" for a thread. */
 export const stallKeys = (sid: string, st: Stall): string[] => (st.threads.length ? st.threads.map((id) => `${sid}/${id}`) : st.session ? [sid] : []);
+/**
+ * The same names, each with when that thing last wrote. A stall is known by its silence: while the thing
+ * has not written again it is the same stall, however often the CPU test flickers either side of 1%.
+ */
+export function stallMarks(s: Session, f: Facts, st: Stall): [key: string, wrote: number][] {
+  const wrote = (id: string): number => {
+    const t = id === "main" ? f.main : [...s.agents, ...s.workflows.flatMap((w) => w.agents)].find((a) => a.id === id)?.tail;
+    return t ? lastWriteOf(t) : st.since;
+  };
+  return st.threads.length ? st.threads.map((id) => [`${s.sid}/${id}`, wrote(id)]) : st.session ? [[s.sid, st.since]] : [];
+}
+/** The stalls in `marks` not yet announced for the silence they are in; `known` remembers each. Used to ring the bell once per stall. */
+export function newStalls(known: Map<string, number>, marks: [string, number][]): string[] {
+  const fresh = marks.filter(([k, wrote]) => known.get(k) !== wrote).map(([k]) => k);
+  for (const [k, wrote] of marks) known.set(k, wrote);
+  return fresh;
+}
 /** The members of `current` that were not in `known`; `known` is then brought up to date. Used to ring the bell once per new thing. */
 export function newSince(known: Set<string>, current: string[]): string[] {
   const fresh = current.filter((k) => !known.has(k));
@@ -2123,8 +2140,14 @@ const jobFailed = (state: string) => /fail|error|crash/i.test(state);
  */
 export function noteScan(sessions: Session[], now: number, jobState: (jobId: string) => string | undefined = (id) => readJson(path.join(claudeHome(), "jobs", id, "state.json"))?.state) {
   const next = new Map<string, string>();
+  const made = new Map<string, number>(); // how many times this scan has come up with the same event
   const push = (kind: EventKind, sid: string, key: string, t: number) => {
-    if (t > seen.at) seen.events.push({ kind, t, sid, key });
+    if (t <= seen.at) return;
+    const nth = (made.get(`${kind}|${key}|${t}`) ?? 0) + 1;
+    made.set(`${kind}|${key}|${t}`, nth);
+    // Listed already by an earlier scan: a session missing from one scan (its registry file caught half-written) comes back looking new.
+    if (seen.events.filter((e) => e.kind === kind && e.key === key && e.t === t).length >= nth) return;
+    seen.events.push({ kind, t, sid, key });
   };
   /** Record what `key` looks like now; when that is a change into `kind`, it is an event. */
   const track = (key: string, value: string, sid: string, kind: EventKind | undefined, t: number) => {
@@ -2132,9 +2155,8 @@ export function noteScan(sessions: Session[], now: number, jobState: (jobId: str
     const before = seen.known.get(key);
     if (before === value || !kind) return;
     // A change we watched happen is news even when its own timestamp is a moment older than the mark:
-    // it is then dated now. (A stall has no "before" record, so its first sighting counts as watched.)
-    // Something first seen already in this state is news only if it happened after the mark.
-    const watched = seen.primed && (before !== undefined || key.startsWith("stall:"));
+    // it is then dated now. Something first seen already in this state is news only if it happened after the mark.
+    const watched = seen.primed && before !== undefined;
     push(kind, sid, key, watched && t <= seen.at ? now : t);
   };
   for (const s of sessions) {
@@ -2146,8 +2168,13 @@ export function noteScan(sessions: Session[], now: number, jobState: (jobId: str
       track(`job:${s.sid}`, `${word}|${s.jobId ?? ""}`, s.sid, word === "done" ? "sessionDone" : word === "failed" ? "failed" : undefined, f.main ? lastWriteOf(f.main) : 0);
     }
     for (const wf of s.workflows) track(`wf:${s.sid}/${wf.id}`, wf.status, s.sid, wf.status === "running" ? undefined : wf.status === "completed" ? "workflowDone" : "failed", wf.finished || wf.lastT);
-    const stall = stallOf(s, f, now);
-    for (const k of stallKeys(s.sid, stall)) track(`stall:${k}`, "stalled", s.sid, "stalled", Math.min(now, stall.since + opt.stallMin * 60_000));
+    for (const [k, wrote] of stallMarks(s, f, stallOf(s, f, now))) {
+      // A stall is known by when the thing last wrote, so the same silence seen again is not news again.
+      next.set(`stall:${k}`, String(wrote));
+      if (seen.known.get(`stall:${k}`) === String(wrote)) continue;
+      const t = Math.min(now, wrote + opt.stallMin * 60_000); // when it crossed the line
+      push("stalled", s.sid, `stall:${k}`, seen.primed && t <= seen.at ? now : t); // watched happening: see track()
+    }
     for (const a of [...s.agents, ...s.workflows.flatMap((w) => w.agents)]) track(`agent:${s.sid}/${a.id}`, a.done ? "done" : "running", s.sid, a.done ? "agentDone" : undefined, lastWriteOf(a.tail));
     for (const m of s.mains) {
       const key = `say:${m.path}`;
@@ -2165,6 +2192,8 @@ export function noteScan(sessions: Session[], now: number, jobState: (jobId: str
     if (state === "done") push("sessionDone", key.slice(4), key, now);
     else if (jobFailed(state)) push("failed", key.slice(4), key, now);
   }
+  // A stall that has cleared is remembered for a day, in case it comes back before the thing has written again.
+  for (const [key, value] of seen.known) if (key.startsWith("stall:") && !next.has(key) && Number(value) > now - 24 * 3600_000) next.set(key, value);
   seen.known = next;
   seen.primed = true;
 }
@@ -2281,7 +2310,7 @@ export function buildViews(sessions: Session[], now: number, sayWidth: number, s
   const order: Record<AgentState, number> = { active: 0, tool: 1, quiet: 2, done: 3 };
   const pick = (list: Agent[], stuck: string[]) =>
     list
-      .filter((a) => recent(a) && (opt.showDone || !a.done))
+      .filter((a) => (recent(a) || stuck.includes(a.id)) && (opt.showDone || !a.done)) // a stalled agent has been silent longer than a short window, and is the one to look at
       .sort((a, b) => Number(stuck.includes(b.id)) - Number(stuck.includes(a.id)) || order[stateOf(a, now)] - order[stateOf(b, now)] || a.tail.birth - b.tail.birth);
 
   return sessions
@@ -2290,7 +2319,7 @@ export function buildViews(sessions: Session[], now: number, sayWidth: number, s
       const stall = stallOf(s, facts, now);
       const groups: Group[] = [];
       for (const wf of s.workflows) {
-        const live = wf.status === "running" && wf.lastT >= since;
+        const live = wf.status === "running" && (wf.lastT >= since || wf.agents.some((a) => stall.threads.includes(a.id)));
         const justFinished = wf.status !== "running" && Math.max(wf.finished, wf.lastT) >= since;
         if (live || justFinished) groups.push({ wf, rows: pick(wf.agents, stall.threads), hidden: 0 }); // a stalled agent is the last to be folded away
       }
@@ -2754,7 +2783,7 @@ export function buttonBar(W: number, row: number, idle = 0): string {
 
 let sessions: Session[] = [];
 const needing = new Set<string>();
-const stalledNow = new Set<string>();
+const stalledNow = new Map<string, number>();
 function refresh() {
   const now = clock();
   sessions = scan(now);
@@ -2763,7 +2792,7 @@ function refresh() {
   if (opt.usage && !opt.once) tickUsage(now); // --once has already made its one read
   // Ring once when a session starts waiting on the person, and once for each thing that newly stalls.
   const facts = sessions.map((s) => ({ s, f: factsOf(s) }));
-  const rings = newSince(needing, facts.filter((x) => x.f.needs).map((x) => x.s.sid)).length + newSince(stalledNow, facts.flatMap((x) => stallKeys(x.s.sid, stallOf(x.s, x.f, now)))).length;
+  const rings = newSince(needing, facts.filter((x) => x.f.needs).map((x) => x.s.sid)).length + newStalls(stalledNow, facts.flatMap((x) => stallMarks(x.s, x.f, stallOf(x.s, x.f, now)))).length;
   if (opt.bell && !opt.once) process.stdout.write("\x07".repeat(rings));
   noteScan(sessions, now);
 }

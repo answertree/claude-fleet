@@ -1468,3 +1468,108 @@ describe("safe text holds against anything", () => {
     expect(problems).toEqual([]);
   });
 });
+
+describe("stall watch and news under rough conditions", () => {
+  const noJobs = () => undefined;
+  const resetSeen = (at: number) => Object.assign(F.seen, { at, events: [], known: new Map(), primed: false });
+  /** A thread holding a tool call, silent for `min` minutes before NOW. */
+  const stuckFor = (min: number) => tailOf([toolCall(NOW - min * MIN)]);
+  const kinds = () => F.seen.events.map((e) => e.kind).sort().join(",");
+  /** Run `body` with the session's process tree at `cpu` percent. */
+  const withCpu = <T>(pid: number, cpu: number, body: () => T): T => {
+    const saved = { procs: F.machine.procs, kids: F.machine.kids };
+    F.machine.procs = [{ pid, ppid: 1, cpu, rss: 1, name: "claude" }];
+    F.machine.kids = new Map();
+    try {
+      return body();
+    } finally {
+      Object.assign(F.machine, saved);
+    }
+  };
+
+  test("a stalled agent stays on the screen when its silence is longer than the window: it is the thing to look at", () => {
+    const before = { ...F.opt };
+    try {
+      F.opt.windowMin = 5; // the shortest window; the agent has been silent for 14 minutes
+      const wf: F.Workflow = { id: "wf_1", name: "bisect-and-fix", status: "running", phase: "Fix", phases: [], seen: ["Fix"], started: NOW - 30 * MIN, finished: 0, agents: [agentOf("w5", stuckFor(14), { wf: "wf_1", label: "review:clock-in-refund" })], lastT: NOW - 14 * MIN };
+      const s = sessionOf({ sid: "b", pid: 4242, name: "flaky test hunt", mains: [stuckFor(1)], agents: [agentOf("s1", stuckFor(14), { label: "measure build time" }), agentOf("old", tailOf([toolCall(NOW - 20 * MIN), toolResult(NOW - 19 * MIN)]))], workflows: [wf] });
+      withCpu(4242, 0.2, () => {
+        const v = F.buildViews([s], NOW, 80)[0];
+        expect([v.state, [...v.stall.threads].sort()]).toEqual(["stalled", ["s1", "w5"]]);
+        expect(v.groups.flatMap((g) => g.rows.map((a) => a.id)).sort()).toEqual(["s1", "w5"]); // the quiet, unstalled one has aged out; these two have not
+        expect(v.groups.some((g) => g.wf?.id === "wf_1")).toBe(true);
+        const frame = F.render([s], 150, 30, NOW).map(strip).join("\n");
+        expect(frame).toContain("review:clock-in-refund");
+        expect(frame).toContain("measure build time");
+        expect(frame.match(/stalled\? Bash/g)?.length).toBe(2);
+      });
+    } finally {
+      Object.assign(F.opt, before);
+    }
+  });
+
+  test("one silence is one stall: the tree's CPU flickering either side of 1% does not ring or report it again", () => {
+    const agent = agentOf("review", stuckFor(9.5));
+    const s = sessionOf({ sid: "b", pid: 77, mains: [stuckFor(0.5)], agents: [agent] });
+    const known = new Map<string, number>();
+    let rings = 0;
+    const scanAt = (t: number, cpu: number) =>
+      withCpu(77, cpu, () => {
+        const f = F.factsOf(s);
+        rings += F.newStalls(known, F.stallMarks(s, f, F.stallOf(s, f, t))).length;
+        F.noteScan([s], t, noJobs);
+      });
+    resetSeen(NOW);
+    scanAt(NOW, 0.2); // 9.5 minutes of silence: not yet
+    expect([rings, kinds()]).toEqual([0, ""]);
+    [0.2, 1.4, 0.3, 2.0, 0.1, 0.9].forEach((cpu, i) => scanAt(NOW + MIN + i * 2000, cpu)); // stalled, clear, stalled, clear, stalled, stalled
+    expect([rings, kinds()]).toEqual([1, "stalled"]);
+    expect(F.seen.events[0]).toMatchObject({ key: "stall:b/review", t: NOW + 30_000 }); // when it crossed ten minutes
+    expect(F.stallMarks(s, F.factsOf(s), { session: false, threads: ["review"], count: 1, since: NOW - 9.5 * MIN })).toEqual([["b/review", NOW - 9.5 * MIN]]);
+
+    // It gets its answer, calls another tool, and that one hangs too: a new silence, so a new stall.
+    F.ingest(agent.tail, JSON.stringify(toolResult(NOW + 2 * MIN)));
+    F.ingest(agent.tail, JSON.stringify(toolCall(NOW + 2 * MIN + 1000)));
+    scanAt(NOW + 3 * MIN, 0.2);
+    expect([rings, kinds()]).toEqual([1, "stalled"]);
+    F.ingest(s.mains[0], JSON.stringify(toolCall(NOW + 12.5 * MIN))); // the main thread is still at work, so only the agent is stuck
+    scanAt(NOW + 13 * MIN, 0.2);
+    scanAt(NOW + 13 * MIN + 2000, 0.2);
+    expect([rings, kinds()]).toEqual([2, "stalled,stalled"]);
+
+    // A whole session gone quiet, with nothing outstanding, is known by its own name.
+    const silent = sessionOf({ sid: "c", pid: 77, mains: [tailOf([toolCall(NOW - 12 * MIN), toolResult(NOW - 12 * MIN + 1)])] });
+    const marks = withCpu(77, 0, () => F.stallMarks(silent, F.factsOf(silent), F.stallOf(silent, F.factsOf(silent), NOW)));
+    expect(marks).toEqual([["c", NOW - 12 * MIN + 1]]);
+    expect([F.newStalls(known, marks), F.newStalls(known, marks)]).toEqual([["c"], []]);
+  });
+
+  test("a session that drops out of one scan and comes back is not news a second time", () => {
+    resetSeen(NOW);
+    const main = tailOf([reply(NOW - 3 * MIN, "Old.")], "/p/a.jsonl");
+    const agent = agentOf("s1", tailOf([toolCall(NOW - MIN)], "/p/s1.jsonl"));
+    const wf: F.Workflow = { id: "wf_1", name: "w", status: "running", phase: "", phases: [], seen: [], started: NOW - 20 * MIN, finished: 0, agents: [], lastT: NOW - MIN };
+    const s = sessionOf({ sid: "a", mains: [main], agents: [agent], workflows: [wf] });
+    F.noteScan([s], NOW, noJobs);
+    // Two replies in one message carry one timestamp, and are two replies.
+    const twice = { ...reply(NOW + 500, "First part."), message: { id: "x", model: "claude-opus-5-5", content: [{ type: "text", text: "First part." }, { type: "text", text: "Second part." }], usage: { input_tokens: 4, cache_read_input_tokens: 90_000, output_tokens: 300 } } };
+    F.ingest(main, JSON.stringify(twice));
+    F.ingest(main, JSON.stringify(toolCall(NOW + 900, "AskUserQuestion", { questions: [{ question: "Merge it?" }] })));
+    agent.done = true;
+    agent.tail.mtime = NOW + 800;
+    wf.status = "completed";
+    wf.finished = NOW + 700;
+    F.noteScan([s], NOW + 2000, noJobs);
+    const news = "agentDone,asked,reply,reply,workflowDone";
+    expect(kinds()).toBe(news);
+    F.noteScan([], NOW + 4000, noJobs); // its registry file was caught half-written, say: the session is missing from one scan
+    F.noteScan([s], NOW + 6000, noJobs);
+    expect(kinds()).toBe(news);
+    F.noteScan([], NOW + 8000, noJobs);
+    F.ingest(main, JSON.stringify(reply(NOW + 8500, "One more."))); // something new while it was out of sight is still news, once
+    F.noteScan([s], NOW + 10_000, noJobs);
+    F.noteScan([s], NOW + 12_000, noJobs);
+    expect(kinds()).toBe("agentDone,asked,reply,reply,reply,workflowDone");
+    expect(F.newCount()).toBe(6);
+  });
+});
