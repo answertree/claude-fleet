@@ -2521,13 +2521,14 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
     out.push("", fg(C.dim, all.length ? "   Nothing active and nothing waiting on you." : "   No live Claude Code sessions found in ~/.claude/sessions."));
   }
 
+  // Shared scales so rows are comparable with each other. Taken before rows are folded away to fit the
+  // screen: a row that folds (an agent going quiet changes which ones fold) must not rescale the rows that stay.
+  const agentMax = Math.max(1, ...shown.flatMap((v) => v.groups.flatMap((g) => g.rows.map((a) => Math.max(...buckets([a.tail.tools], now, S))))));
+  const sessionTails = tailsOf;
+  const sessionMax = Math.max(1, ...shown.map((v) => Math.max(...buckets(sessionTails(v.s).map((t) => t.tools), now, S))));
+
   const avail = rows - out.length - 2 - (hidden.length ? 1 : 0);
   const { views, gaps, cut } = opt.mode === "far" ? { views: [] as View[], gaps: false, cut: 0 } : fitViews(shown, avail);
-
-  // Shared scales so rows are comparable with each other.
-  const agentMax = Math.max(1, ...views.flatMap((v) => v.groups.flatMap((g) => g.rows.map((a) => Math.max(...buckets([a.tail.tools], now, S))))));
-  const sessionTails = tailsOf;
-  const sessionMax = Math.max(1, ...views.map((v) => Math.max(...buckets(sessionTails(v.s).map((t) => t.tools), now, S))));
 
   const ACT = W >= 150 ? 40 : W >= 120 ? 28 : W >= 100 ? 18 : 0; // "what it is doing" column
   const META = W >= 110 ? 18 : 0;

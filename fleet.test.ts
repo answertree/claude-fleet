@@ -1672,3 +1672,71 @@ describe("a row never grows", () => {
     }
   });
 });
+
+describe("graphs hold still, checked independently", () => {
+  test("awkward windows: lengths that do not divide by the width, calls exactly on an edge, and the moment a bar closes", () => {
+    let x = 5;
+    const rnd = () => ((x = (x * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+    for (const windowMin of [1, 7, 13, 30, 77, 180])
+      for (const n of [1, 12, 25, 58, 110, 160]) {
+        const span = windowMin * MIN;
+        const bar = span / n; // 7 minutes over 58 bars is 7241.379… ms a bar
+        const calls = Array.from({ length: 300 }, () => Math.round(NOW + 3 * bar - rnd() * (span + 6 * bar)));
+        // …and calls exactly on bar edges, and a millisecond either side of them.
+        for (let k = Math.floor(NOW / bar) - n - 1; k <= Math.floor(NOW / bar) + 1; k += Math.max(1, Math.floor(n / 7))) for (const d of [-1, 0, 1]) calls.push(Math.round(k * bar) + d);
+        calls.sort((a, b) => a - b);
+        const step = Math.min(1000, Math.max(1, Math.floor(bar / 10)));
+        let before = F.timeWindow(NOW, span, n);
+        let was = F.bucketsIn([calls], before);
+        let closings = 0;
+        for (let t = NOW + step; t < NOW + 3 * bar + step; t += step) {
+          const win = F.timeWindow(t, span, n);
+          const b = F.bucketsIn([calls], win);
+          expect(F.barOf(t, win)).toBe(n - 1); // the bar still filling is the last one
+          // Counted another way: bar k of the strip is wall-clock bar floor(now / bar) - n + 1 + k.
+          const again = new Array(n).fill(0);
+          for (const c of calls) {
+            const k = Math.floor(c / bar) - Math.floor(t / bar) + n - 1;
+            if (k >= 0 && k < n) again[k]++;
+          }
+          expect(b).toEqual(again);
+          const moved = win.first - before.first;
+          if (moved === 0) expect(b).toEqual(was); // no bar closed: nothing may move, the total included
+          else {
+            expect(moved).toBe(1);
+            expect(b.slice(0, n - 1)).toEqual(was.slice(1)); // one closed: everything steps left one cell
+            closings++;
+          }
+          before = win;
+          was = b;
+        }
+        expect(closings).toBeGreaterThanOrEqual(2);
+      }
+  });
+
+  /** A session with one busy agent, one that is nearly idle, and a main thread, where folding would hide the busy one. */
+  const twoAgents = () => {
+    const quietBusy = agentOf("busy-but-quiet", tailOf([...callTimes(90, NOW - 5 * MIN, 3, 3).map((t) => toolCall(t)), toolResult(NOW - 5 * MIN + 1)]), { label: "the busy one" });
+    const live = agentOf("live", tailOf(callTimes(6, NOW - 10_000, 25, 5).map((t) => toolCall(t))), { label: "the live one" });
+    const other = agentOf("other", tailOf(callTimes(5, NOW - 20_000, 25, 9).map((t) => toolCall(t))), { label: "another live one" });
+    return sessionOf({ sid: "b", name: "flaky test hunt", mains: [tailOf(callTimes(12, NOW - 30_000, 25, 2).map((t) => toolCall(t)))], agents: [live, other, quietBusy] });
+  };
+  const barsOf = (frame: string[], label: string) => frame.map(strip).find((l) => l.includes(label))?.match(/[▁▂▃▄▅▆▇█]{12,}/)?.[0];
+
+  test("a row that folds away to fit the screen does not rescale the rows that stay", () => {
+    const before = { ...F.opt };
+    try {
+      for (const mode of ["detail", "compact"] as F.Mode[]) {
+        F.opt.mode = mode;
+        const tall = F.render([twoAgents()], 150, 30, NOW);
+        const short = F.render([twoAgents()], 150, mode === "compact" ? 8 : 9, NOW);
+        expect(barsOf(tall, "the busy one")).toBeDefined(); // on the tall screen every thread has its row
+        expect(barsOf(short, "the busy one")).toBeUndefined(); // on the short one the quiet agent has folded away
+        expect(short.map(strip).join("\n")).toContain("more agent");
+        expect(barsOf(short, "the live one")).toBe(barsOf(tall, "the live one")!);
+      }
+    } finally {
+      Object.assign(F.opt, before);
+    }
+  });
+});
