@@ -1071,8 +1071,8 @@ function readText(f: string, max = 32 << 20): string | undefined {
     return undefined;
   }
 }
-const readJson = (f: string): any => {
-  const text = readText(f);
+const readJson = (f: string, max?: number): any => {
+  const text = readText(f, max);
   if (text === undefined) return undefined;
   try {
     return JSON.parse(text);
@@ -1762,7 +1762,7 @@ export function readSharedUsage(file = sharedUsagePath()): Reading | undefined {
 }
 /** Read the figures Claude Code itself last fetched: the cachedUsageUtilization entry of ~/.claude.json, and no other key. */
 export function readClaudeUsage(file = path.join(process.env.FLEET_HOME || process.env.AGENT_FLEET_HOME || os.homedir(), ".claude.json")): Reading | undefined {
-  const c = readJson(file)?.cachedUsageUtilization;
+  const c = readJson(file, 1 << 30)?.cachedUsageUtilization; // Claude Code's own file can grow large: only devices and pipes are refused
   if (!c || typeof c.fetchedAtMs !== "number" || !c.utilization) return undefined;
   return { figures: figuresOnly(c.utilization), fetchedAt: c.fetchedAtMs };
 }
