@@ -1031,7 +1031,7 @@ export interface Session {
   agents: Agent[];
   workflows: Workflow[];
   tasks?: { done: number; doing: number; total: number; active: string };
-  job?: { state: string; detail: string; needs: string };
+  job?: { state: string; detail: string; needs: string; since?: number }; // since: when a blocked job began waiting
   jobId?: string;
 }
 
@@ -1213,6 +1213,9 @@ function loadAgent(file: string, wf?: string, started?: any, done = false): Agen
   };
 }
 
+/** When each blocked job began waiting, and on which question. */
+const waitingSince = new Map<string, { needs: string; since: number }>();
+
 export function scan(now: number): Session[] {
   const sessions: Session[] = [];
   const CLAUDE = claudeHome();
@@ -1287,6 +1290,23 @@ export function scan(now: number): Session[] {
       const st = readJson(path.join(CLAUDE, "jobs", String(reg.jobId), "state.json"));
       if (st) job = { state: safeLine(st.state), detail: typeof st.detail === "string" ? safeText(capText(st.detail, NOTE_KEEP)) : "", needs: typeof st.needs === "string" ? safeText(capText(st.needs, NOTE_KEEP)) : "" };
     }
+    // A blocked job's wait starts when it began waiting on this question, and is not moved by later writes to its transcript (an
+    // away summary, a title). Seen to change while the dashboard watched: its state file's time, written when it asked. Already
+    // waiting when first seen: the earlier of that and its transcript's last write, as the state file may have been written since.
+    const held = waitingSince.get(sid);
+    if (job?.state === "blocked") {
+      if (held?.needs === job.needs) job.since = held.since;
+      else {
+        let stamped = 0;
+        try {
+          stamped = fs.statSync(path.join(CLAUDE, "jobs", String(reg.jobId), "state.json")).mtimeMs;
+        } catch {}
+        const wrote = Math.max(0, ...mains.map(lastWriteOf));
+        job.since = (held ? Math.min(stamped || now, now) : Math.min(stamped || Infinity, wrote || Infinity)) || undefined;
+        if (job.since === Infinity) job.since = undefined;
+      }
+    }
+    waitingSince.set(sid, { needs: job?.state === "blocked" ? job.needs : "", since: job?.since ?? 0 });
 
     const title = mains.map((m) => m.title).find(Boolean);
     const named = safeLine(reg.name && reg.name !== sid.slice(0, 8) ? reg.name : title || (reg.name ?? sid.slice(0, 8)));
@@ -2110,7 +2130,7 @@ export function stateSince(s: Session, f: Facts, state: SessionState, stalledSin
   const m = f.main;
   const lastWrite = m ? lastWriteOf(m) : 0;
   const ask = m && pendingOf(m);
-  if (state === "needs") return ask?.name === "AskUserQuestion" ? ask.t : lastWrite;
+  if (state === "needs") return ask?.name === "AskUserQuestion" ? ask.t : s.job?.since || lastWrite;
   if (state === "stalled") return stalledSince || lastWrite;
   if (state === "working") return s.startedAt;
   if (state === "yourTurn") return m?.say?.t ?? lastWrite;
@@ -2201,9 +2221,13 @@ export function stallOf(s: Session, f: Facts, now: number, treeCpu: number | und
   const threads: string[] = [];
   let since = session ? lastWrite : Infinity;
   if (session && f.main && pendingTool(f.main)) threads.push("main");
+  // A transcript left on a tool call (an interrupted agent, one from an earlier run of a resumed session) is not stuck work once the
+  // session has moved on since it last wrote: you have typed a new prompt since, or it was written before the session's current
+  // process started, so nothing in it can still be running. Anything else silent on a tool call is a candidate, background agents included.
+  const movedOn = (_a: Agent, wrote: number) => (f.main?.ask?.t ?? 0) > wrote || wrote < s.startedAt;
   for (const a of agents) {
     const wrote = lastWriteOf(a.tail);
-    if (a.done || !threadStalled({ pending: pendingTool(a.tail), lastWrite: wrote }, treeCpu, now, stallMs, cpuLimit(`${s.sid}/${a.id}`, wrote))) continue;
+    if (a.done || movedOn(a, wrote) || !threadStalled({ pending: pendingTool(a.tail), lastWrite: wrote }, treeCpu, now, stallMs, cpuLimit(`${s.sid}/${a.id}`, wrote))) continue;
     threads.push(a.id);
     since = Math.min(since, wrote);
   }

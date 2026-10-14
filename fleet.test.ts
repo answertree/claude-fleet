@@ -625,6 +625,52 @@ describe("workflow phase trail", () => {
   });
 });
 
+describe("a blocked job's wait", () => {
+  const home = path.join(SCRATCH, "blocked");
+  const sid = "blocked0-0000-4000-8000-000000000001";
+  const file = path.join(home, "projects", "-b", `${sid}.jsonl`);
+  const stateFile = path.join(home, "jobs", "jobB", "state.json");
+  const saved = { home: process.env.FLEET_HOME };
+  beforeAll(() => (process.env.FLEET_HOME = home));
+  afterAll(() => (process.env.FLEET_HOME = saved.home));
+  const append = (row: object, t: number) => {
+    fs.appendFileSync(file, JSON.stringify(row) + "\n");
+    fs.utimesSync(file, new Date(t), new Date(t));
+  };
+  const block = (needs: string, t: number) => {
+    fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+    fs.writeFileSync(stateFile, JSON.stringify({ state: "blocked", detail: "", needs }));
+    fs.utimesSync(stateFile, new Date(t), new Date(t));
+  };
+
+  test("starts when the job blocked, and does not restart when its transcript is written to", () => {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.mkdirSync(path.join(home, "sessions"), { recursive: true });
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(path.join(home, "sessions", "1.json"), JSON.stringify({ pid: process.pid, sessionId: sid, name: "job", kind: "bg", status: "idle", cwd: "/work", jobId: "jobB", startedAt: NOW - 60 * MIN }));
+    fs.writeFileSync(file, "");
+    append(reply(NOW - 6 * MIN, "Shall I drop the column?"), NOW - 6 * MIN);
+    block("Approve dropping the column?", NOW - 6 * MIN);
+    Object.assign(F.seen, { at: NOW - 30 * MIN, events: [], known: new Map(), primed: false });
+    const look = (now: number) => {
+      const s = F.scan(now).find((x) => x.sid === sid)!;
+      const f = F.factsOf(s);
+      F.noteScan([s], now, () => undefined);
+      return F.stateTime(s, f, "needs", now);
+    };
+    expect(look(NOW)).toBe("6m");
+    append({ type: "system", subtype: "away_summary", timestamp: iso(NOW + 60_000), content: "Waiting for approval to drop the column." }, NOW + 60_000);
+    expect(look(NOW + 62_000)).toBe("7m");
+    append({ type: "ai-title", aiTitle: "Coupon migration" }, NOW + 9 * MIN); // no timestamp: only the file's time moves
+    expect(look(NOW + 9 * MIN + 2_000)).toBe("15m");
+    expect(F.seen.events.filter((e) => e.kind === "asked").length).toBe(1);
+    // A different question is a new wait.
+    block("Approve dropping the table too?", NOW + 10 * MIN);
+    expect(look(NOW + 10 * MIN + 2_000)).toBe("now");
+    expect(F.seen.events.filter((e) => e.kind === "asked").length).toBe(2);
+  });
+});
+
 describe("a workflow between its agents", () => {
   // A workflow's state file is written when it ends. Until then the journal and the agents' transcripts are all there is,
   // and there are moments (just launched, between two agents, after the last one reports) when no agent is running.
@@ -1086,6 +1132,28 @@ describe("stall watch", () => {
   const STALL = 10 * MIN;
   /** A thread that made a tool call `quietMin` minutes ago; `answered` says whether its result came back. */
   const thread = (quietMin: number, answered = false) => tailOf([toolCall(NOW - quietMin * MIN - 5_000), toolResult(NOW - quietMin * MIN - 4_000), toolCall(NOW - quietMin * MIN), ...(answered ? [toolResult(NOW - quietMin * MIN + 1)] : [])]);
+
+  test("an agent left on a tool call is not a stall once the session has moved on since it last wrote", () => {
+    const busyMain = tailOf([prompt(NOW - 4 * 60 * MIN, "keep going"), ...callTimes(40, NOW - 2_000, 60).flatMap((t) => [toolCall(t), toolResult(t + 500)])]);
+    const dead = agentOf("old1", thread(180)); // cut off three hours ago on an unanswered Bash call, by a run of the session before this one
+    const s = sessionOf({ sid: "x", status: "busy", startedAt: NOW - 60 * MIN, mains: [busyMain], agents: [dead] });
+    expect(F.stallOf(s, F.factsOf(s), NOW, 0.4, STALL, new Map()).count).toBe(0);
+    expect(F.stallOf({ ...s, startedAt: NOW - 5 * 60 * MIN }, F.factsOf(s), NOW, 0.4, STALL, new Map()).threads).toEqual(["old1"]); // in this run, with no prompt since: still a candidate
+    // A new prompt since it last wrote also means its turn is over, inside a workflow too.
+    const later = tailOf([prompt(NOW - 30 * MIN, "now something else"), toolCall(NOW - 2 * MIN, "Workflow")]);
+    const wf: F.Workflow = { id: "wf_1", name: "w", status: "running", phase: "Fix", phases: [], seen: ["Fix"], started: NOW - 3 * 60 * MIN, finished: 0, agents: [agentOf("w1", thread(180), { wf: "wf_1" })], lastT: NOW - 180 * MIN };
+    const t = sessionOf({ sid: "y", status: "busy", mains: [later], workflows: [wf] });
+    expect(F.stallOf(t, F.factsOf(t), NOW, 0.4, STALL, new Map()).threads).toEqual([]);
+    // But an agent the main thread is still waiting on (its Agent call made before the agent's silence, nothing back since) is one.
+    const waiting = tailOf([prompt(NOW - 40 * MIN, "measure it"), toolCall(NOW - 30 * MIN, "Agent", { description: "measure" })]);
+    const u = sessionOf({ sid: "z", status: "busy", mains: [waiting], agents: [agentOf("m1", thread(14))] });
+    expect(F.stallOf(u, F.factsOf(u), NOW, 0.4, STALL, new Map()).threads).toEqual(["main", "m1"]); // the main thread waits on it, so it is quiet too
+    // And a workflow's agent stays one while the main thread works on beside it (the design's own example).
+    const beside = tailOf([prompt(NOW - 40 * MIN, "fix the tests"), ...callTimes(20, NOW - 2 * MIN, 30).flatMap((x) => [toolCall(x), toolResult(x + 500)])]);
+    const wf2: F.Workflow = { ...wf, agents: [agentOf("w5", thread(14), { wf: "wf_1" })], lastT: NOW - 14 * MIN };
+    const v = sessionOf({ sid: "w", status: "busy", mains: [beside], workflows: [wf2] });
+    expect(F.stallOf(v, F.factsOf(v), NOW, 0.4, STALL, new Map()).threads).toEqual(["w5"]);
+  });
 
   test("a thread: a tool call outstanding, nothing written for the stall time, the tree under 1% CPU", () => {
     const quiet = (min: number, pending = true) => ({ pending, lastWrite: NOW - min * MIN });
