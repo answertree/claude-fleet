@@ -572,16 +572,59 @@ const ANSI = /\x1b\[[0-9;?]*[a-zA-Z]/g;
 /** Display cells a string takes once its colour codes are left out. */
 export const cells = (s: string) => width(s.replace(ANSI, ""));
 
+interface Cell {
+  ch: string; // what is drawn; "" for a cell covered by the one to its left
+  color?: RGB;
+  bold?: boolean;
+  bg?: RGB; // its own background (the context bar's half-cells), which wins over the row's tint
+  raw?: boolean; // ch is a coloured string kept whole
+  span?: number; // cells it covers, when more than one: a wide character, or a paste kept whole
+}
+/**
+ * A coloured string as one cell per glyph, or undefined when it holds anything but the colour,
+ * background and bold codes this file writes, or a glyph that is not one cell wide.
+ */
+function ansiCells(ansi: string): Cell[] | undefined {
+  const out: Cell[] = [];
+  let color: RGB | undefined;
+  let bg: RGB | undefined;
+  let isBold = false;
+  for (const part of ansi.split(/(\x1b\[[0-9;?]*[a-zA-Z])/)) {
+    if (part.startsWith("\x1b[")) {
+      const m = /^\x1b\[(?:(38|48);2;(\d+);(\d+);(\d+)|(39|49|1|22))m$/.exec(part);
+      if (!m) return undefined;
+      if (m[1] === "38") color = [+m[2], +m[3], +m[4]];
+      else if (m[1] === "48") bg = [+m[2], +m[3], +m[4]];
+      else if (m[5] === "39") color = undefined;
+      else if (m[5] === "49") bg = undefined;
+      else isBold = m[5] === "1";
+      continue;
+    }
+    for (const ch of part) {
+      if (ch === "\x1b" || charWidth(ch.codePointAt(0)!) !== 1) return undefined;
+      out.push({ ch, color, bold: isBold, bg });
+    }
+  }
+  return out;
+}
 /**
  * One screen row as cells, so text can be put at the columns grid() gives instead of being padded into
- * place. Columns count from 1. Later text overwrites earlier text; anything past the last column is dropped.
+ * place. Columns count from 1. Later text overwrites earlier text, cell for cell (a tick put on a gauge
+ * replaces one cell of it); anything past the last column is dropped. The row is always exactly W cells.
  */
 export class Row {
-  private cell: { ch: string; color?: RGB; bold?: boolean; raw?: boolean }[];
+  private cell: Cell[];
   private bg: (RGB | undefined)[];
   constructor(public W: number, bg?: RGB) {
     this.cell = Array.from({ length: W }, () => ({ ch: " " }));
     this.bg = new Array(W).fill(bg);
+  }
+  /** Make cell `i` (from 0) free to write on. Something wider than a cell that covers it is blanked whole, so the row cannot grow. */
+  private free(i: number) {
+    let head = i;
+    while (head > 0 && this.cell[head].ch === "") head--;
+    const span = this.cell[head].span ?? 1;
+    if (span > 1 && head + span > i) for (let k = head; k < head + span; k++) this.cell[k] = { ch: " " };
   }
   /** Put plain text starting at `col`. Returns the column after it. */
   put(col: number, text: string, color: RGB = C.text, isBold = false): number {
@@ -589,7 +632,8 @@ export class Row {
       const w = charWidth(ch.codePointAt(0)!);
       if (w === 0) continue;
       if (col >= 1 && col + w - 1 <= this.W) {
-        this.cell[col - 1] = { ch, color, bold: isBold };
+        for (let k = 0; k < w; k++) this.free(col - 1 + k);
+        this.cell[col - 1] = w === 2 ? { ch, color, bold: isBold, span: 2 } : { ch, color, bold: isBold };
         if (w === 2) this.cell[col] = { ch: "" };
       }
       col += w;
@@ -615,8 +659,14 @@ export class Row {
   /** Place something already coloured (a sparkline, a gauge, a context bar) that is `w` cells wide. Dropped if it does not fit. */
   paste(col: number, ansi: string, w = cells(ansi)): number {
     if (col >= 1 && w > 0 && col + w - 1 <= this.W) {
-      this.cell[col - 1] = { ch: ansi, raw: true };
-      for (let i = 1; i < w; i++) this.cell[col - 1 + i] = { ch: "" };
+      for (let i = 0; i < w; i++) this.free(col - 1 + i);
+      const split = ansiCells(ansi);
+      if (split && split.length <= w) split.forEach((c, i) => (this.cell[col - 1 + i] = c));
+      else {
+        // Codes that are not ours, or a width that is not what was said: keep it whole.
+        this.cell[col - 1] = { ch: ansi, raw: true, span: w };
+        for (let i = 1; i < w; i++) this.cell[col - 1 + i] = { ch: "" };
+      }
     }
     return col + w;
   }
@@ -630,18 +680,25 @@ export class Row {
     return this.cell.map((c) => (c.raw ? c.ch.replace(ANSI, "") : c.ch)).join("");
   }
   toString(): string {
+    const bgAt = (i: number) => this.cell[i].bg ?? this.bg[i];
     let out = "";
     let last = this.W;
-    while (last > 0 && this.cell[last - 1].ch === " " && !this.bg[last - 1]) last--; // nothing to draw past here
+    while (last > 0 && this.cell[last - 1].ch === " " && !bgAt(last - 1)) last--; // nothing to draw past here
+    const UNKNOWN: RGB = [-1, -1, -1]; // after a string kept whole, which may have changed the background itself
     let bg: RGB | undefined;
     for (let i = 0; i < last; ) {
       const c = this.cell[i];
-      if (this.bg[i] !== bg) {
-        bg = this.bg[i];
+      if (c.ch === "") {
+        i++;
+        continue;
+      }
+      if (bgAt(i) !== bg) {
+        bg = bgAt(i);
         out += bg ? `\x1b[48;2;${bg[0]};${bg[1]};${bg[2]}m` : "\x1b[49m";
       }
-      if (c.raw || c.ch === "") {
+      if (c.raw) {
         out += c.ch;
+        bg = UNKNOWN;
         i++;
         continue;
       }
@@ -650,7 +707,7 @@ export class Row {
       let j = i;
       for (; j < last; j++) {
         const d = this.cell[j];
-        if (d.raw || d.ch === "" || d.color !== c.color || !!d.bold !== !!c.bold || this.bg[j] !== bg) break;
+        if (d.raw || d.color !== c.color || !!d.bold !== !!c.bold || (d.ch !== "" && bgAt(j) !== bg)) break;
         run += d.ch;
       }
       const painted = c.color ? fg(c.color, run) : run;

@@ -1573,3 +1573,102 @@ describe("stall watch and news under rough conditions", () => {
     expect(F.newCount()).toBe(6);
   });
 });
+
+describe("a row never grows", () => {
+  const drawn = (s: string) => Bun.stringWidth(strip(s));
+  /** The background a terminal would have behind each glyph of a coloured string: "" for none, else "r;g;b". */
+  const backgrounds = (ansi: string): string[] => {
+    const out: string[] = [];
+    let bg = "";
+    for (const part of ansi.split(/(\x1b\[[0-9;?]*[a-zA-Z])/)) {
+      const m = /^\x1b\[(?:48;2;([\d;]+)|(49|0))m$/.exec(part);
+      if (m) bg = m[1] ?? "";
+      else if (!part.startsWith("\x1b[")) for (const _ of part) out.push(bg);
+    }
+    return out;
+  };
+
+  test("text put over part of a gauge or a sparkline replaces just those cells", () => {
+    const r = new F.Row(20);
+    r.paste(5, F.gauge(50, 12, F.C.calm)); // ━━━━━━──────
+    r.put(11, "┼", F.C.white); // a pace tick, over the gauge
+    expect(r.plain()).toBe("    ━━━━━━┼─────    ");
+    expect(r.toString()).toBe("    " + F.fg(F.C.calm, "━━━━━━") + F.fg(F.C.white, "┼") + F.fg(F.C.faint, "─────")); // the colours either side are kept
+    const s = new F.Row(12);
+    s.paste(3, F.spark([1, 2, 3, 4, 5, 6, 7, 8], 8, ...F.RAMP.session));
+    s.put(6, "▼", F.C.white, true);
+    s.paste(9, F.fg(F.C.green, "ab"));
+    expect(strip(F.spark([1, 2, 3, 4, 5, 6, 7, 8], 8, ...F.RAMP.session))).toBe("▃▄▅▆▇▇██");
+    expect(s.plain()).toBe("  ▃▄▅▼▇▇ab  ");
+    expect(drawn(s.toString())).toBe(10);
+  });
+
+  test("a context bar keeps its own half-cell backgrounds on a tinted row, and the tint carries on after it", () => {
+    const bar = F.stacked([{ tokens: 30, color: [120, 120, 120] }, { tokens: 50, color: [177, 185, 249] }], 200, 10);
+    const r = new F.Row(16, F.C.tint);
+    r.paste(3, bar);
+    r.put(14, "x");
+    expect(r.plain()).toBe("  " + strip(bar) + " x  ");
+    const out = r.toString();
+    const tint = F.C.tint.join(";");
+    const behind = backgrounds(out);
+    expect(behind.length).toBe(16);
+    expect(behind.slice(0, 2)).toEqual([tint, tint]);
+    expect(behind[3]).toBe("177;185;249"); // the half-cell where two categories meet: the second one's colour behind the first one's ▌
+    expect(strip(bar)[1]).toBe("▌");
+    expect(behind.filter((b) => b !== tint).length).toBe(1); // every other cell, the x and the end of the row included, is on the tint
+    expect(out.endsWith("\x1b[49m")).toBe(true);
+    expect(drawn(out)).toBe(16);
+  });
+
+  test("a wide character that is half overwritten is blanked rather than pushed along", () => {
+    const r = new F.Row(10);
+    r.put(3, "日本");
+    r.put(4, "x");
+    expect(r.plain()).toBe("   x本    ");
+    expect(drawn(r.toString())).toBe(6);
+    r.put(6, "y");
+    expect(r.plain()).toBe("   x y    ");
+  });
+
+  test("a paste with escape codes this file does not write is kept whole, and goes whole when written over", () => {
+    const odd = "\x1b[4munder\x1b[24m"; // underline: not ours
+    const r = new F.Row(12, F.C.tint);
+    r.paste(3, odd);
+    expect(r.plain()).toBe("  under     ");
+    expect(r.toString()).toContain(odd);
+    expect(drawn(r.toString())).toBe(12);
+    r.put(5, "Z");
+    expect(r.plain()).toBe("    Z       ");
+    expect(drawn(r.toString())).toBe(12);
+  });
+
+  test("whatever is put or pasted where, the row is exactly as wide as it was made", () => {
+    let x = 11;
+    const rnd = (n: number) => ((x = (x * 1103515245 + 12345) & 0x7fffffff) % n);
+    const things = [
+      () => F.spark([0, 3, 9, 1, 0, 7], 9, ...F.RAMP.agent),
+      () => F.gauge(rnd(100), 8, F.C.calm),
+      () => F.stacked([{ tokens: 10 + rnd(50), color: [0, 204, 204] }, { tokens: rnd(90), color: [215, 119, 87] }], 200, 9),
+      () => F.bold(F.fg(F.C.amber, "NEEDS YOU")),
+      () => "\x1b[4mraw\x1b[24m",
+      () => "plain",
+    ];
+    const words = ["working", "日本語", "ＡＢ", "a", "up 1h04", "é", "▲ ● ◐", ""];
+    for (let round = 0; round < 300; round++) {
+      const W = 20 + rnd(30);
+      const r = new F.Row(W, rnd(3) === 0 ? F.C.tint : undefined);
+      for (let i = 0; i < 12; i++) {
+        const col = rnd(W + 12) - 5;
+        const op = rnd(5);
+        if (op === 0) r.paste(col, things[rnd(things.length)]());
+        else if (op === 1) r.putr(col, words[rnd(words.length)], F.C.dim);
+        else if (op === 2) r.tint(rnd(2) ? F.C.tint : undefined, col, col + rnd(10));
+        else r.put(col, words[rnd(words.length)], F.C.text, rnd(2) === 0);
+      }
+      expect(Bun.stringWidth(r.plain())).toBe(W);
+      expect(drawn(r.toString())).toBeLessThanOrEqual(W);
+      expect(strip(r.toString()).trimEnd()).toBe(r.plain().trimEnd());
+    }
+  });
+});
