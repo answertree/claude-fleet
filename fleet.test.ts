@@ -1562,6 +1562,21 @@ describe("the detail view", () => {
     });
   });
 
+  test("the conversation reads as it happened: a prompt typed after the last reply comes after it", () => {
+    quietly(() => {
+      const s = busy(NOW);
+      const icons = () => draw([s], 150, 40).slice(2, 9).map((r) => r[4]).join("");
+      expect(icons()).toBe("▸◇ ◆  ✓"); // asked, said (twice), then the tasks it led to
+      s.mains[0].ask = { text: "also check the refund tests", t: NOW - 30_000 };
+      expect(icons()).toBe("◇ ◆  ▸✓");
+      expect(draw([s], 150, 40)[7].slice(0, 104)).toBe(" ▌  ▸ also check the refund tests".padEnd(101) + "30s");
+      // Only the transcript's last-prompt marker: no age, and it leads.
+      s.mains[0].ask = undefined;
+      s.mains[0].lastPrompt = "find out why the payment tests are flaky";
+      expect(draw([s], 150, 40)[2].slice(0, 104).trimEnd()).toBe(" ▌  ▸ find out why the payment tests are flaky");
+    });
+  });
+
   test("a workflow that has ended: ✓ or ✗ in place of ≡, and how it ended in place of the trail", () => {
     quietly(() => {
       const s = busy(NOW);

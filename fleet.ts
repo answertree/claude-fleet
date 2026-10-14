@@ -2777,16 +2777,21 @@ interface StackRow {
   age?: Seg;
   mark?: string; // "… +N lines", right-aligned at the end of the measure
 }
-/** The left stack, top to bottom as it happened: the now-line (a waiting session only), your prompt, earlier replies, the newest reply, the tasks. */
+/**
+ * The left stack, top to bottom: the now-line (a waiting session only), then the conversation as it
+ * happened (your prompt, earlier replies, the newest reply; a prompt typed after the last reply comes
+ * after it), then the tasks.
+ */
 function stackOf(b: Block, g: Grid, now: number): StackRow[] {
   if (!b.body) return [];
   const k = b.keep;
   const rows: StackRow[] = [];
   if (k.now && b.nowLine) rows.push({ at: g.icon, segs: [[cutTo(b.nowLine, g.textEnd - g.icon + 1), C.dim]] });
+  const said: { t: number; rows: StackRow[] }[] = [];
   if (k.prompt > 0 && b.prompt) {
     const p = b.prompt;
     const lines = k.prompt < 2 || p.lines.length < 2 ? [cutTo(p.text, g.measure)] : [p.lines[0], cutTo(p.lines.slice(1).join(" "), g.measure)];
-    lines.forEach((line, i) => rows.push({ icon: i ? undefined : [ICON.you, C.blue, true], segs: [[line, C.pale]], age: !i && p.t ? [ago(now - p.t), C.dim] : undefined }));
+    said.push({ t: p.t ?? 0, rows: lines.map((line, i) => ({ icon: i ? undefined : [ICON.you, C.blue, true], segs: [[line, C.pale]], age: !i && p.t ? [ago(now - p.t), C.dim] : undefined })) });
   }
   b.earlier.forEach((e, n) => {
     const cap = k.earlier[n];
@@ -2798,14 +2803,15 @@ function stackOf(b: Block, g: Grid, now: number): StackRow[] {
       if (e.flat.length > shown.length) shown[shown.length - 1] = `${clipWords(shown[shown.length - 1], g.measure - 2)} ${ICON.cut}`;
       lines = shown.map((line): Seg[] => [[line, C.dim]]);
     }
-    lines.forEach((segs, i) => rows.push({ icon: i ? undefined : [ICON.earlier, EARLIER_TONE], segs, age: i ? undefined : [ago(now - e.t), C.dim] }));
+    said.push({ t: e.t, rows: lines.map((segs, i) => ({ icon: i ? undefined : [ICON.earlier, EARLIER_TONE], segs, age: i ? undefined : [ago(now - e.t), C.dim] })) });
   });
   if (k.reply > 0 && b.newest) {
     const { rows: all, t } = b.newest;
     // New since you last looked: a bold white ◆, and the word "new" where its age would be.
     const fresh = isNew(t);
-    clipReply(all, k.reply, g.measure).forEach((row, i) => rows.push({ icon: i ? undefined : [ICON.claude, fresh ? C.white : C.cyan, fresh], segs: row.segs, mark: row.mark, age: i ? undefined : fresh ? ["new", C.white, true] : [ago(now - t), C.dim] }));
+    said.push({ t, rows: clipReply(all, k.reply, g.measure).map((row, i) => ({ icon: i ? undefined : [ICON.claude, fresh ? C.white : C.cyan, fresh], segs: row.segs, mark: row.mark, age: i ? undefined : fresh ? ["new", C.white, true] : [ago(now - t), C.dim] })) });
   }
+  for (const item of said.sort((x, y) => x.t - y.t)) rows.push(...item.rows);
   const tasks = b.v.s.tasks;
   if (k.tasks && tasks) {
     const count = `${tasks.done}/${tasks.total}`;
