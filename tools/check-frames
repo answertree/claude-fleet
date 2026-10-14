@@ -1,0 +1,91 @@
+#!/usr/bin/env bun
+// Renders the demo at every supported terminal size, in every mode and demo
+// variant, and fails if a frame does not fit: the wrong number of rows, a line
+// wider than the terminal (measured in display cells, not characters), or the
+// text "undefined" or "NaN" on the screen.
+//
+// Usage: tools/check-frames [--save <dir>] [--only <text>] [--list]
+//   --save <dir>   also write each frame as plain text into <dir>
+//   --only <text>  run only the frames whose name contains <text> (e.g. 150x44, far, six)
+//   --list         print the frame names and exit
+
+import * as fs from "node:fs";
+import * as path from "node:path";
+
+const SIZES: [number, number][] = [[80, 24], [100, 30], [110, 44], [130, 40], [150, 34], [150, 44], [200, 60]];
+const MODES = ["detail", "compact", "far"];
+/** Demo option sets; each is rendered at every size in every mode. */
+const VARIANTS: { name: string; args: string[] }[] = [
+  { name: "default", args: [] },
+  { name: "all", args: ["--all"] }, // plus a finished, a your-turn and an idle session
+  { name: "six", args: ["--six"] }, // six sessions sharing the screen
+  { name: "surprise", args: ["--surprise"] }, // a stalled agent, a context forecast, the 5-hour limit running out, things new since you looked
+  { name: "ended", args: ["--ended", "--all"] }, // a completed and a failed workflow
+  ...["current", "extra-off", "stale", "none", "remote"].map((a) => ({ name: `account-${a}`, args: ["--account", a] })),
+];
+
+const args = process.argv.slice(2);
+const valueOf = (flag: string) => (args.includes(flag) ? args[args.indexOf(flag) + 1] : undefined);
+const saveDir = valueOf("--save");
+const only = valueOf("--only");
+const demo = path.join(import.meta.dir, "..", "demo.ts");
+const strip = (s: string) => s.replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, "").replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "");
+
+interface Job {
+  name: string;
+  cols: number;
+  rows: number;
+  args: string[];
+}
+const jobs: Job[] = [];
+for (const v of VARIANTS)
+  for (const [cols, rows] of SIZES)
+    for (const mode of MODES) {
+      const name = `${v.name}-${mode}-${cols}x${rows}`;
+      if (!only || name.includes(only)) jobs.push({ name, cols, rows, args: ["--once", "--mode", mode, ...v.args] });
+    }
+if (args.includes("--list")) {
+  console.log(jobs.map((j) => j.name).join("\n"));
+  process.exit(0);
+}
+if (saveDir) fs.mkdirSync(saveDir, { recursive: true });
+
+async function check(job: Job): Promise<string[]> {
+  const proc = Bun.spawn(["bun", demo, ...job.args], {
+    env: { ...process.env, COLUMNS: String(job.cols), LINES: String(job.rows) },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+  const problems: string[] = [];
+  if (code !== 0) problems.push(`exit status ${code}`);
+  if (stderr.trim()) problems.push(`wrote to stderr: ${stderr.trim().split("\n")[0].slice(0, 160)}`);
+  const lines = strip(stdout).replace(/\n$/, "").split("\n");
+  if (saveDir) fs.writeFileSync(path.join(saveDir, job.name + ".txt"), lines.join("\n") + "\n");
+  if (lines.length !== job.rows) problems.push(`${lines.length} rows, expected ${job.rows}`);
+  // Every variant has the session that needs you. If its question is missing, the frame is empty and would pass for the wrong reason.
+  if (!/approve/i.test(lines.join("\n"))) problems.push("the demo's sessions are not on the screen: the waiting session's question is missing");
+  lines.forEach((line, i) => {
+    const w = Bun.stringWidth(line);
+    if (w > job.cols) problems.push(`row ${i + 1} is ${w} cells wide (limit ${job.cols}): ${line.trim().slice(0, 70)}`);
+    for (const bad of ["undefined", "NaN"]) if (line.includes(bad)) problems.push(`row ${i + 1} shows "${bad}": ${line.trim().slice(0, 70)}`);
+  });
+  return problems;
+}
+
+let failed = 0;
+let next = 0;
+const worker = async () => {
+  while (next < jobs.length) {
+    const job = jobs[next++];
+    const problems = await check(job);
+    if (!problems.length) continue;
+    failed++;
+    console.log(`FAIL ${job.name}`);
+    for (const p of problems.slice(0, 8)) console.log(`     ${p}`);
+    if (problems.length > 8) console.log(`     … ${problems.length - 8} more`);
+  }
+};
+await Promise.all(Array.from({ length: 6 }, worker));
+console.log(failed ? `check-frames: ${failed} of ${jobs.length} frames failed` : `check-frames: ${jobs.length} frames fit`);
+process.exit(failed ? 1 : 0);
