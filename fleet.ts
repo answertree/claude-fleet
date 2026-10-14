@@ -15,7 +15,9 @@ import * as os from "node:os";
 import { StringDecoder } from "node:string_decoder";
 import { spawnSync } from "node:child_process";
 
-const CLAUDE = process.env.FLEET_HOME || process.env.AGENT_FLEET_HOME || path.join(os.homedir(), ".claude");
+const CLAUDE = process.env.FLEET_HOME || process.env.AGENT_FLEET_HOME || path.join(os.homedir(), ".claude"); // the demo points this at made-up sessions
+/** The time. FLEET_NOW (test only) pins it, in milliseconds since 1970, so a frame can be reproduced exactly. */
+export const clock = (): number => Number(process.env.FLEET_NOW) || Date.now();
 const HIDE_TOP = process.env.FLEET_HIDE_PROCESSES === "1"; // leave other programs' names off the machine row
 const PROJECTS = path.join(CLAUDE, "projects");
 export const WINDOWS = [5, 15, 30, 60, 180];
@@ -42,7 +44,8 @@ Usage: bun fleet.ts [minutes] [options]
   --plain-glyphs use fallbacks for glyphs some fonts lack (≡ ┿ ╌ ◇)
 
 Keys: 1 2 3 view mode · + - window · a all sessions · d finished agents
-      tab focus next session · b bell · esc leave focus · q quit
+      tab focus next session · b bell · u retry the usage read
+      esc leave focus · q quit
 `;
 
 export type Mode = "detail" | "compact" | "far";
@@ -1253,69 +1256,416 @@ function machineRow(W: number): string {
   return line;
 }
 
-export const usage = { at: 0, busy: false, data: undefined as any, err: "" };
-function readLogin(): { token: string; expiresAt: number } | undefined {
-  const pick = (raw: string) => {
-    const o = JSON.parse(raw)?.claudeAiOauth;
-    return o?.accessToken ? { token: String(o.accessToken), expiresAt: Number(o.expiresAt ?? 0) } : undefined;
-  };
-  try {
-    if (process.platform === "darwin") {
-      const r = spawnSync("security", ["find-generic-password", "-s", "Claude Code-credentials", "-w"], { encoding: "utf8", timeout: 5000 });
-      if (r.status === 0 && r.stdout.trim()) return pick(r.stdout);
-    }
-  } catch {}
-  try {
-    return pick(fs.readFileSync(path.join(CLAUDE, ".credentials.json"), "utf8"));
-  } catch {}
-  return undefined;
+// ───────────────────────── account usage ─────────────────────────
+//
+// With --usage the dashboard reads the Claude Code login already stored on this machine and asks
+// Anthropic for the account's usage figures. The login is held in memory for the length of one request:
+// it is never written, logged or printed, and only the exit status and stderr of the keychain tool may
+// be shown. When the read fails the screen says exactly why, and falls back to figures (never the login)
+// that another dashboard or Claude Code itself has already fetched.
+
+/** Why a usage read failed. Each is reported exactly; the last is allowed only when the keychain and the login file both said "not found". */
+export const REASON = {
+  keychainMissing: "keychain: item not found",
+  keychainSilent: "keychain: no answer in 5s",
+  keychainExit: (status: number) => `keychain: exit ${status}`,
+  keychainNotJson: "keychain: entry is not JSON",
+  keychainNoLogin: "keychain: no claude.ai login in entry",
+  keychainRemote: "keychain: closed to remote sessions (ssh/mosh)",
+  fileMissing: "login file: not found",
+  fileNoLogin: "login file: no claude.ai login in it",
+  expired: "token expired · any Claude Code session renews it",
+  answered: (status: number) => `Anthropic answered ${status}`,
+  timedOut: "network: timed out",
+  network: (code: string) => `network: ${code}`,
+  none: "no Claude Code login found",
+};
+/** What can be done about a reason, for the one dim line under the account block. Standard remedies, not tested here. */
+export function usageRemedy(reason: string): string {
+  if (reason === REASON.keychainRemote) return "run: security unlock-keychain ~/Library/Keychains/login.keychain-db   (or start fleet in a tmux begun on the Mac itself)";
+  return "";
 }
-async function fetchUsage() {
-  if (usage.busy) return;
-  usage.busy = true;
-  usage.at = Date.now();
+
+/** What a stored login looked like when parsed: usable, JSON without a claude.ai login, not JSON, or nothing at all. */
+export type LoginParse = "login" | "no-login" | "not-json" | "empty";
+/** How the keychain call ended. It never carries what the call printed. */
+export interface KeychainOutcome {
+  status: number | null; // exit status; null when the tool was killed or could not be run
+  stderr: string;
+  timedOut: boolean;
+  parse: LoginParse; // what its output parsed as, when it exited 0
+}
+/** How reading ~/.claude/.credentials.json ended. */
+export type FileOutcome = LoginParse | "missing";
+
+/** True when this process was reached over ssh or mosh, where macOS will not hand out keychain content. */
+export function isRemoteSession(env: Record<string, string | undefined>, ancestors: string[]): boolean {
+  if (env.SSH_CONNECTION || env.SSH_TTY || env.SSH_CLIENT) return true;
+  if (Object.keys(env).some((k) => k.startsWith("MOSH_"))) return true;
+  return ancestors.some((name) => /^(mosh-server|sshd)/.test(name));
+}
+
+/** The keychain's part of the story: "" when it produced a login, else the exact reason. */
+export function keychainReason(k: KeychainOutcome, remote: boolean): string {
+  if (k.status === 0 && !k.timedOut) return k.parse === "login" ? "" : k.parse === "no-login" ? REASON.keychainNoLogin : REASON.keychainNotJson;
+  if (!k.timedOut && (k.status === 44 || /could not be found/i.test(k.stderr))) return REASON.keychainMissing;
+  // macOS finds the item but refuses to return its content to a remote login ("User interaction is not allowed").
+  if (remote || k.status === 36 || /interaction is not allowed/i.test(k.stderr)) return REASON.keychainRemote;
+  if (k.timedOut) return REASON.keychainSilent;
+  return REASON.keychainExit(k.status ?? -1);
+}
+/** The login file's part: "" when it holds a login. */
+export const fileReason = (f: FileOutcome): string => (f === "login" ? "" : f === "missing" ? REASON.fileMissing : REASON.fileNoLogin);
+
+/**
+ * Decide where the login comes from, or exactly why there is none, from how the two reads ended. Pure:
+ * it sees outcomes, never a login. `k` is undefined where there is no keychain (not macOS).
+ */
+export function loginDecision(k: KeychainOutcome | undefined, f: FileOutcome, remote: boolean): { use: "keychain" | "file" } | { reason: string; keychain: string; file: string } {
+  const keychain = k ? keychainReason(k, remote) : "";
+  if (k && !keychain) return { use: "keychain" };
+  if (f === "login") return { use: "file" };
+  const file = fileReason(f);
+  if (!k) return { reason: file, keychain, file };
+  // "No login found" is only true when both places answered "not found"; otherwise the keychain, where Claude Code keeps the login on a Mac, explains it.
+  return { reason: keychain === REASON.keychainMissing && file === REASON.fileMissing ? REASON.none : keychain, keychain, file };
+}
+
+interface Login {
+  token: string;
+  expiresAt: number;
+}
+function parseLogin(raw: string): { parse: LoginParse; login?: Login } {
+  if (!raw.trim()) return { parse: "empty" };
+  let o: any;
   try {
-    const login = readLogin();
-    if (!login) throw new Error("no Claude Code login found");
-    if (login.expiresAt && login.expiresAt < Date.now()) throw new Error("login expired; any Claude Code session will renew it");
-    const res = await fetch("https://api.anthropic.com/api/oauth/usage", {
-      headers: { Authorization: `Bearer ${login.token}`, "anthropic-beta": "oauth-2025-04-20" },
+    o = JSON.parse(raw)?.claudeAiOauth;
+  } catch {
+    return { parse: "not-json" };
+  }
+  return o?.accessToken ? { parse: "login", login: { token: String(o.accessToken), expiresAt: Number(o.expiresAt ?? 0) } } : { parse: "no-login" };
+}
+/** Names of this process's ancestors, from the last process sample. */
+function ancestorNames(): string[] {
+  const names: string[] = [];
+  let pid = process.pid;
+  for (let i = 0; i < 40; i++) {
+    const p = machine.procs.find((x) => x.pid === pid);
+    if (!p || p.ppid <= 1) break;
+    const parent = machine.procs.find((x) => x.pid === p.ppid);
+    if (!parent) break;
+    names.push(parent.name);
+    pid = parent.pid;
+  }
+  return names;
+}
+/** The stored login, or the exact reason there is none. The keychain call is the one the dashboard has always made. */
+function readLogin(): { login: Login } | { reason: string } {
+  let k: KeychainOutcome | undefined;
+  let fromKeychain: Login | undefined;
+  if (process.platform === "darwin") {
+    k = { status: 127, stderr: "", timedOut: false, parse: "empty" };
+    try {
+      const r = spawnSync("security", ["find-generic-password", "-s", "Claude Code-credentials", "-w"], { encoding: "utf8", timeout: 5000 });
+      const parsed = r.status === 0 ? parseLogin(r.stdout ?? "") : { parse: "empty" as LoginParse };
+      const timedOut = (r.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT" || (r.status === null && r.signal === "SIGTERM");
+      k = { status: r.error && !timedOut ? 127 : r.status, stderr: String(r.stderr ?? ""), timedOut, parse: parsed.parse };
+      fromKeychain = parsed.login;
+    } catch {}
+  }
+  let f: FileOutcome = "missing";
+  let fromFile: Login | undefined;
+  if (!fromKeychain) {
+    try {
+      const parsed = parseLogin(fs.readFileSync(path.join(CLAUDE, ".credentials.json"), "utf8"));
+      f = parsed.parse === "empty" ? "not-json" : parsed.parse;
+      fromFile = parsed.login;
+    } catch (e: any) {
+      f = e?.code === "ENOENT" ? "missing" : "not-json";
+    }
+  }
+  const d = loginDecision(k, f, isRemoteSession(process.env, ancestorNames()));
+  if ("reason" in d) return { reason: d.reason };
+  return { login: (d.use === "keychain" ? fromKeychain : fromFile)! };
+}
+
+/** Anthropic's usage figures: a utilisation and reset time per limit window, and the extra-usage spend. Nothing else. */
+export interface UsageWindow {
+  utilization: number; // percent
+  resets_at: string | null; // ISO time
+}
+export interface ExtraUsage {
+  is_enabled?: boolean;
+  monthly_limit?: number;
+  used_credits?: number;
+  utilization?: number;
+  currency?: string;
+  decimal_places?: number;
+}
+export type UsageFigures = { extra_usage?: ExtraUsage } & { [window: string]: UsageWindow | ExtraUsage | undefined };
+
+/**
+ * Keep only figures from a usage answer: for each limit window its utilisation and reset time, and the
+ * extra-usage numbers. Everything else is dropped, whatever it is, so nothing that is not a figure can
+ * reach the screen or the shared file.
+ */
+export function figuresOnly(raw: any): UsageFigures {
+  const out: UsageFigures = {};
+  if (!raw || typeof raw !== "object") return out;
+  for (const [key, v] of Object.entries(raw) as [string, any][]) {
+    if (!/^[a-z][a-z0-9_]{0,39}$/.test(key) || !v || typeof v !== "object") continue;
+    if (key === "extra_usage") {
+      const x: ExtraUsage = {};
+      if (typeof v.is_enabled === "boolean") x.is_enabled = v.is_enabled;
+      for (const k of ["monthly_limit", "used_credits", "utilization", "decimal_places"] as const) if (typeof v[k] === "number" && Number.isFinite(v[k])) x[k] = v[k];
+      if (typeof v.currency === "string" && /^[A-Za-z]{3}$/.test(v.currency)) x.currency = v.currency.toUpperCase();
+      out.extra_usage = x;
+    } else if (typeof v.utilization === "number" && Number.isFinite(v.utilization)) {
+      const resets = typeof v.resets_at === "string" && !Number.isNaN(Date.parse(v.resets_at)) ? new Date(Date.parse(v.resets_at)).toISOString() : null;
+      out[key] = { utilization: v.utilization, resets_at: resets };
+    }
+  }
+  return out;
+}
+
+/** The one file the dashboard ever writes: the last figures a dashboard fetched, for dashboards that cannot read the login themselves. */
+export const sharedUsagePath = () => path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache"), "claude-fleet", "usage.json");
+/** What goes in that file: Anthropic's figures and when they were fetched. */
+export const sharedUsageContent = (figures: unknown, fetchedAt: number): string => JSON.stringify({ fetchedAt, ...figuresOnly(figures) }) + "\n";
+/** Write it for other dashboards: mode 0600, and atomically, so a reader never sees half a file. */
+export function writeSharedUsage(figures: unknown, fetchedAt: number, file = sharedUsagePath()): boolean {
+  const tmp = `${file}.${process.pid}.tmp`;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(tmp, sharedUsageContent(figures, fetchedAt), { mode: 0o600 });
+    fs.renameSync(tmp, file);
+    return true;
+  } catch {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {}
+    return false;
+  }
+}
+export interface Reading {
+  figures: UsageFigures;
+  fetchedAt: number;
+}
+/** Read figures another dashboard shared. */
+export function readSharedUsage(file = sharedUsagePath()): Reading | undefined {
+  const o = readJson(file);
+  if (!o || typeof o.fetchedAt !== "number") return undefined;
+  return { figures: figuresOnly(o), fetchedAt: o.fetchedAt };
+}
+/** Read the figures Claude Code itself last fetched: the cachedUsageUtilization entry of ~/.claude.json, and no other key. */
+export function readClaudeUsage(file = path.join(process.env.FLEET_HOME || process.env.AGENT_FLEET_HOME || os.homedir(), ".claude.json")): Reading | undefined {
+  const c = readJson(file)?.cachedUsageUtilization;
+  if (!c || typeof c.fetchedAtMs !== "number" || !c.utilization) return undefined;
+  return { figures: figuresOnly(c.utilization), fetchedAt: c.fetchedAtMs };
+}
+
+const USAGE_CURRENT_MS = 10 * 60_000; // figures younger than this count as current
+const USAGE_DEAD_MS = 24 * 3600_000; // older than this is no reading at all
+const USAGE_EVERY_MS = 5 * 60_000; // how often a working read is repeated
+
+export const usage = {
+  at: 0, // when a read was last tried
+  nextTry: 0, // when the next one is due
+  busy: false,
+  failures: 0, // failed reads in a row
+  reason: "", // why our own last read failed, exactly; "" when it worked or none has been tried
+  data: undefined as UsageFigures | undefined, // the newest figures we have, from wherever
+  fetchedAt: 0, // when Anthropic gave them
+  source: "" as "" | "own" | "shared" | "claude", // our own read, another dashboard's file, or Claude Code's own cache
+  sharedAt: 0, // when the fallbacks were last looked at
+};
+
+/** How long to wait before the next read: five minutes after a success, sooner after a failure, backing off while it keeps failing. */
+export function retryDelay(reason: string, failures: number): number {
+  if (!reason) return USAGE_EVERY_MS;
+  const doubling = 2 ** Math.max(0, Math.min(6, failures - 1));
+  if (/^Anthropic answered 429/.test(reason)) return Math.min(30 * 60_000, USAGE_EVERY_MS * doubling); // asked to slow down: 5, 10, 20, 30 minutes
+  if (reason === REASON.keychainSilent) return USAGE_EVERY_MS; // each try freezes the screen for five seconds, so do not hurry
+  return Math.min(USAGE_EVERY_MS, 60_000 * doubling); // 1, 2, 4, then every 5 minutes
+}
+
+/** One read of the figures from Anthropic with the stored login, or the exact reason it could not be done. */
+async function readUsage(now: number): Promise<Reading | { reason: string }> {
+  // Test hooks: a forced failure reason, or figures from a file instead of the login and the network.
+  if (process.env.FLEET_USAGE_FAIL) return { reason: process.env.FLEET_USAGE_FAIL };
+  if (process.env.FLEET_USAGE_FIXTURE) {
+    const o = readJson(process.env.FLEET_USAGE_FIXTURE);
+    return o ? { figures: figuresOnly(o), fetchedAt: typeof o.fetchedAt === "number" ? o.fetchedAt : now } : { reason: REASON.network("fixture not found") };
+  }
+  const found = readLogin();
+  if ("reason" in found) return found;
+  if (found.login.expiresAt && found.login.expiresAt < Date.now()) return { reason: REASON.expired };
+  let res: Response;
+  try {
+    res = await fetch("https://api.anthropic.com/api/oauth/usage", {
+      headers: { Authorization: `Bearer ${found.login.token}`, "anthropic-beta": "oauth-2025-04-20" },
       signal: AbortSignal.timeout(10_000),
     });
-    if (!res.ok) throw new Error(`Anthropic answered ${res.status}`);
-    usage.data = await res.json();
-    usage.err = "";
   } catch (e: any) {
-    usage.err = String(e?.message ?? e).slice(0, 80);
-  } finally {
-    usage.busy = false;
+    return { reason: e?.name === "TimeoutError" || e?.name === "AbortError" ? REASON.timedOut : REASON.network(String(e?.code || "no connection").slice(0, 40)) };
+  }
+  if (!res.ok) return { reason: REASON.answered(res.status) };
+  try {
+    return { figures: figuresOnly(await res.json()), fetchedAt: now };
+  } catch {
+    return { reason: REASON.network("answer was not JSON") };
   }
 }
 
+/** While our own read is failing, take the freshest figures somebody else fetched: another dashboard's shared file, then Claude Code's own cache. */
+function adoptSharedUsage(now: number) {
+  usage.sharedAt = now;
+  // With both test hooks set, the fixture stands in for the shared file.
+  const fixture = process.env.FLEET_USAGE_FAIL && process.env.FLEET_USAGE_FIXTURE ? readSharedUsage(process.env.FLEET_USAGE_FIXTURE) : undefined;
+  const shared = fixture ?? readSharedUsage();
+  const claude = readClaudeUsage();
+  const best = shared && (!claude || shared.fetchedAt >= claude.fetchedAt) ? shared : claude;
+  if (!best || best.fetchedAt <= usage.fetchedAt || !Object.keys(best.figures).length) return;
+  usage.data = best.figures;
+  usage.fetchedAt = best.fetchedAt;
+  usage.source = best === shared ? "shared" : "claude";
+}
+
+/** Read the usage figures now. Key u calls this at once; refresh() calls it when the next try is due. `read` is replaced only by tests. */
+export async function fetchUsage(now = clock(), read: (now: number) => Promise<Reading | { reason: string }> = readUsage) {
+  if (usage.busy) return;
+  usage.busy = true;
+  usage.at = now;
+  try {
+    const r = await read(now);
+    if ("reason" in r) {
+      usage.reason = r.reason.slice(0, 80);
+      usage.failures++;
+      adoptSharedUsage(now);
+    } else {
+      usage.data = figuresOnly(r.figures);
+      usage.fetchedAt = r.fetchedAt;
+      usage.source = "own";
+      usage.reason = "";
+      usage.failures = 0;
+      if (!process.env.FLEET_USAGE_FIXTURE) writeSharedUsage(r.figures, r.fetchedAt); // made-up figures are never shared
+    }
+  } finally {
+    usage.busy = false;
+    usage.nextTry = now + retryDelay(usage.reason, usage.failures);
+  }
+}
+/** Called on every refresh: start a read when one is due, and while ours is failing keep an eye on the shared figures. */
+function tickUsage(now: number) {
+  if (now >= usage.nextTry) void fetchUsage(now);
+  else if (usage.reason && now - usage.sharedAt >= 30_000) adoptSharedUsage(now);
+}
+
+/**
+ * What the account block should show. current: figures under ten minutes old (failing is set when they
+ * came from somewhere else because our own read fails). stale: older figures, drawn dim with "as of" and
+ * the reason. none: no figures under a day old; say "no reading yet", the reason and the next try.
+ */
+export type UsageState =
+  | { kind: "current"; data: UsageFigures; asOf: number; failing: string }
+  | { kind: "stale"; data: UsageFigures; asOf: number; reason: string }
+  | { kind: "none"; reason: string; nextTry: number };
+export function usageStateOf(u: { data?: UsageFigures; fetchedAt: number; reason: string; nextTry: number }, now: number): UsageState {
+  const age = now - u.fetchedAt;
+  if (u.data && age < USAGE_CURRENT_MS) return { kind: "current", data: u.data, asOf: u.fetchedAt, failing: u.reason };
+  if (u.data && age < USAGE_DEAD_MS) return { kind: "stale", data: u.data, asOf: u.fetchedAt, reason: u.reason };
+  return { kind: "none", reason: u.reason, nextTry: u.nextTry };
+}
+export const usageState = (now: number): UsageState => usageStateOf(usage, now);
+
+const hhmm = (t: number) => new Date(t).toTimeString().slice(0, 5);
+/** When a limit resets: "resets in 2h10" under a day away, else "resets Fri 09:00". short: "2h10 left" / "Fri 09:00". bare: "2h10" / "Fri 09:00". */
+export function resetText(resetsAt: number, now: number, form: "long" | "short" | "bare" = "long"): string {
+  if (!resetsAt || resetsAt <= now) return "";
+  if (resetsAt - now < 24 * 3600_000) {
+    const m = Math.max(1, Math.round((resetsAt - now) / 60_000));
+    const left = m < 60 ? `${m}m` : `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}`;
+    return form === "long" ? `resets in ${left}` : form === "short" ? `${left} left` : left;
+  }
+  const day = `${new Date(resetsAt).toLocaleDateString("en-GB", { weekday: "short" })} ${hhmm(resetsAt)}`;
+  return form === "long" ? `resets ${day}` : day;
+}
+
+/** One limit window, ready to draw: its label, how full it is, and when it resets. */
+export interface LimitView {
+  key: string; // Anthropic's name: five_hour, seven_day, seven_day_opus, seven_day_sonnet
+  label: string; // "5h", "7d", "opus", "sonnet"
+  pct: number;
+  resetsAt: number; // 0 when unknown
+  windowMs: number;
+}
+/** Everything the account block draws, with no layout in it. */
+export interface AccountView {
+  kind: "current" | "stale" | "none";
+  limits: LimitView[]; // 5h and 7d first, then the Opus and Sonnet weeks when Anthropic returned them
+  extra?: { enabled: boolean; pct: number; used: string; limit: string }; // "£12" of "£50"
+  asOf: number; // when the figures were fetched; 0 with no reading
+  reason: string; // why our own read is failing, exactly; "" when it is not
+  remedy: string; // one line on what to do about it, when there is something
+  nextTry: number;
+  busy: boolean; // a read is in flight
+}
+const LIMITS: [key: string, label: string, windowMs: number][] = [
+  ["five_hour", "5h", 5 * 3600_000],
+  ["seven_day", "7d", 7 * 86_400_000],
+  ["seven_day_opus", "opus", 7 * 86_400_000],
+  ["seven_day_sonnet", "sonnet", 7 * 86_400_000],
+];
+export function accountViewOf(state: UsageState, u: { nextTry: number; busy: boolean }): AccountView {
+  const reason = state.kind === "current" ? state.failing : state.reason;
+  const view: AccountView = { kind: state.kind, limits: [], asOf: state.kind === "none" ? 0 : state.asOf, reason, remedy: usageRemedy(reason), nextTry: u.nextTry, busy: u.busy };
+  if (state.kind === "none") return view;
+  for (const [key, label, windowMs] of LIMITS) {
+    const w = state.data[key] as UsageWindow | undefined;
+    if (!w || typeof w.utilization !== "number") continue;
+    view.limits.push({ key, label, pct: w.utilization, resetsAt: w.resets_at ? Date.parse(w.resets_at) || 0 : 0, windowMs });
+  }
+  const x = state.data.extra_usage;
+  if (x) {
+    const sign = x.currency === "GBP" ? "£" : x.currency === "EUR" ? "€" : "$";
+    const money = (n: number) => `${sign}${(n / 10 ** (x.decimal_places ?? 2)).toFixed(0)}`;
+    const limit = x.monthly_limit ?? 0;
+    const used = x.used_credits ?? 0;
+    view.extra = { enabled: !!x.is_enabled, pct: typeof x.utilization === "number" ? x.utilization : limit > 0 ? (used / limit) * 100 : 0, used: money(used), limit: money(limit) };
+  }
+  return view;
+}
+export const accountView = (now: number): AccountView => accountViewOf(usageState(now), usage);
+
 function usageRow(W: number, now: number): string {
   const lead = fg(C.dim, " account ");
-  if (!usage.data) return lead + fg(C.dim, usage.err ? `usage unavailable: ${usage.err}` : "fetching usage…");
-  const resets = (iso: unknown) => {
-    const t = Date.parse(String(iso ?? ""));
-    if (Number.isNaN(t)) return "";
-    if (t - now < 24 * 3600_000) return ` · resets in ${ago(t - now)}`;
-    return ` · resets ${new Date(t).toLocaleString("en-GB", { weekday: "short", hour: "2-digit", minute: "2-digit" })}`;
-  };
-  const GW = W >= 140 ? 16 : 10;
-  const one = (label: string, win: any) => {
-    if (!win || typeof win.utilization !== "number") return "";
-    const pct = win.utilization;
-    return fg(C.dim, `  ${label} `) + gauge(pct, GW, toneFor(pct)) + fg(toneFor(pct), ` ${Math.round(pct)}%`) + fg(C.dim, resets(win.resets_at));
-  };
-  const d = usage.data;
-  let line = lead + one("5-hour", d.five_hour) + " " + one("week", d.seven_day);
-  if (W >= 150) line += one("opus wk", d.seven_day_opus) + one("sonnet wk", d.seven_day_sonnet);
-  const x = d.extra_usage;
-  if (x && W >= 120) {
-    const money = (n: number) => `${x.currency === "GBP" ? "£" : x.currency === "EUR" ? "€" : "$"}${(n / 10 ** (x.decimal_places ?? 2)).toFixed(0)}`;
-    line += fg(C.dim, "   extra usage ") + (x.is_enabled ? fg(C.text, `${money(x.used_credits ?? 0)} of ${money(x.monthly_limit ?? 0)}`) : fg(C.dim, "off"));
+  const a = accountView(now);
+  if (a.kind === "none") {
+    const why = a.reason ? `no reading yet: ${a.reason} · next try ${hhmm(a.nextTry)} · u retries` : a.busy || !usage.at ? "fetching usage…" : "no reading yet";
+    return lead + fg(C.dim, fit(why, W - 10));
   }
-  if (usage.err) line += fg(C.dim, `   (stale: ${usage.err})`);
+  const stale = a.kind === "stale";
+  const GW = W >= 140 ? 16 : 10;
+  let line = lead;
+  let used = 9;
+  for (const l of a.limits) {
+    if ((l.key === "seven_day_opus" || l.key === "seven_day_sonnet") && W < 150) continue;
+    const label = l.key === "five_hour" ? "5-hour" : l.key === "seven_day" ? "week" : `${l.label} wk`;
+    const resets = resetText(l.resetsAt, now);
+    const text = `  ${label} ${"━".repeat(GW)} ${Math.round(l.pct)}%${resets ? " · " + resets : ""}`;
+    if (used + width(text) > W - 1) break;
+    const tone = stale ? C.dim : toneFor(l.pct);
+    line += fg(C.dim, `  ${label} `) + gauge(l.pct, GW, tone) + fg(tone, ` ${Math.round(l.pct)}%`) + fg(C.dim, resets ? " · " + resets : "");
+    used += width(text);
+  }
+  const tail: [string, RGB][] = [];
+  if (a.extra && W >= 120) tail.push(["   extra usage ", C.dim], a.extra.enabled ? [`${a.extra.used} of ${a.extra.limit}`, stale ? C.dim : C.text] : ["off", C.dim]);
+  if (stale || a.reason) tail.push([`   (${stale ? `as of ${hhmm(a.asOf)}` : "shared figures"}${a.reason ? " · " + a.reason : ""})`, C.dim]);
+  for (const [text, color] of tail) {
+    if (used + width(text) > W - 1) break;
+    line += fg(color, text);
+    used += width(text);
+  }
   return line;
 }
 
@@ -1990,6 +2340,7 @@ export function buttonBar(W: number, row: number): string {
     add(short ? "a" : "a All sessions", "all", opt.showAll);
     add(short ? "d" : "d Finished agents", "done", opt.showDone);
     add(short ? "b" : "b Bell", "bell", opt.bell);
+    if (opt.usage && usage.reason) add(short ? "u" : "u Retry usage", "usage");
     plain(" ");
     add(short ? "q" : "q Quit", "quit");
     return { line, used: x, found };
@@ -2006,11 +2357,11 @@ export function buttonBar(W: number, row: number): string {
 let sessions: Session[] = [];
 const needing = new Set<string>();
 function refresh() {
-  const now = Date.now();
+  const now = clock();
   sessions = scan(now);
   prune(now);
   sampleMachine();
-  if (opt.usage && now - usage.at > 5 * 60_000) void fetchUsage();
+  if (opt.usage && !opt.once) tickUsage(now); // --once has already made its one read
   // Ring once when a session starts waiting on the person.
   const nowNeeding = new Set(sessions.filter((s) => factsOf(s).needs).map((s) => s.sid));
   if (opt.bell && !opt.once) for (const sid of nowNeeding) if (!needing.has(sid)) process.stdout.write("\x07");
@@ -2032,13 +2383,13 @@ if (import.meta.main) {
     refresh();
     const cols = Number(process.env.COLUMNS) || process.stdout.columns || 140;
     const rows = Number(process.env.LINES) || process.stdout.rows || 45;
-    process.stdout.write(render(sessions, cols, rows, Date.now()).join("\n") + "\n");
+    process.stdout.write(render(sessions, cols, rows, clock()).join("\n") + "\n");
     process.exit(0);
   }
 
   const out = process.stdout;
   const draw = () => {
-    const lines = render(sessions, out.columns || 140, out.rows || 45, Date.now());
+    const lines = render(sessions, out.columns || 140, out.rows || 45, clock());
     out.write("\x1b[H" + lines.map((l) => l + "\x1b[K").join("\n"));
   };
   const restore = () => {
@@ -2060,7 +2411,9 @@ if (import.meta.main) {
     else if (name === "done") opt.showDone = !opt.showDone;
     else if (name === "all") opt.showAll = !opt.showAll;
     else if (name === "bell") opt.bell = !opt.bell;
-    else if (name.startsWith("focus:")) focusSid = focusSid === name.slice(6) ? null : name.slice(6);
+    else if (name === "usage") {
+      if (opt.usage) void fetchUsage().then(draw); // retry now, whatever the next try was set to
+    } else if (name.startsWith("focus:")) focusSid = focusSid === name.slice(6) ? null : name.slice(6);
     else if (name === "next") {
       const ids = sessions.map((s) => s.sid);
       const at = focusSid ? ids.indexOf(focusSid) : -1;
@@ -2093,7 +2446,7 @@ if (import.meta.main) {
     q: "quit", "\x03": "quit", "\x1b": "back", "\t": "next",
     "1": "mode:detail", "2": "mode:compact", "3": "mode:far",
     "+": "win+", "=": "win+", "-": "win-", _: "win-",
-    d: "done", a: "all", b: "bell",
+    d: "done", a: "all", b: "bell", u: "usage",
   };
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(true);

@@ -4,7 +4,7 @@ Every live Claude Code session on one terminal screen: what each one is doing, w
 
 ![Claude Fleet in detail mode](docs/screenshot.svg)
 
-It is one TypeScript file with no dependencies. It reads the files Claude Code already keeps under `~/.claude` and writes nothing.
+It is one TypeScript file with no dependencies. It reads the files Claude Code already keeps under `~/.claude`. The only thing it ever writes is one small file of usage figures, and only with `--usage` (see [Account usage and your login](#account-usage-and-your-login)).
 
 ## Try it
 
@@ -66,6 +66,7 @@ Every control is a button on the bottom row, and each has a key.
 | `d` | List finished agents instead of counting them |
 | `tab` | Focus the next session |
 | `b` | Ring the terminal bell when a session starts waiting on you |
+| `u` | Retry the usage read now (the button appears only while it is failing) |
 | `esc` | Leave focus (or quit) |
 | `q` | Quit |
 
@@ -75,9 +76,18 @@ Capturing clicks means a plain drag no longer selects text. Hold Shift (Option i
 
 ## Account usage and your login
 
-Usage figures are off unless you pass `--usage`. With it, Claude Fleet reads the Claude Code login already stored on your machine (the macOS keychain item `Claude Code-credentials`, or `~/.claude/.credentials.json`) and asks `api.anthropic.com/api/oauth/usage` for your figures every five minutes. The token is sent only to that address, is never written anywhere, and is never refreshed or changed. That endpoint is the one Claude Code's own `/usage` screen relies on, and it is not a documented public interface.
+Usage figures are off unless you pass `--usage`. With it, Claude Fleet reads the Claude Code login already stored on your machine (the macOS keychain item `Claude Code-credentials`, or `~/.claude/.credentials.json`) and asks `api.anthropic.com/api/oauth/usage` for your figures every five minutes. The token is sent only to that address and is held in memory for that one request. It is never written, logged or printed, and never refreshed or changed. That endpoint is the one Claude Code's own `/usage` screen relies on, and it is not a documented public interface.
 
 Without `--usage`, Claude Fleet makes no network requests at all.
+
+**When the read fails, the screen says exactly why:** `keychain: item not found`, `keychain: no answer in 5s`, `keychain: exit N`, `keychain: entry is not JSON`, `keychain: no claude.ai login in entry`, `keychain: closed to remote sessions (ssh/mosh)`, `login file: not found`, `login file: no claude.ai login in it`, `token expired · any Claude Code session renews it`, `Anthropic answered 401` (or whatever status it gave), `network: timed out`. It says `no Claude Code login found` only when the keychain and the login file both answered "not found". It tries again by itself, a minute after a failure and then less often, and `u` retries at once.
+
+**Over ssh or mosh on a Mac** the read fails with `keychain: closed to remote sessions (ssh/mosh)`: macOS finds the keychain item but will not hand its content to a remote login. There are two standard remedies, and neither has been tested here:
+
+- run `security unlock-keychain ~/Library/Keychains/login.keychain-db` in the remote session, or
+- run Claude Fleet inside a tmux that was started on the Mac itself.
+
+**Shared figures.** So that a dashboard in a remote terminal can still show usage, a dashboard that reads the figures successfully saves them to `${XDG_CACHE_HOME:-~/.cache}/claude-fleet/usage.json` (readable only by you). It holds Anthropic's figures and the time they were fetched, and never the login. This is the one file Claude Fleet ever writes. A dashboard whose own read fails shows the figures from that file, or failing that the ones Claude Code itself last cached (the `cachedUsageUtilization` entry of `~/.claude.json`; no other key is read). Figures under ten minutes old are shown as current. Older ones are shown dim with the time they date from and the reason the read is failing. Figures more than a day old are not shown.
 
 ## Things to know
 
@@ -92,6 +102,17 @@ Without `--usage`, Claude Fleet makes no network requests at all.
 ## Development
 
 `bun demo.ts` builds a throwaway set of fake sessions and runs the dashboard against it; it accepts the same options. `bun run screenshots` regenerates the images above from that demo.
+
+`bun test` runs the tests in `fleet.test.ts` (Bun's built-in runner, no packages). `tools/check-frames` renders the demo at seven terminal sizes in all three modes and fails if a frame has the wrong number of rows, a line wider than the terminal, or the text "undefined" or "NaN" on it. `bun run check` runs both.
+
+These environment variables exist for tests and screenshots only:
+
+| Variable | Does |
+| --- | --- |
+| `FLEET_HOME` | Look here instead of `~/.claude` (the demo uses it). |
+| `FLEET_NOW` | Pin the clock, in milliseconds since 1970, so `--once` prints the same frame every time. |
+| `FLEET_USAGE_FIXTURE` | Take the usage figures from this JSON file instead of reading the login and asking Anthropic. A `fetchedAt` in the file sets their age. Figures from a fixture are never saved to the shared file. |
+| `FLEET_USAGE_FAIL` | Make the usage read fail with this reason. With `FLEET_USAGE_FIXTURE` also set, the fixture stands in for the shared file, which shows the "as of" state. |
 
 ## Licence
 

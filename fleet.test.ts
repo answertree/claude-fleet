@@ -1,11 +1,20 @@
 // Tests for the parts of fleet.ts that are plain logic. Run with: bun test
 // Nothing here reads a real login, a real transcript or the network.
 
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import * as F from "./fleet.ts";
 
 const here = import.meta.dir;
+// Everything the usage code reads or writes while under test lives in a throwaway directory.
+const SCRATCH = fs.mkdtempSync(path.join(os.tmpdir(), "claude-fleet-test-"));
+process.env.XDG_CACHE_HOME = path.join(SCRATCH, "cache");
+process.env.FLEET_HOME = path.join(SCRATCH, "home");
+delete process.env.FLEET_USAGE_FIXTURE;
+delete process.env.FLEET_USAGE_FAIL;
+afterAll(() => fs.rmSync(SCRATCH, { recursive: true, force: true }));
 /** A fixed clock for every test: Tue 13 Oct 2026, 23:51:22 local time. */
 const NOW = new Date(2026, 9, 13, 23, 51, 22).getTime();
 const MIN = 60_000;
@@ -496,5 +505,240 @@ describe("workflow phase trail", () => {
     expect(F.wfOutcome(ended)).toBe("completed");
     expect(F.wfOutcome(wfOf({ status: "failed" }))).toBe("failed");
     expect(F.wfOutcome(wfOf({ status: "stopped" }))).toBe("failed");
+  });
+});
+
+describe("usage read tells the truth", () => {
+  const k = (o: Partial<F.KeychainOutcome>): F.KeychainOutcome => ({ status: 0, stderr: "", timedOut: false, parse: "login", ...o });
+  const NOT_FOUND = "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.";
+  const NO_INTERACTION = "security: SecKeychainItemCopyContent: User interaction is not allowed.";
+  const reason = (kc: F.KeychainOutcome | undefined, f: F.FileOutcome, remote = false) => {
+    const d = F.loginDecision(kc, f, remote);
+    return "reason" in d ? d.reason : `use ${d.use}`;
+  };
+
+  test("a login is used from the keychain first, then the file", () => {
+    expect(reason(k({}), "missing")).toBe("use keychain");
+    expect(reason(k({}), "login")).toBe("use keychain");
+    expect(reason(k({ status: 44, stderr: NOT_FOUND, parse: "empty" }), "login")).toBe("use file");
+    expect(reason(undefined, "login")).toBe("use file");
+    expect(reason(k({ status: 36, stderr: NO_INTERACTION, parse: "empty" }), "login", true)).toBe("use file");
+  });
+
+  test("each keychain failure is reported exactly", () => {
+    expect(reason(k({ status: 44, stderr: NOT_FOUND, parse: "empty" }), "no-login")).toBe("keychain: item not found");
+    expect(reason(k({ status: null, timedOut: true, parse: "empty" }), "missing")).toBe("keychain: no answer in 5s");
+    expect(reason(k({ status: 1, stderr: "security: something else went wrong", parse: "empty" }), "missing")).toBe("keychain: exit 1");
+    expect(reason(k({ status: 51, parse: "empty" }), "no-login")).toBe("keychain: exit 51");
+    expect(reason(k({ parse: "not-json" }), "missing")).toBe("keychain: entry is not JSON");
+    expect(reason(k({ parse: "empty" }), "missing")).toBe("keychain: entry is not JSON");
+    expect(reason(k({ parse: "no-login" }), "missing")).toBe("keychain: no claude.ai login in entry");
+  });
+
+  test("the owner's case: a remote session is told the keychain is closed to it, not that there is no login", () => {
+    // mosh on macOS: the item is found, its content is refused, the call exits non-zero; the login file exists without a claude.ai entry.
+    expect(reason(k({ status: 36, stderr: NO_INTERACTION, parse: "empty" }), "no-login", true)).toBe("keychain: closed to remote sessions (ssh/mosh)");
+    expect(reason(k({ status: 36, stderr: NO_INTERACTION, parse: "empty" }), "no-login", false)).toBe("keychain: closed to remote sessions (ssh/mosh)"); // stderr alone is enough
+    expect(reason(k({ status: 1, stderr: "", parse: "empty" }), "no-login", true)).toBe("keychain: closed to remote sessions (ssh/mosh)"); // so is being remote
+    expect(reason(k({ status: null, timedOut: true, parse: "empty" }), "missing", true)).toBe("keychain: closed to remote sessions (ssh/mosh)");
+    // An item that really is missing is still reported as missing, remote or not.
+    expect(reason(k({ status: 44, stderr: NOT_FOUND, parse: "empty" }), "no-login", true)).toBe("keychain: item not found");
+    const d = F.loginDecision(k({ status: 36, stderr: NO_INTERACTION, parse: "empty" }), "no-login", true);
+    expect(d).toEqual({ reason: "keychain: closed to remote sessions (ssh/mosh)", keychain: "keychain: closed to remote sessions (ssh/mosh)", file: "login file: no claude.ai login in it" });
+    expect(F.usageRemedy(F.REASON.keychainRemote)).toContain("security unlock-keychain ~/Library/Keychains/login.keychain-db");
+    expect(F.usageRemedy(F.REASON.keychainRemote)).toContain("tmux");
+    expect(F.usageRemedy(F.REASON.expired)).toBe("");
+  });
+
+  test("'no Claude Code login found' only when the keychain and the file both said not found", () => {
+    expect(reason(k({ status: 44, stderr: NOT_FOUND, parse: "empty" }), "missing")).toBe("no Claude Code login found");
+    const all: [F.KeychainOutcome | undefined, F.FileOutcome, boolean][] = [];
+    for (const kc of [undefined, k({ status: 44, stderr: NOT_FOUND, parse: "empty" }), k({ status: 36, stderr: NO_INTERACTION, parse: "empty" }), k({ status: null, timedOut: true, parse: "empty" }), k({ status: 2, parse: "empty" }), k({ parse: "not-json" }), k({ parse: "no-login" })])
+      for (const f of ["missing", "no-login", "not-json", "empty"] as F.FileOutcome[]) for (const remote of [false, true]) all.push([kc, f, remote]);
+    const allowed = [/^keychain: (item not found|no answer in 5s|exit \d+|entry is not JSON|no claude\.ai login in entry|closed to remote sessions \(ssh\/mosh\))$/, /^login file: (not found|no claude\.ai login in it)$/, /^no Claude Code login found$/];
+    for (const [kc, f, remote] of all) {
+      const r = reason(kc, f, remote);
+      expect(allowed.some((re) => re.test(r)) ? "listed" : r).toBe("listed");
+      if (r === "no Claude Code login found") expect([kc?.status, f]).toEqual([44, "missing"]);
+    }
+  });
+
+  test("without a keychain (not macOS) the login file's own reason is given", () => {
+    expect(reason(undefined, "missing")).toBe("login file: not found");
+    expect(reason(undefined, "no-login")).toBe("login file: no claude.ai login in it");
+    expect(reason(undefined, "not-json")).toBe("login file: no claude.ai login in it");
+  });
+
+  test("a remote session is recognised by its environment or its ancestors", () => {
+    expect(F.isRemoteSession({}, ["zsh", "login", "Terminal"])).toBe(false);
+    expect(F.isRemoteSession({ SSH_CONNECTION: "10.0.0.2 50000 10.0.0.1 22" }, [])).toBe(true);
+    expect(F.isRemoteSession({ SSH_TTY: "/dev/ttys004" }, [])).toBe(true);
+    expect(F.isRemoteSession({ SSH_CLIENT: "10.0.0.2 50000 22" }, [])).toBe(true);
+    expect(F.isRemoteSession({ MOSH_SERVER_NETWORK_TMOUT: "604800" }, [])).toBe(true);
+    expect(F.isRemoteSession({}, ["zsh", "mosh-server", "launchd"])).toBe(true);
+    expect(F.isRemoteSession({}, ["zsh", "sshd-session", "sshd"])).toBe(true);
+    expect(F.isRemoteSession({ TERM_PROGRAM: "tmux" }, ["zsh", "tmux"])).toBe(false); // a tmux begun on the Mac itself
+  });
+
+  test("retries come sooner after a failure and back off while it keeps failing", () => {
+    expect(F.retryDelay("", 0)).toBe(5 * MIN);
+    expect([1, 2, 3, 4, 5, 9].map((n) => F.retryDelay("network: timed out", n) / MIN)).toEqual([1, 2, 4, 5, 5, 5]);
+    expect([1, 2, 3, 4, 9].map((n) => F.retryDelay("Anthropic answered 429", n) / MIN)).toEqual([5, 10, 20, 30, 30]);
+    expect(F.retryDelay("Anthropic answered 401", 1)).toBe(MIN);
+    expect(F.retryDelay(F.REASON.keychainSilent, 1)).toBe(5 * MIN); // each try blocks for five seconds
+  });
+
+  const figures = (five = 38, week = 21): F.UsageFigures => ({
+    five_hour: { utilization: five, resets_at: iso(NOW + 130 * MIN) },
+    seven_day: { utilization: week, resets_at: iso(NOW + 3 * 24 * 60 * MIN) },
+    extra_usage: { is_enabled: true, monthly_limit: 5000, used_credits: 1200, currency: "GBP", decimal_places: 2 },
+  });
+
+  test("current, stale and no reading are told apart by the age of the figures", () => {
+    const at = (ageMin: number, reason = "") => F.usageStateOf({ data: figures(), fetchedAt: NOW - ageMin * MIN, reason, nextTry: NOW + 4 * MIN }, NOW);
+    expect(at(0).kind).toBe("current");
+    expect(at(9.9)).toMatchObject({ kind: "current", failing: "" });
+    expect(at(3, "keychain: closed to remote sessions (ssh/mosh)")).toMatchObject({ kind: "current", failing: "keychain: closed to remote sessions (ssh/mosh)" });
+    expect(at(10, "Anthropic answered 429")).toMatchObject({ kind: "stale", asOf: NOW - 10 * MIN, reason: "Anthropic answered 429" });
+    expect(at(39, "Anthropic answered 429").kind).toBe("stale");
+    expect(at(23 * 60 + 59, "network: timed out").kind).toBe("stale");
+    expect(at(24 * 60, "network: timed out")).toEqual({ kind: "none", reason: "network: timed out", nextTry: NOW + 4 * MIN });
+    expect(F.usageStateOf({ data: undefined, fetchedAt: 0, reason: "keychain: no answer in 5s", nextTry: NOW + 5 * MIN }, NOW)).toEqual({ kind: "none", reason: "keychain: no answer in 5s", nextTry: NOW + 5 * MIN });
+  });
+
+  test("the account view carries limits, extra usage, the reason and its remedy", () => {
+    const current = F.accountViewOf({ kind: "current", data: { ...figures(), seven_day_opus: { utilization: 12, resets_at: null } }, asOf: NOW, failing: "" }, { nextTry: NOW + 5 * MIN, busy: false });
+    expect(current.limits.map((l) => [l.label, l.pct, l.windowMs / 3600_000])).toEqual([["5h", 38, 5], ["7d", 21, 168], ["opus", 12, 168]]);
+    expect(current.limits[0].resetsAt).toBe(NOW + 130 * MIN);
+    expect(current.limits[2].resetsAt).toBe(0);
+    expect(current.extra).toEqual({ enabled: true, pct: 24, used: "£12", limit: "£50" });
+    expect(current).toMatchObject({ kind: "current", reason: "", remedy: "", asOf: NOW });
+    const off = F.accountViewOf({ kind: "current", data: { ...figures(), extra_usage: { is_enabled: false } }, asOf: NOW, failing: "" }, { nextTry: 0, busy: false });
+    expect(off.extra).toEqual({ enabled: false, pct: 0, used: "$0", limit: "$0" });
+    const none = F.accountViewOf({ kind: "none", reason: F.REASON.keychainRemote, nextTry: NOW + MIN }, { nextTry: NOW + MIN, busy: false });
+    expect(none).toMatchObject({ kind: "none", limits: [], asOf: 0, reason: "keychain: closed to remote sessions (ssh/mosh)", nextTry: NOW + MIN });
+    expect(none.remedy).toContain("unlock-keychain");
+    const stale = F.accountViewOf({ kind: "stale", data: figures(), asOf: NOW - 39 * MIN, reason: "Anthropic answered 429" }, { nextTry: NOW, busy: true });
+    expect(stale).toMatchObject({ kind: "stale", asOf: NOW - 39 * MIN, reason: "Anthropic answered 429", busy: true });
+    expect(stale.limits.length).toBe(2);
+  });
+
+  test("reset times read as the header prints them", () => {
+    const fri = new Date(2026, 9, 16, 9, 0, 0).getTime();
+    expect(F.resetText(NOW + 130 * MIN, NOW)).toBe("resets in 2h10");
+    expect(F.resetText(NOW + 130 * MIN, NOW, "short")).toBe("2h10 left");
+    expect(F.resetText(NOW + 130 * MIN, NOW, "bare")).toBe("2h10");
+    expect(F.resetText(NOW + 35 * MIN, NOW)).toBe("resets in 35m");
+    expect(F.resetText(fri, NOW)).toBe("resets Fri 09:00");
+    expect(F.resetText(fri, NOW, "short")).toBe("Fri 09:00");
+    expect(F.resetText(NOW - MIN, NOW)).toBe("");
+    expect(F.resetText(0, NOW)).toBe("");
+  });
+
+  /** An answer with things in it that are not figures. None of them may survive. */
+  const dirty = { ...figures(), accessToken: "sk-ant-oat01-SECRET", token: "SECRET", refresh_token: "SECRET", account: { email: "someone@example.com", token: "SECRET" }, five_hour: { utilization: 38, resets_at: iso(NOW + 130 * MIN), token: "SECRET", note: "SECRET" }, extra_usage: { is_enabled: true, monthly_limit: 5000, used_credits: 1200, currency: "GBP", decimal_places: 2, payment_token: "SECRET" } };
+  const scalarsOf = (o: any): unknown[] => (o && typeof o === "object" ? Object.values(o).flatMap(scalarsOf) : [o]);
+  const keysOf = (o: any): string[] => (o && typeof o === "object" ? Object.entries(o).flatMap(([key, v]) => [key, ...keysOf(v)]) : []);
+
+  test("figuresOnly keeps utilisation, reset times and the extra-usage numbers, and nothing else", () => {
+    const clean = F.figuresOnly(dirty);
+    expect(clean).toEqual({ five_hour: { utilization: 38, resets_at: iso(NOW + 130 * MIN) }, seven_day: { utilization: 21, resets_at: iso(NOW + 3 * 24 * 60 * MIN) }, extra_usage: { is_enabled: true, monthly_limit: 5000, used_credits: 1200, currency: "GBP", decimal_places: 2 } });
+    expect(JSON.stringify(clean)).not.toContain("SECRET");
+    expect(F.figuresOnly(null)).toEqual({});
+    expect(F.figuresOnly("a string")).toEqual({});
+    expect(F.figuresOnly({ five_hour: { utilization: "38" }, weird: { utilization: 5, resets_at: "not a date" } })).toEqual({ weird: { utilization: 5, resets_at: null } });
+  });
+
+  test("the shared file holds figures and fetchedAt only: no token key, nothing that is not a number, a time, a flag or a currency code", () => {
+    const text = F.sharedUsageContent(dirty, NOW);
+    expect(text.toLowerCase()).not.toContain("token");
+    expect(text).not.toContain("SECRET");
+    const parsed = JSON.parse(text);
+    expect(Object.keys(parsed).sort()).toEqual(["extra_usage", "fetchedAt", "five_hour", "seven_day"]);
+    expect(keysOf(parsed).filter((key) => /token|secret|key|auth|password|email/i.test(key))).toEqual([]);
+    for (const v of scalarsOf(parsed)) expect(typeof v === "number" || typeof v === "boolean" || v === null || /^\d{4}-\d\d-\d\dT[\d:.]+Z$/.test(String(v)) || /^[A-Z]{3}$/.test(String(v))).toBe(true);
+  });
+
+  const resetUsage = () => Object.assign(F.usage, { at: 0, nextTry: 0, busy: false, failures: 0, reason: "", data: undefined, fetchedAt: 0, source: "", sharedAt: 0 });
+  const shared = () => F.sharedUsagePath();
+
+  test("a successful read writes the shared file: figures only, mode 0600, and a later failure reads it back", async () => {
+    resetUsage();
+    fs.rmSync(path.dirname(shared()), { recursive: true, force: true });
+    expect(shared().startsWith(SCRATCH)).toBe(true); // never the real cache
+    await F.fetchUsage(NOW, async (now) => ({ figures: dirty as unknown as F.UsageFigures, fetchedAt: now }));
+    expect(F.usage).toMatchObject({ reason: "", failures: 0, source: "own", fetchedAt: NOW, nextTry: NOW + 5 * MIN });
+    const text = fs.readFileSync(shared(), "utf8");
+    expect(text.toLowerCase()).not.toContain("token");
+    expect(text).not.toContain("SECRET");
+    expect(JSON.parse(text)).toEqual({ fetchedAt: NOW, ...F.figuresOnly(dirty) });
+    expect(fs.statSync(shared()).mode & 0o777).toBe(0o600);
+    expect(fs.readdirSync(path.dirname(shared()))).toEqual(["usage.json"]); // no temporary file left behind
+
+    // A second dashboard, in a remote terminal, cannot read the login. It shows the shared figures and says why its own read fails.
+    resetUsage();
+    await F.fetchUsage(NOW + 3 * MIN, async () => ({ reason: F.REASON.keychainRemote }));
+    expect(F.usage).toMatchObject({ reason: "keychain: closed to remote sessions (ssh/mosh)", failures: 1, source: "shared", fetchedAt: NOW, nextTry: NOW + 4 * MIN });
+    expect(F.usageState(NOW + 3 * MIN)).toMatchObject({ kind: "current", failing: "keychain: closed to remote sessions (ssh/mosh)" });
+    expect(F.usageState(NOW + 40 * MIN)).toMatchObject({ kind: "stale", asOf: NOW, reason: "keychain: closed to remote sessions (ssh/mosh)" });
+    expect(F.usageState(NOW + 25 * 60 * MIN).kind).toBe("none");
+    expect(fs.readFileSync(shared(), "utf8")).toBe(text); // a failing dashboard writes nothing
+  });
+
+  test("with no shared file, Claude Code's own cached figures are used, and only that one key is read", async () => {
+    resetUsage();
+    fs.rmSync(path.dirname(shared()), { recursive: true, force: true });
+    const home = process.env.FLEET_HOME!;
+    fs.mkdirSync(home, { recursive: true });
+    fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({ oauthAccount: { emailAddress: "someone@example.com" }, userID: "SECRET", cachedUsageUtilization: { fetchedAtMs: NOW - 2 * MIN, accountUuid: "SECRET", utilization: { five_hour: { utilization: 44, resets_at: iso(NOW + 60 * MIN), limit_dollars: null }, seven_day: null } } }));
+    const read = F.readClaudeUsage();
+    expect(read).toEqual({ fetchedAt: NOW - 2 * MIN, figures: { five_hour: { utilization: 44, resets_at: iso(NOW + 60 * MIN) } } });
+    await F.fetchUsage(NOW, async () => ({ reason: "network: timed out" }));
+    expect(F.usage).toMatchObject({ source: "claude", fetchedAt: NOW - 2 * MIN, reason: "network: timed out" });
+    expect(JSON.stringify(F.usage.data)).not.toContain("SECRET");
+    expect(F.accountView(NOW).limits.map((l) => [l.label, l.pct])).toEqual([["5h", 44]]);
+    // Fresher shared figures win over it.
+    F.writeSharedUsage(figures(50), NOW - MIN);
+    await F.fetchUsage(NOW + 1000, async () => ({ reason: "network: timed out" }));
+    expect(F.usage).toMatchObject({ source: "shared", fetchedAt: NOW - MIN, failures: 2 });
+    fs.rmSync(path.join(home, ".claude.json"));
+  });
+
+  test("no figures anywhere: no reading yet, the exact reason, and when the next try is", async () => {
+    resetUsage();
+    fs.rmSync(path.dirname(shared()), { recursive: true, force: true });
+    await F.fetchUsage(NOW, async () => ({ reason: F.REASON.keychainSilent }));
+    expect(F.usageState(NOW)).toEqual({ kind: "none", reason: "keychain: no answer in 5s", nextTry: NOW + 5 * MIN });
+    expect(fs.existsSync(shared())).toBe(false);
+  });
+
+  test("test hooks: FLEET_USAGE_FIXTURE supplies figures, FLEET_USAGE_FAIL forces a reason, and made-up figures are never shared", async () => {
+    const fixture = path.join(SCRATCH, "fixture.json");
+    fs.writeFileSync(fixture, JSON.stringify({ ...figures(86), fetchedAt: NOW - 39 * MIN }));
+    try {
+      resetUsage();
+      fs.rmSync(path.dirname(shared()), { recursive: true, force: true });
+      process.env.FLEET_USAGE_FIXTURE = fixture;
+      await F.fetchUsage(NOW); // the real reader, which the hook keeps away from the login and the network
+      expect(F.usage).toMatchObject({ reason: "", source: "own", fetchedAt: NOW - 39 * MIN });
+      expect((F.usage.data!.five_hour as F.UsageWindow).utilization).toBe(86);
+      expect(fs.existsSync(shared())).toBe(false);
+
+      resetUsage();
+      process.env.FLEET_USAGE_FAIL = "Anthropic answered 429";
+      await F.fetchUsage(NOW); // with both set, the fixture stands in for the shared file
+      expect(F.usageState(NOW)).toMatchObject({ kind: "stale", asOf: NOW - 39 * MIN, reason: "Anthropic answered 429" });
+      expect(F.usage.nextTry).toBe(NOW + 5 * MIN);
+
+      resetUsage();
+      delete process.env.FLEET_USAGE_FIXTURE;
+      process.env.FLEET_USAGE_FAIL = "keychain: closed to remote sessions (ssh/mosh)";
+      await F.fetchUsage(NOW);
+      expect(F.usageState(NOW)).toEqual({ kind: "none", reason: "keychain: closed to remote sessions (ssh/mosh)", nextTry: NOW + MIN });
+    } finally {
+      delete process.env.FLEET_USAGE_FIXTURE;
+      delete process.env.FLEET_USAGE_FAIL;
+      resetUsage();
+    }
   });
 });
