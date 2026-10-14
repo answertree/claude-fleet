@@ -232,6 +232,7 @@ The demo has options of its own, so every state can be seen without waiting for 
 | `--account <state>` | A made-up account (it turns `--usage` on): `current`, `extra-off`, `early` (the 5-hour limit runs out before it resets), `stale`, `none`, `remote`, `shared` (this dashboard's own read fails over ssh or mosh while another's figures, three minutes old, fill the block). |
 | `--seen <minutes>` | The screen as if you last looked that many minutes ago. |
 | `--surprise` | `--stalled --runway --account early --seen 18` together. This is the default. |
+| `--pair` | Just two sessions, the one waiting on you and the busy one, both with merged pull requests (the screenshots above). |
 | `--plain` | The quiet demo: none of the above, and no made-up account (so no usage block). |
 | `--party` | The flaky test hunt celebrates a pull request just merged. |
 | `--real-machine` | This machine's CPU, memory and load instead of the made-up ones. |

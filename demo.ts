@@ -46,6 +46,7 @@ const plain = flag("--plain"); // the quiet demo: none of the surprise features 
 const surprise = flag("--surprise") || !plain;
 const party = flag("--party");
 const six = flag("--six");
+const pair = flag("--pair"); // just two sessions: the one waiting on you and the busy one (the README's screenshots)
 const stalled = flag("--stalled") || surprise;
 const runway = flag("--runway") || surprise;
 const ended = flag("--ended");
@@ -144,7 +145,7 @@ const a = "aaaaaaaa-0000-4000-8000-000000000001";
 session(1, {
   sid: a, name: "checkout flow redesign", kind: "bg", status: "idle", cwd: "/work/shop", upMin: 190, branch: "feature/checkout-v2",
   job: { state: "blocked", detail: "migration drafted and tested against a copy", needs: "Approve dropping the legacy coupon_code column before I run the migration?" },
-  main: [...loaded(70_000, 9_000), ...transcript({ calls: 46, endAgo: 6 * MIN, ask: "move coupons to the new promotions table and remove the old column", used: 372_000,
+  main: [...loaded(70_000, 9_000), { type: "pr-link", timestamp: iso(170 * MIN), prNumber: 408, prRepository: "shop/payments", prUrl: "https://github.com/shop/payments/pull/408" }, { type: "pr-link", timestamp: iso(40 * MIN), prNumber: 411, prRepository: "shop/payments", prUrl: "https://github.com/shop/payments/pull/411" }, ...transcript({ calls: 46, endAgo: 6 * MIN, ask: "move coupons to the new promotions table and remove the old column", used: 372_000,
     says: ["The new promotions table is in place and every read now goes through it. All 212 checkout tests pass.", "The migration that drops coupon_code is written and has run cleanly against a copy of the data.\n- 41,208 rows were copied to promotions\n- 0 rows differ between the old column and the new table\n\nI have not run it for real, because dropping a column cannot be undone."] })],
 });
 
@@ -292,7 +293,7 @@ if (six) {
     ["onboarding emails", "/work/mail", "feature/onboarding", 112],
   ];
   more.forEach(([name, cwd, branch, upMin], i) => busyJob(10 + i, { sid: `${"cdef"[i].repeat(8)}-0000-4000-8000-00000000001${i}`, name, cwd, branch, upMin, wfId: `wf_demo001${i}` }));
-} else {
+} else if (!pair) {
   // 3. An interactive session with two subagents.
   const c = "cccccccc-0000-4000-8000-000000000003";
   const cDir = session(3, {
@@ -321,7 +322,7 @@ if (six) {
 }
 
 // 4. A finished job, hidden unless you pass --all.
-session(4, { sid: "dddddddd-0000-4000-8000-000000000004", name: "rename billing module", kind: "bg", status: "idle", cwd: "/work/shop", upMin: 400, branch: "main", job: { state: "done", detail: "merged" }, main: transcript({ calls: 3, endAgo: 50 * MIN, says: ["Merged."], used: 40_000 }) });
+if (!pair) session(4, { sid: "dddddddd-0000-4000-8000-000000000004", name: "rename billing module", kind: "bg", status: "idle", cwd: "/work/shop", upMin: 400, branch: "main", job: { state: "done", detail: "merged" }, main: transcript({ calls: 3, endAgo: 50 * MIN, says: ["Merged."], used: 40_000 }) });
 
 if (all) {
   // 5 and 6. With --all: a session waiting for your next prompt, and one that is simply idle.
@@ -383,6 +384,8 @@ if (!account && !argv.includes("--no-usage")) argv.push("--no-usage");
 // The checkout's git state and the pull requests' CI, as git and gh would report them, so the demo needs neither.
 write(path.join(home, "git-fixture.json"), JSON.stringify({ "/work/shop": "## fix/flaky-payments...origin/fix/flaky-payments [ahead 2]\n M src/payments/refund.ts\n M src/payments/retry.ts\n?? notes.md\n" }));
 write(path.join(home, "pr-fixture.json"), JSON.stringify({
+  "shop/payments#408": { state: "MERGED", isDraft: false, statusCheckRollup: [], mergeCommit: { oid: "9a7e3c1d5b2f4086e1c3a5b7d9f0e2c4a6b8d0f1" } },
+  "shop/payments#411": { state: "MERGED", isDraft: false, statusCheckRollup: [], mergeCommit: { oid: "c2d8e4a6f0b1937d5e7a9c1b3d5f7e9a1c3e5b70" } },
   "shop/payments#412": { state: "MERGED", isDraft: false, statusCheckRollup: [], mergeCommit: { oid: "4f1c2a9be0d17c35a8e6f20b9d4c7e1a3b5f8d02" } },
   "shop/payments#413": { state: "OPEN", isDraft: false, statusCheckRollup: [...Array(14)].map(() => ({ conclusion: "SUCCESS" })).concat([...Array(6)].map(() => ({ status: "IN_PROGRESS", conclusion: "" }))) },
 }));
