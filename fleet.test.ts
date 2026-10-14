@@ -842,9 +842,9 @@ describe("the shared figures file is only ever ours", () => {
     expect(fs.lstatSync(linkedFile.file).isSymbolicLink()).toBe(false);
   });
 
-  test("--help says what --usage writes and reads, and that FLEET_USAGE=1 turns it on", () => {
+  test("--help says what the usage read writes and reads, and that --no-usage or FLEET_USAGE=0 turns it off", () => {
     const help = Bun.spawnSync([process.execPath, path.join(here, "fleet.ts"), "--help"]).stdout.toString();
-    for (const words of ["FLEET_USAGE=1", "claude-fleet/usage.json", "never the login", ".claude.json"]) expect([words, help.includes(words)]).toEqual([words, true]);
+    for (const words of ["--no-usage", "FLEET_USAGE=0", "--no-prs", "claude-fleet/usage.json", "never the login", ".claude.json"]) expect([words, help.includes(words)]).toEqual([words, true]);
   });
 });
 
@@ -3036,23 +3036,50 @@ describe("the detail view", () => {
     }
   };
 
-  test("under the subheading, while there is room: failures, background commands, pull requests with their CI, and what it has changed", () => {
+  test("on a wide screen the side facts sit in the column beside the conversation, under the instruments, and cost no rows of their own", () => {
     quietly(() =>
       withSideState(() => {
-        const rows = draw([sided()], 150, 60).map((r) => r.slice(0, 104).trimEnd());
-        const at = rows.findIndex((r) => r.includes("failed in 10m"));
-        expect(rows.slice(at, at + 4).map((r) => r.replace(/ {2,}(\S+)$/, " … $1"))).toEqual([
-          " ▌  ✗ 2 failed in 10m  ·  Bash: FAIL refund.test.ts > rounds half up … 4m",
-          " ▌  ↻ 2 running  ·  Watch CI on #413 6m  ·  Run the refund tests 200 times 3m",
-          " ▌  ⇡ #413 ◐ CI 14/20  ·  #412 ✓ merged",
-          " ▌  ± 4 files changed  ·  3 uncommitted · 2 ahead  ·  retry.ts clock.ts refund.ts +1 … 2m",
+        const g = F.grid(150);
+        const rows = draw([sided()], 150, 60);
+        const column = rows.map((r) => r.slice(g.lane - 1).trimEnd()).filter((r) => /^[✗↻⇡±]/.test(r));
+        expect(column.map((r) => r.replace(/ {2,}(\S+)$/, " … $1"))).toEqual([
+          "✗ 2 failed · Bash: FAIL refund.test.ts … 4m",
+          "↻ Watch CI on #413 … 6m",
+          "↻ Run the refund tests 200 times … 3m",
+          "⇡ #413 ◐ CI 14/20",
+          "⇡ #412 ✓ merged",
         ]);
-        // They sit under the subheading, above the conversation.
-        expect(rows[at - 1]).toContain("bisecting the three payment tests");
+        // The column has room for five; the least wanted group, the changes, goes back to one row on the left.
+        expect(rows.filter((r) => /^ ▌  [✗↻⇡±] /.test(r)).map((r) => r.slice(4, 5))).toEqual(["±"]);
+        // So the block is one row taller than without any side facts: the four groups would have cost four.
+        expect(plan([sided()], 150, 200).heights[0]).toBe(plan([busy(NOW)], 150, 200).heights[0] + 1);
         // Without --prs (nothing from GitHub) a pull request is its number alone.
         F.prState.delete("o/r#413");
-        F.prState.delete("o/r#412");
-        expect(draw([sided()], 150, 60).find((r) => r.includes("⇡"))!.slice(0, 104).trimEnd()).toBe(" ▌  ⇡ #413  ·  #412");
+        expect(draw([sided()], 150, 60).map((r) => r.slice(g.lane - 1).trimEnd()).find((r) => r.startsWith("⇡ #413"))).toBe("⇡ #413");
+      }),
+    );
+  });
+
+  test("on a narrow screen, or when the conversation is too short to hold them, the side facts are rows under the subheading", () => {
+    quietly(() =>
+      withSideState(() => {
+        const rows = draw([sided()], 120, 60).map((r) => r.trimEnd());
+        const at = rows.findIndex((r) => r.includes("failed in 10m"));
+        expect(rows.slice(at, at + 4).map((r) => r.slice(0, 6))).toEqual([" ▌  ✗ ", " ▌  ↻ ", " ▌  ⇡ ", " ▌  ± "]);
+        expect(rows.slice(0, at).some((r) => r.includes("bisecting the three payment tests"))).toBe(true); // under the subheading
+        // Wide, but with almost nothing to talk about: what does not fit in the column goes back to the left, least wanted first.
+        const quiet = sided();
+        quiet.mains[0].says.length = 0;
+        quiet.mains[0].say = undefined;
+        quiet.mains[0].ask = undefined;
+        quiet.tasks = undefined;
+        const g = F.grid(150);
+        const short = draw([quiet], 150, 60);
+        const left = short.filter((r) => /^ ▌  [✗↻⇡±] /.test(r)).map((r) => r.slice(4, 5));
+        const right = short.filter((r) => /^[✗↻⇡±]/.test(r.slice(g.lane - 1))).map((r) => r.slice(g.lane - 1, g.lane));
+        expect(left.length).toBeGreaterThan(0);
+        expect(["✗", "↻", "⇡", "±"].filter((x) => left.includes(x) || right.includes(x))).toEqual(["✗", "↻", "⇡", "±"]); // all four still shown
+        expect(right.every((x) => !left.includes(x))).toBe(true); // each group in one place
       }),
     );
   });
@@ -3061,13 +3088,14 @@ describe("the detail view", () => {
     quietly(() =>
       withSideState(() => {
         const at: Record<string, number> = {};
-        for (let avail = plan([sided()], 150, 200).heights[0]; avail >= 2; avail--) {
-          const k = plan([sided()], 150, avail).blocks[0].keep;
+        for (let avail = plan([sided()], 120, 200).heights[0]; avail >= 2; avail--) {
+          const k = plan([sided()], 120, avail).blocks[0].keep;
           const now: Record<string, boolean> = { changes: !k.changes, earlier: k.earlier.every((n) => n === 0), prs: !k.prs, bg: !k.bgRow, reply1: k.reply <= 1, trouble: !k.trouble };
           for (const [what, cut] of Object.entries(now)) if (cut && at[what] === undefined) at[what] = avail;
         }
         const order = ["changes", "earlier", "prs", "bg", "reply1", "trouble"];
         for (let i = 1; i < order.length; i++) expect([order[i - 1], order[i], at[order[i - 1]] > at[order[i]]]).toEqual([order[i - 1], order[i], true]);
+        // On a wide screen they cost no row while the column has room for them; once a group falls back to a row on the left it gives way in this same order.
       }),
     );
   });
@@ -3471,6 +3499,46 @@ describe("the detail view", () => {
             }
     });
   });
+});
+
+describe("celebrations", () => {
+  const sess = (o: Partial<F.Session>): F.Session => ({ sid: "p1", pid: 1, name: "party", kind: "bg", status: "busy", cwd: "/w", startedAt: NOW - 60 * MIN, mains: [], agents: [], workflows: [], ...o }) as F.Session;
+  const side = (n: number): F.Side => ({ prs: [{ repo: "o/r", number: n, url: "", t: NOW }], bg: [], fails: [], edits: [], compactions: 0 });
+  const pr = (state: string, pass: number, fail: number, pending: number) => ({ at: NOW, state: { state, draft: false, pass, fail, pending } });
+
+  test("a pull request merged or gone green, a workflow completed, a task list all done: each starts one, and what was already so at launch does not", () => {
+    F.parties.clear();
+    const wf = (status: string) => ({ id: "wf_p", name: "bisect", status, phase: "", phases: [], seen: [], started: NOW, finished: 0, agents: [], lastT: NOW }) as unknown as F.Workflow;
+    const tasks = (done: number) => ({ done, doing: 0, total: 3, active: "", items: [] });
+    F.prState.set("o/r#9", pr("OPEN", 3, 0, 2));
+    F.prState.set("o/r#8", pr("MERGED", 0, 0, 0)); // merged before launch: no party
+    try {
+      const at = (now: number, wfStatus: string, done: number) => F.noteParties([sess({ side: { ...side(9), prs: [...side(9).prs, { repo: "o/r", number: 8, url: "", t: NOW }] }, workflows: [wf(wfStatus)], tasks: tasks(done) })], now);
+      expect(at(NOW, "running", 2)).toEqual([]); // the first scan only takes note
+      F.prState.set("o/r#9", pr("OPEN", 5, 0, 0));
+      expect(at(NOW + 2000, "running", 2)).toEqual(["p1 #9 CI green"]);
+      F.prState.set("o/r#9", pr("MERGED", 5, 0, 0));
+      expect(at(NOW + 4000, "completed", 3)).toEqual(["p1 #9 merged", "p1 bisect done", "p1 all 3 tasks done"]);
+      expect(F.partyOn("p1", NOW + 4000)?.text).toBe("all 3 tasks done"); // the latest wins
+      expect(at(NOW + 6000, "completed", 3)).toEqual([]); // once each
+      expect(F.partyOn("p1", NOW + 4000 + F.PARTY_MS + 1)).toBeUndefined(); // and it ends
+    } finally {
+      F.prState.delete("o/r#9");
+      F.prState.delete("o/r#8");
+      F.parties.clear();
+    }
+  });
+
+  test("while it celebrates, the title shimmers through the rainbow and what it finished stands where the place was", () => {
+    const frame = (W: number) => Bun.spawnSync([process.execPath, path.join(here, "demo.ts"), "--plain", "--party", "--once"], { env: { ...process.env, COLUMNS: String(W), LINES: "44", TZ: "UTC", FLEET_NOW: String(NOW) } }).stdout.toString();
+    const raw = frame(150);
+    const title = raw.split("\n").find((l) => strip(l).includes("F L A K Y"))!;
+    expect(strip(title)).toContain("✦ #412 merged ✦");
+    const colours = new Set([...title.matchAll(/\x1b\[38;2;(\d+;\d+;\d+)m[A-Z]/g)].map((m) => m[1]));
+    expect(colours.size).toBeGreaterThan(5); // each letter a little further round
+    expect(frame(150)).toBe(raw); // a pinned clock draws the same shimmer every time
+    expect(F.partyTone(0, NOW)).not.toEqual(F.partyTone(0, NOW + 500)); // and with the clock the wave moves
+  }, 30_000);
 });
 
 describe("what a session is doing beside the conversation", () => {
@@ -3880,8 +3948,14 @@ describe("demo", () => {
     expect(strip(a).split("\n")[0]).toContain("23:51:22"); // the pinned clock, in the UTC the demo is run in here
   }, SLOW);
 
-  test("the default demo is today's three sessions with one finished job kept off the screen", () => {
+  test("the demo shows the surprise features unless told --plain", () => {
     const frame = squash(demo([]));
+    expect(frame).toContain("stalled?");
+    expect(frame).toContain("fullin~40m");
+  }, SLOW);
+
+  test("the plain demo is today's three sessions with one finished job kept off the screen", () => {
+    const frame = squash(demo(["--plain"]));
     for (const name of ["checkoutflowredesign", "flakytesthunt", "docssitesearch"]) expect(frame).toContain(name);
     expect(frame).not.toContain("searchreindex");
     expect(frame).not.toContain("stalled?");
@@ -3908,7 +3982,7 @@ describe("demo", () => {
   }, SLOW);
 
   test("--account shows each account state without a real account", () => {
-    const frame = Object.fromEntries(["current", "extra-off", "stale", "none", "remote"].map((a) => [a, squash(demo(["--account", a]))]));
+    const frame = Object.fromEntries(["current", "extra-off", "stale", "none", "remote"].map((a) => [a, squash(demo(["--plain", "--account", a]))]));
     expect(frame.current).toContain("38%");
     expect(frame.current).toContain("£12of£50");
     expect(frame.current).not.toContain("uretryusage");
@@ -4015,10 +4089,10 @@ describe("the login stays inside the process", () => {
     }
   }, 60_000);
 
-  test("without --usage the keychain is not asked and no request is made, in any mode", () => {
+  test("with --no-usage the keychain is not asked and no request is made, in any mode", () => {
     setUp();
     for (const mode of ["detail", "compact", "far"]) {
-      const r = run(["--mode", mode]);
+      const r = run(["--no-usage", "--mode", mode]);
       expect(r.code).toBe(0);
       expect([r.security, r.fetches, r.ours]).toEqual([[], [], []]);
     }
@@ -4031,7 +4105,7 @@ describe("the login stays inside the process", () => {
  */
 async function liveDemo(args: string[] = [], cols = 150, rows = 44) {
   let out = "";
-  const proc = Bun.spawn([process.execPath, path.join(here, "demo.ts"), ...args], {
+  const proc = Bun.spawn([process.execPath, path.join(here, "demo.ts"), "--plain", ...args], {
     env: { ...process.env, TZ: "UTC", FLEET_NOW: String(NOW) },
     terminal: { cols, rows, data: (_t: unknown, d: Uint8Array) => void (out += new TextDecoder().decode(d)) },
   } as any);
@@ -4763,18 +4837,20 @@ describe("runway and pace, worked by hand", () => {
 });
 
 describe("what turns the usage read on", () => {
-  test("--usage, or FLEET_USAGE=1 in the environment, and nothing else", () => {
+  test("usage and pull requests are on unless --no-usage, FLEET_USAGE=0 or --no-prs says otherwise", () => {
     const before = { ...F.opt };
     const saved = process.env.FLEET_USAGE;
     try {
       delete process.env.FLEET_USAGE;
-      for (const argv of [[], ["--all", "--bell", "--once"], ["--mode", "far", "60"], ["--stall", "5"], ["--plain-glyphs"]]) {
+      for (const argv of [[], ["--all", "--bell", "--once"], ["--mode", "far", "60"], ["--stall", "5"], ["--plain-glyphs"], ["--usage", "--prs"]]) {
         F.parseArgs(argv);
-        expect(F.opt.usage).toBe(false);
+        expect([argv, F.opt.usage, F.opt.prs]).toEqual([argv, true, true]);
       }
-      F.parseArgs(["--usage"]);
-      expect(F.opt.usage).toBe(true);
-      for (const [value, on] of [["1", true], ["0", false], ["true", false], ["", false]] as [string, boolean][]) {
+      F.parseArgs(["--no-usage"]);
+      expect([F.opt.usage, F.opt.prs]).toEqual([false, true]);
+      F.parseArgs(["--no-prs"]);
+      expect([F.opt.usage, F.opt.prs]).toEqual([true, false]);
+      for (const [value, on] of [["1", true], ["0", false], ["true", true], ["", true]] as [string, boolean][]) {
         process.env.FLEET_USAGE = value;
         F.parseArgs([]);
         expect(F.opt.usage).toBe(on);
@@ -4792,8 +4868,8 @@ describe("what turns the usage read on", () => {
     const read = [...new Set([...source.matchAll(/process\.env\.(FLEET_[A-Z_]+)/g)].map((m) => m[1]))].sort();
     expect(read).toContain("FLEET_USAGE");
     expect(read.filter((name) => !readme.includes("`" + name))).toEqual([]);
-    // And it does not promise that --usage is the only way to switch the read on.
-    expect(readme).toContain("`FLEET_USAGE=1`");
+    // And it says how to switch the read off.
+    expect(readme).toContain("`FLEET_USAGE=0`");
     expect(readme).not.toMatch(/Without `--usage`, Claude Fleet makes no network requests/);
   });
 });

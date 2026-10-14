@@ -17,7 +17,9 @@
 //                     fill the block). --usage alone,
 //                     or FLEET_USAGE=1, means --account current
 //   --seen <minutes>  as if you last looked that many minutes ago
-//   --surprise        --stalled --runway --account early --seen 18
+//   --surprise        --stalled --runway --account early --seen 18 (the default; --plain turns it off)
+//   --plain           the quiet demo: no stall, no forecast, no made-up account, nothing marked new
+//   --party           the flaky test hunt celebrates a pull request just merged
 //   --real-machine    this machine's CPU, memory and load instead of made-up ones
 //
 // Nothing here touches your real sessions, login or usage figures: every usage switch draws a
@@ -40,7 +42,9 @@ const value = (name: string) => {
   const i = argv.indexOf(name);
   return i >= 0 ? argv.splice(i, 2)[1] : undefined;
 };
-const surprise = flag("--surprise");
+const plain = flag("--plain"); // the quiet demo: none of the surprise features forced on
+const surprise = flag("--surprise") || !plain;
+const party = flag("--party");
 const six = flag("--six");
 const stalled = flag("--stalled") || surprise;
 const runway = flag("--runway") || surprise;
@@ -372,6 +376,10 @@ if (account) {
   if (!argv.includes("--usage")) argv.push("--usage");
 }
 if (seenMin) env.FLEET_SEEN = String(now - Number(seenMin) * MIN);
+// --party: the flaky test hunt celebrates a pull request just merged.
+if (party) env.FLEET_PARTY = "bbbbbbbb-0000-4000-8000-000000000002=#412 merged";
+// The usage read is on by default; the demo never reads a real login, so without a made-up account it is off.
+if (!account && !argv.includes("--no-usage")) argv.push("--no-usage");
 // The checkout's git state and the pull requests' CI, as git and gh would report them, so the demo needs neither.
 write(path.join(home, "git-fixture.json"), JSON.stringify({ "/work/shop": "## fix/flaky-payments...origin/fix/flaky-payments [ahead 2]\n M src/payments/refund.ts\n M src/payments/retry.ts\n?? notes.md\n" }));
 write(path.join(home, "pr-fixture.json"), JSON.stringify({

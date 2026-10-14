@@ -4,7 +4,7 @@ Every live Claude Code session on one terminal screen: what each one is doing, w
 
 ![Claude Fleet in detail mode](docs/screenshot.svg)
 
-It is one TypeScript file with no dependencies. It reads the files Claude Code already keeps under `~/.claude`. The only thing it ever writes is one small file of usage figures, and only with `--usage` (see [Account usage and your login](#account-usage-and-your-login)). Every 30 seconds it asks `git` for the state of each session's checkout; with `--prs` it also asks GitHub, through your `gh` command, about each session's pull requests.
+It is one TypeScript file with no dependencies. It reads the files Claude Code already keeps under `~/.claude`. The only thing it ever writes is one small file of usage figures, and not at all with `--no-usage` (see [Account usage and your login](#account-usage-and-your-login)). Every 30 seconds it asks `git` for the state of each session's checkout, and it asks GitHub, through your `gh` command, about each session's pull requests (`--no-prs` turns that off).
 
 ## Try it
 
@@ -20,7 +20,7 @@ You need [Bun](https://bun.sh) and a terminal with 24-bit colour. The screen is 
 To run it from anywhere, add an alias to your shell profile:
 
 ```bash
-alias fleet='bun ~/path/to/claude-fleet/fleet.ts --usage'
+alias fleet='bun ~/path/to/claude-fleet/fleet.ts'
 ```
 
 ## What is on the screen
@@ -29,7 +29,7 @@ alias fleet='bun ~/path/to/claude-fleet/fleet.ts --usage'
 
 - **Counts:** how many sessions need you (the one amber thing on the row), how many are working, running agents and workflows, and how many idle or finished sessions are being kept off the screen. A red `◐ 1 stalled?` joins them while something looks stuck.
 - **The machine:** CPU with a short history, memory, one glyph per core, load, and the busiest processes.
-- **Your account** (with `--usage`): how much of the 5-hour and weekly limits you have used and when each resets, then extra usage. With extra usage off, that row shows the Opus and Sonnet weekly limits when Anthropic returns them. Without `--usage` this block lists the busiest processes instead.
+- **Your account** (unless `--no-usage`): how much of the 5-hour and weekly limits you have used and when each resets, then extra usage. With extra usage off, that row shows the Opus and Sonnet weekly limits when Anthropic returns them. Without `--usage` this block lists the busiest processes instead.
 - **The fleet:** tool calls across the window as a chart, with the total, the output tokens and how long one bar is.
 - **The rule under it is the time axis** for every sparkline below: each sits in the same columns and counts the same bars, and the header's total is the sum of the sessions' own.
 
@@ -41,7 +41,7 @@ The header is five rows on a terminal of 40 rows or more and three rows below th
 - **Beside the conversation, under the head rows, one row each while there is room:**
   - `✗ 2 failed in 10m · Bash: FAIL refund.test.ts > …`: tool calls that failed in the last ten minutes, and what the last one said (past a bare `Exit code 1`), with its age.
   - `↻ 2 running · Watch CI on #413 6m · Run the refund tests 200 times 3m`: background commands it started that have not reported back, each with how long it has been going.
-  - `⇡ #413 ◐ CI 14/20 · #412 ✓ merged`: the pull requests it has linked, newest first, three at most. With `--prs` each says what GitHub says: merged, closed, failing checks, checks still running, or green; without it, the numbers alone.
+  - `⇡ #413 ◐ CI 14/20 · #412 ✓ merged`: the pull requests it has linked, newest first, three at most. Each says what GitHub says (unless `--no-prs`): merged, closed, failing checks, checks still running, or green; without it, the numbers alone.
   - `± 6 files changed · 3 uncommitted · 2 ahead · retry.ts clock.ts refund.ts +3`: how many files it has edited or written this session, its checkout's state from `git status`, then the newest of those files (cut first when the row is short), with when it last changed a file.
 - **Totals on the title row**, when the row has room for them: all the tokens a background session has used, the agents it has run, and how many times its context was compacted.
 - **Conversation:** `▸` your prompt, `◇` Claude's earlier replies (dimmed) and `◆` its newest reply with its bullets, code and tables kept, each with its age in a column of its own. A long reply is cut in the middle, never at the end: its closing paragraph stays (up to three rows of it) and `… +5 lines` says how much is hidden.
@@ -118,8 +118,8 @@ Every control has a key, and all but `tab` and `esc` are also buttons on the bot
 | a number | The window in minutes (default 30) |
 | `--mode detail\|compact\|far` | Start in that view |
 | `--all` | Start with idle and finished sessions shown |
-| `--usage` | Show your account's usage limits (see below) |
-| `--prs` | Show the CI state of each session's pull requests, asking GitHub through `gh` every two minutes per open pull request (every 15 once merged or closed) |
+| `--no-usage` | Do not show your account's usage limits (see below); `FLEET_USAGE=0` in the environment does the same |
+| `--no-prs` | Do not ask GitHub, through `gh`, for the CI state of each session's pull requests (by default it asks every two minutes per open pull request, every 15 once merged or closed) |
 | `--bell` | Start with the bell on |
 | `--stall <minutes>` | How long a thread may sit on a tool call in silence before it is marked `stalled?` (default 10; 0 turns the watch off) |
 | `--glyphs` | Print the glyph test card and exit |
@@ -131,9 +131,11 @@ Every control has a key, and all but `tab` and `esc` are also buttons on the bot
 
 Capturing clicks means a plain drag no longer selects text. Hold Shift (Option in iTerm2 and Terminal.app) while dragging, or start with `--no-mouse`.
 
-## Three things it watches for you
+## Four things it watches for you
 
 Each stays silent until it has something to say.
+
+- *Celebrations.* When a session's pull request merges or its checks all turn green, a workflow completes, or its last task is ticked off, its title shimmers through the rainbow for eight seconds and what it finished (`✦ #412 merged ✦`) stands where its folder and branch were. With the bell on, it rings. Only changes seen while the dashboard is running count, so nothing already finished at launch is celebrated.
 
 **Runway: will it hit the wall before the work is done?** Two gauges become forecasts.
 
@@ -149,9 +151,9 @@ Each stays silent until it has something to say.
 
 ## Account usage and your login
 
-Usage figures are off unless you pass `--usage` (or set `FLEET_USAGE=1` in the environment, which means the same). With it, Claude Fleet reads the Claude Code login already stored on your machine (the macOS keychain item `Claude Code-credentials`, or `~/.claude/.credentials.json`) and asks `api.anthropic.com/api/oauth/usage` for your figures every five minutes. The token is sent only to that address (a redirect is refused, not followed) and is held in memory for that one request. It is never written, logged or printed, and never refreshed or changed. That endpoint is the one Claude Code's own `/usage` screen relies on, and it is not a documented public interface.
+Usage figures are on unless you pass `--no-usage` (or set `FLEET_USAGE=0` in the environment, which means the same). To show them, Claude Fleet reads the Claude Code login already stored on your machine (the macOS keychain item `Claude Code-credentials`, or `~/.claude/.credentials.json`) and asks `api.anthropic.com/api/oauth/usage` for your figures every five minutes. The token is sent only to that address (a redirect is refused, not followed) and is held in memory for that one request. It is never written, logged or printed, and never refreshed or changed. That endpoint is the one Claude Code's own `/usage` screen relies on, and it is not a documented public interface.
 
-Without `--usage` or `FLEET_USAGE=1`, Claude Fleet does not ask the keychain for anything, and makes no network requests of its own; with `--prs`, the `gh` command it runs talks to GitHub with your own `gh` login. The `git status` it runs for each checkout is local, and uses `--no-optional-locks` so it never takes a lock a session might need.
+With `--no-usage` (or `FLEET_USAGE=0`), Claude Fleet does not ask the keychain for anything, and makes no network requests of its own; unless `--no-prs`, the `gh` command it runs talks to GitHub with your own `gh` login. The `git status` it runs for each checkout is local, and uses `--no-optional-locks` so it never takes a lock a session might need.
 
 **When the read fails, the screen says exactly why:** `keychain: item not found`, `keychain: no answer in 5s`, `keychain: exit N`, `keychain: entry is not JSON`, `keychain: no claude.ai login in entry`, `keychain: closed to remote sessions (ssh/mosh)`, `login file: not found`, `login file: no claude.ai login in it`, `token expired · any Claude Code session renews it`, `Anthropic answered 401` (or whatever status it gave), `network: timed out`. It says `no Claude Code login found` only when the keychain and the login file both answered "not found". It tries again by itself, a minute after a failure and then less often (every five minutes while the keychain is closed or not answering), and `u` retries at once.
 
@@ -214,7 +216,9 @@ The demo has options of its own, so every state can be seen without waiting for 
 | `--focus` | Start focused on the flaky test hunt, as clicking it would. |
 | `--account <state>` | A made-up account (it turns `--usage` on): `current`, `extra-off`, `early` (the 5-hour limit runs out before it resets), `stale`, `none`, `remote`, `shared` (this dashboard's own read fails over ssh or mosh while another's figures, three minutes old, fill the block). |
 | `--seen <minutes>` | The screen as if you last looked that many minutes ago. |
-| `--surprise` | `--stalled --runway --account early --seen 18` together. |
+| `--surprise` | `--stalled --runway --account early --seen 18` together. This is the default. |
+| `--plain` | The quiet demo: none of the above, and no made-up account (so no usage block). |
+| `--party` | The flaky test hunt celebrates a pull request just merged. |
 | `--real-machine` | This machine's CPU, memory and load instead of the made-up ones. |
 
 `bun test` runs the tests in `fleet.test.ts` (Bun's built-in runner, no packages). `tools/check-frames` renders the demo at seven terminal sizes in all three modes and fails if a frame has the wrong number of rows, a line wider than the terminal, the text "undefined" or "NaN" on it, or a glyph the design retired. `bun run check` runs both. `tools/shot.sh out.png 150 44` renders one demo frame to a PNG for looking at (it needs `rsvg-convert`).
@@ -228,6 +232,7 @@ These environment variables exist for tests and screenshots only:
 | `FLEET_MACHINE_FIXTURE` | Take CPU, memory, load and the process list from this JSON file instead of sampling the machine. Processes listed in it count as alive. |
 | `FLEET_USAGE_FIXTURE` | Take the usage figures from this JSON file instead of reading the login and asking Anthropic. A `fetchedAt` in the file sets their age. Figures from a fixture are never saved to the shared file. |
 | `FLEET_SEEN` | Start the "seen" mark at this time (milliseconds since 1970) instead of at launch, so a single frame can show things as new. |
+| `FLEET_PARTY` | Start a celebration at launch, as `session id=what it finished`, so a single frame can show one (the demo's `--party`). |
 | `FLEET_FOCUS` | Start focused on the session with this id, so a single frame can show focus (the demo's `--focus`). |
 | `FLEET_GIT_FIXTURE` | Take each checkout's `git status --porcelain -b` output from this JSON file (folder to text) instead of running git. |
 | `FLEET_PR_FIXTURE` | Take each pull request's `gh pr view --json state,isDraft,statusCheckRollup` answer from this JSON file ("owner/repo#number" to the answer) instead of running gh. |

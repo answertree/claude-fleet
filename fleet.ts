@@ -42,15 +42,15 @@ Usage: bun fleet.ts [minutes] [options]
   minutes        width of the sparkline window (default 30)
   --mode <m>     detail (default), compact, or far (big, readable from a distance)
   --all          also show idle and finished sessions
-  --usage        show your Claude account usage limits (reads the stored Claude
-                 Code login and asks api.anthropic.com every five minutes).
-                 FLEET_USAGE=1 in the environment does the same. It saves the
+  --no-usage     do not show your Claude account usage limits. By default it
+                 reads the stored Claude Code login and asks api.anthropic.com
+                 every five minutes (FLEET_USAGE=0 also turns this off). It saves the
                  figures it gets, never the login, to
                  \${XDG_CACHE_HOME:-~/.cache}/claude-fleet/usage.json (the one
                  file it writes), and when its own read fails shows the
                  figures in that file or in Claude Code's ~/.claude.json
-  --prs          show the CI state of each session's pull requests (asks GitHub
-                 through your gh command, every two minutes per pull request)
+  --no-prs       do not ask GitHub (through your gh command, every two minutes
+                 per pull request) for the CI state of each session's pull requests
   --bell         ring the terminal bell when a session starts waiting on you,
                  or when something stalls
   --stall <min>  mark a thread "stalled?" after this many minutes sitting on a
@@ -99,9 +99,10 @@ export function parseArgs(argv: string[]): "help" | "glyphs" | undefined {
   opt.once = argv.includes("--once");
   opt.showAll = argv.includes("--all");
   opt.bell = argv.includes("--bell");
-  opt.usage = argv.includes("--usage") || process.env.FLEET_USAGE === "1";
+  // Usage and pull requests are on unless asked off; --usage and --prs are still accepted.
+  opt.usage = !argv.includes("--no-usage") && process.env.FLEET_USAGE !== "0";
   opt.mouse = !argv.includes("--no-mouse");
-  opt.prs = argv.includes("--prs");
+  opt.prs = !argv.includes("--no-prs");
   const stall = valueOf("--stall");
   if (stall !== undefined && /^\d+(\.\d+)?$/.test(stall)) opt.stallMin = Number(stall);
   return undefined;
@@ -422,6 +423,7 @@ export const GLYPHS = {
   failed: { g: "✗", is: "failed, stopped or unavailable" },
   workflow: { g: "≡", plain: "◇", is: "workflow" },
   pr: { g: "⇡", is: "the session's pull requests and their CI" },
+  star: { g: "✦", is: "a celebration: a pull request merged or gone green, a workflow or a task list done" },
   background: { g: "↻", is: "commands it has running in the background" },
   changes: { g: "±", is: "files it has changed, and the state of its git checkout" },
   railThick: { g: "██", is: "state rail on a session's head rows" },
@@ -3458,6 +3460,7 @@ export interface Keep {
 /** One session as the detail view draws it: what there is to show, and how much of it is still shown. */
 export interface Block {
   v: View;
+  sideLeft?: Set<SideKey>; // wide screens: the side facts that did not fit in the column beside the conversation, drawn as rows on the left instead
   body: boolean; // false: the two head rows only (an idle, finished or your-turn session shown with a)
   focus: boolean; // it has the screen to itself: every stored reply in full
   sub: Subheading;
@@ -3616,6 +3619,63 @@ function stackOf(b: Block, g: Grid, now: number): StackRow[] {
   return rows;
 }
 
+// ── celebrations ──
+
+/** A session celebrating something it just finished: its title shimmers for a few seconds. */
+export const parties = new Map<string, { text: string; at: number }>();
+export const PARTY_MS = 8_000;
+const partyWas = { pr: new Map<string, string>(), wf: new Map<string, string>(), tasks: new Map<string, boolean>(), ready: false };
+/** How a pull request stands, for telling when it has just merged or just gone green. */
+const prMood = (st: PrState | undefined) => (!st ? "" : st.state === "MERGED" ? "merged" : st.state === "OPEN" && !st.fail && !st.pending && st.pass > 0 ? "green" : st.state.toLowerCase());
+/**
+ * Start a celebration for each thing that has just finished since the last scan: a pull request merged
+ * or gone green, a workflow completed, a task list all done. The first scan only takes note, so what was
+ * already finished at launch is not celebrated.
+ */
+export function noteParties(sessions: Session[], now: number): string[] {
+  const started: string[] = [];
+  const party = (sid: string, text: string) => {
+    parties.set(sid, { text, at: now });
+    started.push(`${sid} ${text}`);
+  };
+  for (const s of sessions) {
+    for (const pr of s.side?.prs.slice(0, PR_SHOWN) ?? []) {
+      const key = `${pr.repo}#${pr.number}`;
+      const mood = prMood(prState.get(key)?.state);
+      const was = partyWas.pr.get(key);
+      if (!mood) continue;
+      if (partyWas.ready && was !== undefined && was !== mood && (mood === "merged" || mood === "green")) party(s.sid, `#${pr.number} ${mood === "merged" ? "merged" : "CI green"}`);
+      partyWas.pr.set(key, mood);
+    }
+    for (const wf of s.workflows) {
+      const was = partyWas.wf.get(wf.id);
+      if (partyWas.ready && was === "running" && wf.status === "completed") party(s.sid, `${wf.name} done`);
+      partyWas.wf.set(wf.id, wf.status);
+    }
+    const t = s.tasks;
+    const allDone = !!t && t.total > 0 && t.done >= t.total;
+    if (partyWas.ready && allDone && partyWas.tasks.get(s.sid) === false) party(s.sid, `all ${t!.total} tasks done`);
+    partyWas.tasks.set(s.sid, allDone);
+  }
+  partyWas.ready = true;
+  for (const [sid, p] of parties) if (now - p.at > PARTY_MS) parties.delete(sid);
+  return started;
+}
+export const partyOn = (sid: string, now: number) => {
+  const p = parties.get(sid);
+  return p && now - p.at <= PARTY_MS ? p : undefined;
+};
+/** A colour on the rainbow, `h` in degrees. */
+export function hue(h: number): RGB {
+  const f = (n: number) => {
+    const k = (n + h / 30) % 12;
+    return Math.round(255 * (0.62 - 0.38 * Math.max(-1, Math.min(k - 3, 9 - k, 1))));
+  };
+  return [f(0), f(8), f(4)];
+}
+/** The shimmer: each letter a little further round the rainbow, the whole wave moving with the clock. */
+export const partyTone = (i: number, now: number): RGB => hue((i * 24 - now * 0.36) % 360 + 360);
+
 // ── what a session is doing beside the conversation ──
 
 const sep = (): Seg => [`  ${ICON.sep}  `, C.faint];
@@ -3646,7 +3706,8 @@ export function prSegs(prs: PrLink[]): Seg[] {
   });
 }
 /** "14 files changed · 3 uncommitted · 2 ahead · fleet.ts demo.ts README.md +11": what it has changed, its checkout, then the newest file names, which are cut first. */
-export function changeSegs(edits: Side["edits"], git: GitState | undefined): Seg[] {
+export function changeSegs(edits: Side["edits"], git: GitState | undefined, tight = false): Seg[] {
+  const sep = (): Seg => (tight ? [` ${ICON.sep} `, C.faint] : [`  ${ICON.sep}  `, C.faint]);
   const out: Seg[] = [];
   if (edits.length) out.push([`${edits.length} file${edits.length === 1 ? "" : "s"} changed`, C.text]);
   if (git) {
@@ -3677,7 +3738,9 @@ function sideRows(b: Block, g: Grid, now: number): StackRow[] {
   const side = b.v.s.side;
   if (!side || !b.body) return [];
   const k = b.keep;
-  const has = sideHas(b);
+  const placed = sideHas(b);
+  // On a wide screen the facts that fit go to the column beside the conversation; only the rest are rows here.
+  const has = Object.fromEntries(Object.entries(placed).map(([key, on]) => [key, on && (!g.wide || !b.sideLeft || b.sideLeft.has(key as SideKey))])) as Record<SideKey, boolean>;
   const fit = (segs: Seg[]) => fitSegs(segs, g.measure);
   const rows: StackRow[] = [];
   if (k.trouble && has.trouble) rows.push({ icon: [ICON.failed, C.red], segs: fit(troubleSegs(side.fails)), age: [ago(now - side.fails[side.fails.length - 1].t), C.dim] });
@@ -3687,8 +3750,9 @@ function sideRows(b: Block, g: Grid, now: number): StackRow[] {
   return rows;
 }
 /** Take one side row away, when the block is showing it. */
-function sideOff(b: Block, key: SideKey): Change | undefined {
+function sideOff(b: Block, key: SideKey, anywhere = false): Change | undefined {
   if (!b.keep[key] || !sideHas(b)[key]) return undefined;
+  if (!anywhere && b.sideLeft && !b.sideLeft.has(key) && b.v.s.side) return undefined; // in the column beside the conversation it costs no row
   return change(() => (b.keep[key] = false), () => (b.keep[key] = true), () => !b.keep[key]);
 }
 
@@ -3765,7 +3829,25 @@ const taskListRows = (b: Block): number => {
   return list.shown.length + (list.more ? 1 : 0);
 };
 
-type Instrument = "ctx" | "key" | "figs";
+/** One fact in the column beside the conversation, under the instruments: a glyph, its words, and an age at the right edge. */
+type SideItem = { side: SideKey; icon: Seg; segs: Seg[]; age?: Seg };
+type Instrument = "ctx" | "key" | "figs" | SideItem;
+/** The side facts as short rows for that column, most wanted first: failures, each background command, each pull request, the changes. */
+function sideItems(b: Block, now: number): SideItem[] {
+  const side = b.v.s.side;
+  if (!side || !b.body) return [];
+  const k = b.keep;
+  const has = sideHas(b);
+  const out: SideItem[] = [];
+  if (k.trouble && has.trouble) {
+    const last = side.fails[side.fails.length - 1];
+    out.push({ side: "trouble", icon: [ICON.failed, C.red], segs: [[`${side.fails.length} failed`, C.red], [` ${ICON.sep} `, C.faint], [`${last.tool ? last.tool + ": " : ""}${last.text}`, C.dim]], age: [ago(now - last.t), C.dim] });
+  }
+  if (k.bgRow && has.bgRow) for (const x of side.bg) out.push({ side: "bgRow", icon: [ICON.background, C.cyan], segs: [[x.desc, C.dim]], age: [ago(now - x.started), C.text] });
+  if (k.prs && has.prs) for (const pr of side.prs.slice(0, PR_SHOWN)) out.push({ side: "prs", icon: [ICON.pr, C.text], segs: prSegs([pr]) });
+  if (k.changes && has.changes) out.push({ side: "changes", icon: [ICON.changes, C.dim], segs: changeSegs(side.edits, gitOf(b.v.s), true), age: side.edits.length ? [ago(now - side.edits[0].t), C.dim] : undefined });
+  return out;
+}
 /**
  * The instruments in the lane beside the left stack, from its first row: the context bar, its colour
  * key, and the figures. They never add a row: with a shorter stack the list is cut from the bottom.
@@ -3815,8 +3897,23 @@ interface Parts {
   roster: Thread[];
 }
 function partsOf(b: Block, g: Grid, now: number): Parts {
-  const stack = stackOf(b, g, now);
-  return { head: 1 + Math.max(1, Math.min(b.keep.question, b.question.length)), vitals: b.body && !g.wide && b.keep.ctx, stack, inst: instrumentsOf(b, g, stack.length), roster: rosterOf(b, now) };
+  const head = 1 + Math.max(1, Math.min(b.keep.question, b.question.length));
+  if (!g.wide) {
+    // Narrow: there is no column beside the conversation; every side fact is a row on the left.
+    b.sideLeft = undefined;
+    const stack = stackOf(b, g, now);
+    return { head, vitals: b.body && b.keep.ctx, stack, inst: instrumentsOf(b, g, stack.length), roster: rosterOf(b, now) };
+  }
+  const items = sideItems(b, now);
+  const groups = [...new Set(items.map((x) => x.side))];
+  // Put every side fact in the column beside the conversation; while there are more than its free rows, the least wanted group goes back to a row on the left.
+  for (let right = groups.length; ; right--) {
+    b.sideLeft = new Set(groups.slice(right));
+    const stack = stackOf(b, g, now);
+    const base = instrumentsOf(b, g, stack.length);
+    const mine = items.filter((x) => !b.sideLeft!.has(x.side));
+    if (mine.length <= stack.length - base.length || right === 0) return { head, vitals: b.body && !g.wide && b.keep.ctx, stack, inst: [...base, ...mine], roster: rosterOf(b, now) };
+  }
 }
 const rowsOfParts = (p: Parts) => p.head + (p.vitals ? 1 : 0) + Math.max(p.stack.length, p.inst.length) + p.roster.length;
 /** How many rows a block takes as it stands. */
@@ -3984,6 +4081,10 @@ const LADDER: { step: number; cut: "gaps" | ((b: Block) => Change | undefined) }
   { step: 13.5, cut: (b) => taskListTo(b, 0) }, // the task list goes, and the tasks row names the task in progress again
   { step: 14, cut: (b) => turnOff(b, "tasks") }, // the tasks row,
   { step: 14, cut: (b) => turnOff(b, "ctx") }, // then the context row
+  { step: 14.6, cut: (b) => sideOff(b, "changes", true) }, // side facts still shown in the column, least wanted first
+  { step: 14.7, cut: (b) => sideOff(b, "prs", true) },
+  { step: 14.8, cut: (b) => sideOff(b, "bgRow", true) },
+  { step: 14.9, cut: (b) => sideOff(b, "trouble", true) },
   { step: 15, cut: (b) => turnOff(b, "roster") }, // workflow rows and the folded agents line: now a small far card
   { step: 16, cut: (b) => (needsYou(b) ? undefined : foldAway(b)) }, // whole sessions, never one that needs you
   // Past the design's ladder, for a screen too small even for that. A question shown whole in focus goes back to three rows, and gets back what fits.
@@ -4118,7 +4219,9 @@ function headRows(b: Block, p: Paint): Row[] {
   const upper = s.name.toUpperCase();
   const spaced = [...upper].join(" ");
   const title = cutTo(g.icon + width(spaced) - 1 <= limit ? spaced : upper, limit - g.icon + 1);
-  r1.put(g.icon, title, receded ? C.text : C.white, true);
+  const party = partyOn(s.sid, now);
+  if (party) [...title].forEach((ch, i) => r1.put(g.icon + i, ch, ch === " " ? C.white : partyTone(i, now), true));
+  else r1.put(g.icon, title, receded ? C.text : C.white, true);
   const folders = s.cwd.replace(os.homedir(), "~").split("/").filter(Boolean);
   const branch = s.mains.map((m) => m.branch).find(Boolean);
   const at = branch && branch !== "HEAD" ? ` ${ICON.at} ${branch}` : "";
@@ -4132,7 +4235,13 @@ function headRows(b: Block, p: Paint): Row[] {
   const withTotals = (x: Seg[]): Seg[][] => (totals ? [[...x, dot, [totals, dim]], x] : [x]);
   const places: Seg[][] = where ? [...withTotals([[where, dim], dot, [kind, dim]]), [[where, dim]], [[folders.slice(-1).join("") + at, dim]]] : withTotals([[kind, dim]]);
   const place = g.small ? undefined : places.find((x) => g.icon + width(title) + 3 + segsWidth(x) - 1 <= limit);
-  if (place) r1.segsr(limit, place);
+  if (party) {
+    // While it celebrates, what it finished stands where the place was, in the same colours.
+    const text = `${ICON.star} ${party.text} ${ICON.star}`;
+    const end = limit;
+    const from = end - width(text) + 1;
+    if (from > g.icon + width(title) + 2) [...text].forEach((ch, i) => r1.put(from + i, ch, partyTone(i + 7, now), true));
+  } else if (place) r1.segsr(limit, place);
   r1.segs(stateAt, stateSegs);
 
   const subW = g.textEnd - g.icon + 1;
@@ -4318,6 +4427,12 @@ function drawBlock(b: Block, p: Paint): { rows: string[]; head: number } {
       }
       if (ctx.runway) r.segsr(g.figEnd, [ctx.runway]);
     } else if (inst === "figs") r.segs(g.lane, figures[0]);
+    else if (typeof inst === "object") {
+      const ageW = inst.age ? width(inst.age[0]) + 1 : 0;
+      r.segs(g.lane, [inst.icon]);
+      r.segs(g.lane + 2, fitSegs(inst.segs, g.figEnd - g.lane - 1 - ageW));
+      if (inst.age) r.segsr(g.figEnd, [inst.age]);
+    }
     if (inst && !item) {
       // No left stack: the context row still shows, with the key and the figures on its left side.
       const room = g.textEnd - g.icon + 1;
@@ -5426,6 +5541,8 @@ function refresh() {
   const rings = newAsks(needing, askedAt, asks).length + newStalls(stalledNow, facts.flatMap((x) => stallMarks(x.s, x.f, stallOf(x.s, x.f, now)))).length;
   if (opt.bell && !opt.once) process.stdout.write("\x07".repeat(rings));
   noteScan(sessions, now);
+  const partied = noteParties(sessions, now);
+  if (opt.bell && !opt.once && partied.length) process.stdout.write("\x07");
 }
 
 if (import.meta.main) {
@@ -5436,6 +5553,8 @@ if (import.meta.main) {
   }
 
   seen.at = Number(process.env.FLEET_SEEN) || clock(); // FLEET_SEEN (test only) starts the mark in the past
+  const party = /^([\w-]+)=(.{1,60})$/.exec(process.env.FLEET_PARTY ?? ""); // FLEET_PARTY (demo only): "session id=text" celebrates from launch
+  if (party) parties.set(party[1], { text: safeLine(party[2]), at: clock() });
   focusSid = process.env.FLEET_FOCUS || null; // FLEET_FOCUS (demo only): start focused on this session, as a click on it would
   if (!process.stdout.isTTY) opt.once = true; // output to a file or a pipe: one frame, not screen codes for ever
   if (opt.once) {
@@ -5508,6 +5627,10 @@ if (import.meta.main) {
     if (frame % 60 === 0) onScreen = undefined; // a full repaint once a minute (without clearing, so nothing flickers)
     draw();
   }, 1000);
+  // While something celebrates, its shimmer moves eight times a second; only the rows that change are written.
+  setInterval(() => {
+    if (parties.size && [...parties.values()].some((p) => clock() - p.at <= PARTY_MS)) draw();
+  }, 125);
   out.on("resize", () => {
     clear();
     draw();
