@@ -8,6 +8,8 @@
   "scripts": {
     "start": "bun fleet.ts",
     "demo": "bun demo.ts",
-    "screenshots": "COLUMNS=150 LINES=44 bun demo.ts --once | python3 tools/ansi2svg.py > docs/screenshot.svg && COLUMNS=150 LINES=30 bun demo.ts --once --mode far | python3 tools/ansi2svg.py > docs/screenshot-far.svg"
+    "test": "bun test",
+    "check": "bun test && tools/check-frames",
+    "screenshots": "export TZ=UTC FLEET_NOW=1791935482000 COLUMNS=150 && LINES=40 bun demo.ts --once --pair --plain --runway --account current | python3 tools/ansi2svg.py > docs/screenshot.svg && LINES=34 bun demo.ts --once --pair --plain --runway --mode far --account current | python3 tools/ansi2svg.py > docs/screenshot-far.svg"
   }
 }
