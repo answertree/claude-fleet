@@ -2730,7 +2730,7 @@ function oldHeader(sessions: Session[], W: number, now: number, since: number): 
   const shown = fit(stats, Math.max(0, W - width(left) - HS - 2 - clockText.length - 2));
   const out = [
     // Amber is spent on the one thing that needs you; the rest of the line stays in text colour.
-    fg(C.cyan, bold(left)) + bold(fg(C.amber, shown.slice(0, waiting.length))) + fg(C.text, shown.slice(waiting.length)) + " " + spark(headBuckets, Math.max(...headBuckets), ...RAMP.fleet) + "  " + fg(C.dim, clockText) + " ",
+    fg(C.cyan, bold(left)) + (waiting ? bold(fg(C.amber, shown.slice(0, waiting.length))) : "") + fg(C.text, shown.slice(waiting.length)) + " " + spark(headBuckets, Math.max(...headBuckets), ...RAMP.fleet) + "  " + fg(C.dim, clockText) + " ",
     machineRow(W),
   ];
   if (opt.usage) {
@@ -2952,7 +2952,6 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
     const branch = s.mains.map((m) => m.branch).find(Boolean);
     const home = os.homedir();
     const where = s.cwd.replace(home, "~").split("/").slice(-2).join("/") + (branch && branch !== "HEAD" ? ` ${ICON.at} ${branch}` : "");
-    const busyNow = s.status === "busy";
     const stalled = v.state === "stalled";
     // The lead glyph is the state: ▲ needs you, ◐ stalled, ● working, ▸ your turn, ○ idle, ✓ finished.
     const state = STATE[v.state];
