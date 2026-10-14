@@ -4956,6 +4956,8 @@ describe("key w: the phone page", () => {
   test("the server answers only the link it made, only to GET, and only for the page and its data", async () => {
     process.env.FLEET_WEB_HOST = "127.0.0.1";
     process.env.FLEET_WEB_PORT = "4877";
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-web-"));
+    process.env.FLEET_WEB_TOKEN_FILE = path.join(dir, "web-token");
     const web = F.startWeb(() => [], () => Date.now());
     try {
       const url = new URL(web.url!);
@@ -4970,10 +4972,60 @@ describe("key w: the phone page", () => {
       const state = await (await fetch(`${base}/api/state?t=${token}`)).json();
       expect(state.sessions).toEqual([]);
       expect(typeof state.machine.cpu).toBe("number");
+      // The secret is kept, private, so the link is the same next run; the icon needs no secret.
+      expect(F.webToken()).toBe(token);
+      expect(fs.statSync(process.env.FLEET_WEB_TOKEN_FILE!).mode & 0o777).toBe(0o600);
+      const icon = await fetch(`${base}/apple-touch-icon.png`);
+      expect([icon.status, icon.headers.get("content-type")]).toEqual([200, "image/png"]);
+      // Installed as an app: the manifest opens at the link (so it needs the secret itself), and the page points at it.
+      expect((await fetch(`${base}/manifest.webmanifest`)).status).toBe(403);
+      const manifest = await (await fetch(`${base}/manifest.webmanifest?t=${token}`)).json();
+      expect([manifest.start_url, manifest.display]).toEqual([`/?t=${token}`, "standalone"]);
+      expect(await (await fetch(web.url!)).text()).toContain(`href="/manifest.webmanifest?t=${token}"`);
+      for (const [p, n] of [["/icon-192.png", 192], ["/icon-512.png", 512]] as const) expect((await (await fetch(base + p)).arrayBuffer()).byteLength > 0 && F.webIcon(n).readUInt32BE(16)).toBe(n);
     } finally {
       web.server?.stop();
+      delete process.env.FLEET_WEB_TOKEN_FILE;
       delete process.env.FLEET_WEB_HOST;
       delete process.env.FLEET_WEB_PORT;
+    }
+  });
+
+  test("a message is pasted as text only: no escape codes or other control characters, newlines kept, length capped", () => {
+    expect(F.cleanMessage("  yes\r\ngo ahead\x1b[2J\x07\u009b31m\u202e  ")).toBe("yes\ngo ahead[2J31m");
+    expect(F.cleanMessage("\x1b\x00 \n")).toBe("");
+    expect(F.cleanMessage("x".repeat(5000)).length).toBe(4000);
+  });
+
+  test("only the page sends, with the secret, to a session that exists", async () => {
+    process.env.FLEET_WEB_HOST = "127.0.0.1";
+    process.env.FLEET_WEB_PORT = "4977";
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-send-"));
+    process.env.FLEET_WEB_TOKEN_FILE = path.join(dir, "web-token");
+    for (const k of ["server", "url", "error"] as const) delete (F.web as any)[k];
+    const sent: [string, string][] = [];
+    F.web.send = async (s, text) => (sent.push([s.sid, text]), { ok: true, via: "test" });
+    const session = { sid: "s1" } as any;
+    const web = F.startWeb(() => [session], () => Date.now());
+    try {
+      const url = new URL(web.url!);
+      const token = url.searchParams.get("t")!;
+      const api = `${url.protocol}//${url.host}/api/send`;
+      const post = (q: string, body: unknown, headers: Record<string, string> = {}) => fetch(api + q, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+      expect((await post("", { sid: "s1", text: "hi" })).status).toBe(403);
+      expect((await post(`?t=${token}`, { sid: "s1", text: "hi" }, { origin: "https://evil.example" })).status).toBe(403);
+      expect((await fetch(api + `?t=${token}`, { method: "POST", headers: { "content-type": "text/plain" }, body: "{}" })).status).toBe(403);
+      expect((await post(`?t=${token}`, { sid: "nobody", text: "hi" })).status).toBe(404);
+      expect(sent).toEqual([]);
+      const ok = await post(`?t=${token}`, { sid: "s1", text: "go ahead" }, { origin: `${url.protocol}//${url.host}` });
+      expect([ok.status, await ok.json()]).toEqual([200, { ok: true, via: "test" }]);
+      expect(sent).toEqual([["s1", "go ahead"]]);
+    } finally {
+      web.server?.stop();
+      delete F.web.send;
+      delete process.env.FLEET_WEB_HOST;
+      delete process.env.FLEET_WEB_PORT;
+      delete process.env.FLEET_WEB_TOKEN_FILE;
     }
   });
 

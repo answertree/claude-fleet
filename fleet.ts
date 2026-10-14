@@ -15,6 +15,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { StringDecoder } from "node:string_decoder";
+import { deflateSync } from "node:zlib";
 import { spawn, spawnSync } from "node:child_process";
 
 /**
@@ -5750,8 +5751,8 @@ export function qrRows(text: string, margin = 2): string[] | undefined {
 }
 
 // ───────────────────────── the web dashboard ─────────────────────────
-// Key w serves a page for your phone: the same sessions, as cards. It is read-only, it answers only a
-// link that carries a secret made fresh each time fleet starts, and it listens on this Mac's Tailscale
+// Key w serves a page for your phone: the same sessions, as cards, each with a box to type a message into it.
+// It answers only a link that carries a secret kept in ~/.config/claude-fleet/web-token, and it listens on this Mac's Tailscale
 // address when it has one (reachable from your own devices, encrypted), else on this Mac alone.
 
 const hexOf = (c: RGB) => "#" + c.map((v) => v.toString(16).padStart(2, "0")).join("");
@@ -5823,14 +5824,20 @@ export const WEB_PAGE = `<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0d1117">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="color-scheme" content="dark">
+<link rel="manifest" href="/manifest.webmanifest?t=__TOKEN__">
 <meta name="referrer" content="no-referrer">
+<meta name="apple-mobile-web-app-title" content="Fleet">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
 <title>Claude Fleet</title>
 <style>
 :root{--bg:#0d1117;--card:#151b23;--line:#262d37;--text:#c6cdd7;--dim:#6b7380;--faint:#3a404a;--white:#f5f7fa;--amber:#e5b544;--green:#50c878;--red:#f0625c;--cyan:#56cdd6;--purple:#be94ff;--blue:#61aaff}
 *{box-sizing:border-box;min-width:0}html,body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;-webkit-text-size-adjust:100%;overflow-x:hidden;overflow-wrap:anywhere}
 main,header,.gauges,#quip{max-width:720px;margin-left:auto;margin-right:auto}
-body{padding:max(12px,env(safe-area-inset-top)) 12px calc(24px + env(safe-area-inset-bottom))}
+body{padding:calc(env(safe-area-inset-top) + 18px) max(12px,env(safe-area-inset-right)) calc(24px + env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left))}
 header{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:6px}
 h1{font-size:15px;margin:0;color:var(--cyan);letter-spacing:.08em}h1 b{color:var(--white)}
 #clock{color:var(--dim);font-size:12px}
@@ -5857,6 +5864,9 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--dim);font-size:12px;li
 @keyframes fall{to{transform:translateY(260px) rotate(540deg)}}
 .party{color:var(--amber);font-weight:700;margin-top:4px}
 .empty{color:var(--dim);text-align:center;margin:40px 0}
+.send{display:flex;gap:6px;margin-top:6px;align-items:flex-end}.send textarea{flex:1;min-height:42px;max-height:40vh;resize:vertical;background:var(--bg);color:var(--white);border:1px solid var(--line);border-radius:8px;padding:8px;font:16px/1.35 ui-monospace,Menlo,monospace}
+.send button{background:var(--cyan);color:#0d1117;border:0;border-radius:8px;padding:10px 14px;font:700 14px ui-monospace,Menlo,monospace}.send button:disabled{opacity:.5}
+.sent{font-size:12px;margin-top:4px;color:var(--dim)}.sent.ok{color:var(--green)}.sent.err{color:var(--red)}
 </style></head><body>
 <header><h1>◆ CLAUDE <b>FLEET</b></h1><span id="clock"></span></header>
 <div id="quip">Waking the fleet…</div>
@@ -5896,9 +5906,27 @@ function card(s) {
   if (s.tasks && s.tasks.total) { const d = el("details", "tasks"); d.append(el("summary", "", "tasks " + s.tasks.done + "/" + s.tasks.total + " done")); for (const t of s.tasks.open) d.append(el("div", "st-" + t.status, (t.status === "in_progress" ? "◐ " : "○ ") + t.text + (t.since ? " · " + t.since : "") + (t.blocked ? " · blocked" : ""))); c.append(d); }
   if (s.agents.length) { const d = el("details", "agents"); d.append(el("summary", "", s.agents.length + (s.agents.length === 1 ? " agent" : " agents"))); for (const a of s.agents) d.append(el("div", "", (a.state === "active" ? "⠋ " : a.state === "tool" ? "◐ " : "○ ") + a.label + " — " + a.doing + " · " + a.ago)); c.append(d); }
   if (s.talk.length) { const d = el("details", "talk"); if (s.state === "needs") d.open = true; d.append(el("summary", "", "conversation")); for (const m of s.talk) { const p = el("p", m.who, (m.who === "you" ? "▸ " : "◆ ") + m.text); p.append(el("span", "", m.ago)); d.append(p); } c.append(d); }
+  const m = el("details", "message"); if (s.state === "needs") m.open = true; m.append(el("summary", "", s.state === "needs" ? "answer" : "send a message"));
+  const f = el("form", "send"); const ta = el("textarea"); ta.rows = 2; ta.placeholder = s.state === "needs" ? "your answer…" : "type to " + s.name + "…"; ta.value = drafts.get(s.sid) || ""; ta.dataset.sid = s.sid;
+  ta.addEventListener("input", () => drafts.set(s.sid, ta.value));
+  const go = el("button", "", "Send"); go.type = "submit"; f.append(ta, go); m.append(f);
+  const note = el("div", "sent" + (notes.get(s.sid)?.cls ? " " + notes.get(s.sid).cls : ""), notes.get(s.sid)?.text || ""); m.append(note);
+  f.addEventListener("submit", async (e) => {
+    e.preventDefault(); const text = ta.value.trim(); if (!text) return;
+    go.disabled = true; note.className = "sent"; note.textContent = "sending…";
+    try {
+      const r = await fetch("api/send?t=" + encodeURIComponent(token), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sid: s.sid, text }) });
+      const d = await r.json().catch(() => ({ ok: false, error: "fleet said " + r.status }));
+      if (d.ok) { drafts.delete(s.sid); ta.value = ""; notes.set(s.sid, { cls: "ok", text: "sent ✓ " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) }); }
+      else notes.set(s.sid, { cls: "err", text: "not sent: " + (d.error || "unknown") });
+    } catch { notes.set(s.sid, { cls: "err", text: "not sent: can't reach fleet" }); }
+    const n = notes.get(s.sid); note.className = "sent " + n.cls; note.textContent = n.text; go.disabled = false; ta.blur(); tick();
+  });
+  c.append(m);
   return c;
 }
 let last = 0, open = new Map();
+const drafts = new Map(), notes = new Map();
 async function tick() {
   try {
     const r = await fetch("api/state?t=" + encodeURIComponent(token), { cache: "no-store" });
@@ -5908,11 +5936,13 @@ async function tick() {
     const g = document.getElementById("gauges"); g.replaceChildren(gauge("cpu", d.machine.cpu), gauge("mem", d.machine.mem, d.machine.memText));
     if (d.account) for (const l of d.account.limits) g.append(gauge(l.label, l.pct, l.resets));
     const cards = document.getElementById("cards");
+    // Never redraw under your thumbs: while you are typing a message the cards hold still.
+    if (document.activeElement && document.activeElement.tagName === "TEXTAREA" && cards.contains(document.activeElement)) return;
     for (const det of cards.querySelectorAll("details")) open.set(det.closest(".card")?.dataset.sid + det.className, det.open);
     cards.replaceChildren(...d.sessions.map((s) => { const c = card(s); c.dataset.sid = s.sid; for (const det of c.querySelectorAll("details")) { const k = s.sid + det.className; if (open.has(k)) det.open = open.get(k); } return c; }));
     if (!d.sessions.length) cards.replaceChildren(el("div", "empty", "No sessions working and nothing waiting on you."));
     document.getElementById("clock").textContent = new Date(d.now).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    document.getElementById("foot").textContent = (d.hidden ? d.hidden + " idle or finished not shown · " : "") + "read-only · refreshes every 2s";
+    document.getElementById("foot").textContent = (d.hidden ? d.hidden + " idle or finished not shown · " : "") + "refreshes every 2s";
     document.title = (d.counts.needs ? "▲" + d.counts.needs + " " : "") + "Claude Fleet";
   } catch (e) { document.getElementById("foot").replaceChildren(el("span", "stale", "can't reach fleet — is it still running?")); }
 }
@@ -5920,7 +5950,7 @@ tick(); setInterval(tick, 2000);
 </script></body></html>`;
 
 /** The web server, once key w has started it: where it listens and the link to open. */
-export const web: { url?: string; host?: string; onTailnet?: boolean; server?: { stop: () => void }; error?: string } = {};
+export const web: { url?: string; host?: string; onTailnet?: boolean; server?: { stop: () => void }; error?: string; send?: typeof sendToSession } = {};
 const sameToken = (a: string, b: string) => a.length === b.length && crypto.timingSafeEqual ? (() => { try { return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b)); } catch { return false; } })() : a === b;
 /** This Mac's Tailscale IPv4 address, when it has one. */
 function tailnetAddress(): string | undefined {
@@ -5933,23 +5963,197 @@ function tailnetAddress(): string | undefined {
     return undefined;
   }
 }
+/** Where the page's secret is kept: made once, readable only by you, so the link (and a home-screen icon) stays the same. Delete it to change the link. */
+export const webTokenPath = () => process.env.FLEET_WEB_TOKEN_FILE || path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "claude-fleet", "web-token");
+export function webToken(): string {
+  const file = webTokenPath();
+  try {
+    const t = fs.readFileSync(file, "utf8").trim();
+    if (/^[A-Za-z0-9_-]{24,}$/.test(t)) {
+      fs.chmodSync(file, 0o600);
+      return t;
+    }
+  } catch {}
+  const t = Buffer.from(crypto.getRandomValues(new Uint8Array(18))).toString("base64url");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, t + "\n", { mode: 0o600 });
+  return t;
+}
+/** The home-screen icon at `n` pixels: the fleet diamond, a cyan ring around a white core on the page's dark ground, as a PNG. Kept well inside the middle 80% so a maskable crop never clips it. */
+const iconPngs = new Map<number, Buffer>();
+export function webIcon(n: number): Buffer {
+  const hit = iconPngs.get(n);
+  if (hit) return hit;
+  const bg = [13, 17, 23];
+  const colourAt = (x: number, y: number) => {
+    const d = (Math.abs(x - n / 2) + Math.abs(y - n / 2)) / n; // diamond distance, as a share of the size
+    return d < 0.1 ? [245, 247, 250] : d < 0.16 ? bg : d < 0.3 ? [86, 205, 214] : bg;
+  };
+  const raw = Buffer.alloc((n * 3 + 1) * n);
+  const S = 4; // samples per side, so the diagonal edges are smooth
+  for (let y = 0; y < n; y++)
+    for (let x = 0; x < n; x++) {
+      const sum = [0, 0, 0];
+      for (let sy = 0; sy < S; sy++)
+        for (let sx = 0; sx < S; sx++) {
+          const c = colourAt(x + (sx + 0.5) / S, y + (sy + 0.5) / S);
+          for (let i = 0; i < 3; i++) sum[i] += c[i];
+        }
+      raw.set(sum.map((v) => Math.round(v / (S * S))), y * (n * 3 + 1) + 1 + x * 3);
+    }
+  const table = Array.from({ length: 256 }, (_, k) => {
+    let c = k;
+    for (let i = 0; i < 8; i++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  });
+  const crc = (b: Buffer) => {
+    let c = 0xffffffff;
+    for (const x of b) c = table[(c ^ x) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type: string, data: Buffer) => {
+    const body = Buffer.concat([Buffer.from(type), data]);
+    const out = Buffer.alloc(body.length + 8);
+    out.writeUInt32BE(data.length, 0);
+    body.copy(out, 4);
+    out.writeUInt32BE(crc(body), body.length + 4);
+    return out;
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(n, 0);
+  ihdr.writeUInt32BE(n, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 2;
+  const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(raw, { level: 9 })), chunk("IEND", Buffer.alloc(0))]);
+  iconPngs.set(n, png);
+  return png;
+}
+const ICON_SIZES: Record<string, number> = { "/apple-touch-icon.png": 180, "/apple-touch-icon-precomposed.png": 180, "/favicon.ico": 32, "/icon-192.png": 192, "/icon-512.png": 512 };
+/** The web app manifest. It carries the secret in its start address, so it is served only to a request that has the link. */
+export const webManifest = (token: string) => ({
+  name: "Claude Fleet",
+  short_name: "Fleet",
+  description: "Every Claude Code session on your Mac, at a glance.",
+  start_url: `/?t=${token}`,
+  scope: "/",
+  display: "standalone",
+  orientation: "portrait",
+  background_color: "#0d1117",
+  theme_color: "#0d1117",
+  icons: [
+    { src: "/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
+    { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
+    { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
+  ],
+});
+
+/** A message from the page made safe to paste into a terminal: no control characters but newlines and tabs, so it cannot carry escape codes; at most 4000 characters. */
+export const cleanMessage = (text: string): string =>
+  text
+    .replace(/\r\n?/g, "\n")
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g, "")
+    .trim()
+    .slice(0, 4000);
+const tmuxCmd = () => "tmux";
+const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** The tmux pane a session's process runs in, on your usual tmux server, if it runs in one. */
+function paneOf(pid: number): string | undefined {
+  const tty = spawnSync("ps", ["-o", "tty=", "-p", String(pid)], { encoding: "utf8", timeout: 3000 }).stdout?.trim();
+  if (!tty || tty.startsWith("?")) return undefined;
+  const panes = spawnSync(tmuxCmd(), ["list-panes", "-a", "-F", "#{pane_tty} #{pane_id}"], { encoding: "utf8", timeout: 3000 }).stdout ?? "";
+  return panes.split("\n").map((l) => l.split(" ")).find(([t]) => t === `/dev/${tty}` || t === tty)?.[1];
+}
+/** Paste `text` into a tmux pane as one bracketed paste (so its lines stay one message), then press Enter. */
+function pasteInto(server: string[], pane: string, text: string): boolean {
+  const load = spawnSync(tmuxCmd(), [...server, "load-buffer", "-b", "fleet-message", "-"], { input: text, timeout: 3000 });
+  const paste = load.status === 0 && spawnSync(tmuxCmd(), [...server, "paste-buffer", "-p", "-d", "-b", "fleet-message", "-t", pane], { timeout: 3000 }).status === 0;
+  return paste && spawnSync(tmuxCmd(), [...server, "send-keys", "-t", pane, "Enter"], { timeout: 3000 }).status === 0;
+}
+let sendChain: Promise<unknown> = Promise.resolve();
+/**
+ * Type a message into a session, as if you had typed it there. A background session is opened with `claude attach` in
+ * a hidden tmux, the message pasted and sent, and the attach closed (the session keeps running). A session running in
+ * a tmux pane gets it pasted into that pane. Anything else cannot be reached. One message at a time.
+ */
+export function sendToSession(s: Session, raw: string): Promise<{ ok: boolean; via?: string; error?: string }> {
+  const text = cleanMessage(raw);
+  const run = async () => {
+    if (!text) return { ok: false, error: "nothing to send" };
+    if (spawnSync(tmuxCmd(), ["-V"], { timeout: 3000 }).status !== 0) return { ok: false, error: "sending needs tmux, which is not installed" };
+    if (s.jobId) {
+      const server = ["-L", `fleet-send-${process.pid}`];
+      spawnSync(tmuxCmd(), [...server, "kill-server"], { timeout: 3000 });
+      const attach = process.env.FLEET_ATTACH_CMD || "claude";
+      if (spawnSync(tmuxCmd(), [...server, "new-session", "-d", "-x", "120", "-y", "40", attach, "attach", s.jobId], { timeout: 5000 }).status !== 0) return { ok: false, error: "could not open the session" };
+      try {
+        // Ready once the input line is drawn and the screen has stopped changing.
+        let last = "";
+        let ready = false;
+        for (let i = 0; i < 60 && !ready; i++) {
+          await pause(250);
+          const screen = spawnSync(tmuxCmd(), [...server, "capture-pane", "-p"], { encoding: "utf8", timeout: 3000 }).stdout ?? "";
+          ready = /^❯/m.test(screen) && screen === last;
+          last = screen;
+        }
+        if (!ready) return { ok: false, error: "the session did not open in time" };
+        if (!pasteInto(server, "0", text)) return { ok: false, error: "could not type into the session" };
+        await pause(1000); // let it take the message before the attach closes
+        return { ok: true, via: "attach" };
+      } finally {
+        spawnSync(tmuxCmd(), [...server, "kill-server"], { timeout: 3000 });
+      }
+    }
+    const pane = paneOf(s.pid);
+    if (!pane) return { ok: false, error: "this session is not a background session or in tmux, so it cannot be reached from here" };
+    return pasteInto([], pane, text) ? { ok: true, via: "pane" } : { ok: false, error: "could not type into its tmux pane" };
+  };
+  const next = sendChain.then(run, run);
+  sendChain = next.catch(() => {});
+  return next;
+}
+
 /** Start serving the page (once). Every request must carry the secret; anything but the page and its data is a 404. */
 export function startWeb(getSessions: () => Session[], now: () => number = clock): typeof web {
   if (web.server || web.error) return web;
-  const token = Buffer.from(crypto.getRandomValues(new Uint8Array(18))).toString("base64url");
+  let token: string;
+  try {
+    token = webToken();
+  } catch (e) {
+    web.error = `could not keep the page's secret in ${webTokenPath()}: ${(e as Error).message}`;
+    return web;
+  }
   const tail = tailnetAddress();
   const host = tail ?? "127.0.0.1";
-  const headers = { "cache-control": "no-store", "referrer-policy": "no-referrer", "x-frame-options": "DENY", "x-content-type-options": "nosniff", "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" };
+  const headers = { "cache-control": "no-store", "referrer-policy": "no-referrer", "x-frame-options": "DENY", "x-content-type-options": "nosniff", "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" };
   for (let port = Number(process.env.FLEET_WEB_PORT) || 4777, tries = 0; tries < 20; port++, tries++) {
     try {
       const server = Bun.serve({
         hostname: host,
         port,
-        fetch(req) {
+        async fetch(req) {
           const url = new URL(req.url);
-          if (req.method !== "GET") return new Response("read-only", { status: 405, headers });
+          if (req.method === "POST" && url.pathname === "/api/send") {
+            if (!sameToken(url.searchParams.get("t") ?? "", token)) return new Response("not without the link fleet showed you", { status: 403, headers });
+            // Only the page itself may send: another site's form or script carries its own origin, or the wrong type.
+            const origin = req.headers.get("origin");
+            if ((origin && origin !== `${url.protocol}//${url.host}`) || !req.headers.get("content-type")?.startsWith("application/json")) return new Response("not from here", { status: 403, headers });
+            let body: { sid?: unknown; text?: unknown };
+            try {
+              body = await req.json();
+            } catch {
+              return new Response("bad message", { status: 400, headers });
+            }
+            const target = getSessions().find((x) => x.sid === body.sid);
+            if (!target || typeof body.text !== "string") return Response.json({ ok: false, error: "no such session" }, { status: 404, headers });
+            const r = await (web.send ?? sendToSession)(target, body.text);
+            return Response.json(r, { status: r.ok ? 200 : 409, headers });
+          }
+          if (req.method !== "GET") return new Response("not allowed", { status: 405, headers });
+          // The icon is the only thing served without the secret: phones fetch it without the link's query.
+          if (ICON_SIZES[url.pathname]) return new Response(webIcon(ICON_SIZES[url.pathname]), { headers: { ...headers, "content-type": "image/png", "cache-control": "max-age=86400" } });
           if (!sameToken(url.searchParams.get("t") ?? "", token)) return new Response("not without the link fleet showed you", { status: 403, headers });
-          if (url.pathname === "/") return new Response(WEB_PAGE, { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
+          if (url.pathname === "/manifest.webmanifest") return Response.json(webManifest(token), { headers: { ...headers, "content-type": "application/manifest+json" } });
+          if (url.pathname === "/") return new Response(WEB_PAGE.replace("__TOKEN__", token), { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
           if (url.pathname === "/api/state") return Response.json(webState(getSessions(), now()), { headers });
           return new Response("not found", { status: 404, headers });
         },
@@ -5974,7 +6178,8 @@ export function webScreen(cols: number, rows: number): string[] {
     out.push("", fg(C.text, "  " + web.url));
     out.push(
       fg(C.dim, web.onTailnet ? "  On your tailnet: any of your Tailscale devices can open it, nothing else can." : "  No Tailscale here, so it is open on this Mac only (127.0.0.1)."),
-      fg(C.dim, "  The link is the key: it is new each time fleet starts, and the page is read-only."),
+      fg(C.dim, "  The link is the key and stays the same, so add it to your home screen. It can type messages into your"),
+      fg(C.dim, "  sessions, so keep it to yourself. Delete ~/.config/claude-fleet/web-token to change it."),
     );
   }
   while (out.length < rows - 1) out.push("");

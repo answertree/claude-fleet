@@ -138,13 +138,14 @@ Capturing clicks means a plain drag no longer selects text. Hold Shift (Option i
 
 ## On your phone
 
-Press `w` and the dashboard shows a QR code; scan it and the same sessions open as a page on your phone, refreshing every two seconds: who needs you (glowing), what each is doing, context, failures, background commands, pull requests with their CI and deploys, tasks, agents and the last few messages, with confetti when something merges. Add it to your home screen and it opens like an app.
+Press `w` and the dashboard shows a QR code; scan it and the same sessions open as a page on your phone that can also message them, refreshing every two seconds: who needs you (glowing), what each is doing, context, failures, background commands, pull requests with their CI and deploys, tasks, agents and the last few messages, with confetti when something merges. Add it to your home screen and it opens like an app.
 
 It is built to be safe to leave running:
 
 - **Your devices only.** It listens on this Mac's Tailscale address when there is one, so only your own devices on your tailnet can reach it, over Tailscale's encryption. Without Tailscale it listens on this Mac alone (127.0.0.1).
-- **The link is the key.** Every request must carry a random secret that is made fresh each time fleet starts; without it the answer is 403.
-- **Read-only.** It serves the page and its data and nothing else; it cannot type into a session. The page shows prompts and replies, so treat the link like a password.
+- **The link is the key.** Every request must carry a random secret (the `?t=` in the link); without it the answer is 403. The secret is made once and kept in `~/.config/claude-fleet/web-token`, readable only by you, so the link stays the same and a home-screen icon keeps working. Delete that file to change the link; the old one then stops working.
+- **It can talk to your sessions.** Each card has a box to send a message, as if you had typed it there (open already on a session that needs you). A background session is reached by opening `claude attach` in a hidden tmux, pasting the message and closing it again; a session running in a tmux pane gets it pasted into that pane; any other session cannot be reached. It needs `tmux`. Messages are sent one at a time, stripped of control characters, and capped at 4000 characters; only the page itself can send (another site's request is refused). Since the link can type into Claude, keep it like a password.
+- Otherwise it serves only the page, its data and its icons.
 - It stops when fleet quits.
 
 ## Deploys
@@ -263,6 +264,7 @@ These environment variables exist for tests and screenshots only:
 | `FLEET_DEPLOY_FIXTURE` | Take each deploy target's revision from this JSON file (URL to revision) instead of asking the URL. |
 | `FLEET_ATTACH_CMD` | Run this instead of `claude` when `r` opens a session (tests use `true`). |
 | `FLEET_WEB_HOST` | Serve the phone page on this address instead of the Tailscale one (or 127.0.0.1). Only for testing: anyone who can reach the address and has the link can read your sessions. |
+| `FLEET_WEB_TOKEN_FILE` | Where the phone page's secret is kept (default `~/.config/claude-fleet/web-token`). |
 | `FLEET_WEB_PORT` | The first port to try for the phone page (default 4777). |
 | `FLEET_PARTY` | Start a celebration at launch, as `session id=what it finished`, so a single frame can show one (the demo's `--party`). |
 | `FLEET_FOCUS` | Start focused on the session with this id, so a single frame can show focus (the demo's `--focus`). |
