@@ -200,9 +200,9 @@ describe("graphs hold still", () => {
   });
 
   test("a whole frame at now and at now + 1s differs only in its clock, in every mode", () => {
-    // Pick a second in which no strip on the screen closes a bar (today's layout uses 25, 58 and 110 bars at 150 columns).
+    // Pick a second in which no strip on the screen closes a bar (at 150 columns the lane has 30 bars; today's header and far cards use 25, 58 and 110).
     let now = NOW;
-    const sameBars = (t: number) => [25, 58, 110].every((n) => F.timeWindow(t, WINDOW, n).first === F.timeWindow(t + 1000, WINDOW, n).first);
+    const sameBars = (t: number) => [25, 30, 58, 110].every((n) => F.timeWindow(t, WINDOW, n).first === F.timeWindow(t + 1000, WINDOW, n).first);
     while (!sameBars(now)) now += 1000;
 
     const half = 30_000; // every age on screen sits half a minute from its next tick
@@ -219,7 +219,7 @@ describe("graphs hold still", () => {
       for (const mode of ["detail", "compact", "far"] as F.Mode[]) {
         F.opt.mode = mode;
         const a = frameAt(now);
-        expect(a).toContain(mode === "far" ? "F L A K Y" : "flaky test hunt");
+        expect(a).toContain(mode === "compact" ? "flaky test hunt" : "F L A K Y");
         expect(frameAt(now + 1000)).toBe(a);
         // Sanity: the test can see movement. Half an hour later every bar has emptied.
         expect(frameAt(now + 31 * MIN)).not.toBe(a);
@@ -983,7 +983,7 @@ describe("stall watch", () => {
       expect(views.map((v) => [v.s.sid, v.state, v.stall.count])).toEqual([["asks", "needs", 0], ["stuck", "stalled", 1], ["busy", "working", 0]]);
       expect(F.stateTime(stuck, views[1].facts, "stalled", NOW, views[1].stall.since)).toBe("14m");
       const frame = F.render([busy, stuck, asks], 150, 40, NOW).map(strip).join("\n");
-      expect(frame).toContain("stalled? · 14m");
+      expect(frame).toContain("◐ S T A L L E D ?  ·  14m");
       expect(frame).toContain("stalled? Bash");
     } finally {
       Object.assign(F.machine, saved);
@@ -1158,6 +1158,552 @@ describe("since you looked", () => {
     expect(strip(F.buttonBar(150, 44, 1))).not.toContain("Retry usage"); // only while a usage read is failing
     for (const W of [80, 100, 110, 130, 150, 200]) expect(F.cells(F.buttonBar(W, 44, 3))).toBeLessThanOrEqual(W);
     resetSeen(NOW);
+  });
+});
+
+describe("the detail view", () => {
+  const plain = (rows: string[]) => rows.map((r) => strip(r).trimEnd());
+  const text = (segs: F.Seg[]) => segs.map((s) => s[0]).join("");
+  /** A transcript's rows with the branch it was on, as Claude Code writes them. */
+  const on = (branch: string, rows: object[]) => rows.map((r) => ({ ...r, gitBranch: branch }));
+  const calls = (count: number, end: number, seed = 7) => callTimes(count, end, 28, seed).flatMap((t) => [toolCall(t), toolResult(t + 900)]);
+
+  /** The demo's session that needs you: a question, a now-line, a prompt and two replies. */
+  function waiting(now: number): F.Session {
+    const main = tailOf(on("feature/checkout-v2", [
+      prompt(now - 29 * MIN, "move coupons to the new promotions table and remove the old column"),
+      ...calls(46, now - 8 * MIN),
+      reply(now - 7 * MIN - 20_000, "The new promotions table is in place and every read now goes through it. All 212 checkout tests pass.", 372_000),
+      reply(now - 6 * MIN - 40_000, "The migration that drops coupon_code is written and has run cleanly against a copy of the data.\n- 41,208 rows were copied to promotions\n- 0 rows differ between the old column and the new table\n\nI have not run it for real, because dropping a column cannot be undone.", 372_000),
+    ]));
+    return sessionOf({ sid: "aaaaaaaa-0001", name: "checkout flow redesign", status: "idle", startedAt: now - 190 * MIN, mains: [main], job: { state: "blocked", detail: "migration drafted and tested against a copy", needs: "Approve dropping the legacy coupon_code column before I run the migration?" } });
+  }
+  /** The demo's interactive session: no now-line, so its prompt is the subheading; two agents at work and one finished. */
+  function withAgents(now: number): F.Session {
+    const main = tailOf(on("main", [
+      prompt(now - 29 * MIN, "why does search miss pages added this week?"),
+      ...calls(18, now - 60_000, 11),
+      reply(now - 55_000, "Search is built from an index that is only regenerated on release, so pages added since the last release are missing. I'm checking whether the build can regenerate it on every deploy.", 96_000),
+      toolCall(now - 15_000),
+      toolResult(now - 14_000),
+    ]));
+    const live = tailOf([...calls(22, now - 20_000, 3), toolCall(now - 5_000), toolResult(now - 4_000)]);
+    const tool = tailOf([...calls(9, now - 4 * MIN, 5), toolCall(now - 3 * MIN, "Bash", { description: "Build the site with the index step enabled" })]);
+    const over = tailOf(calls(11, now - 9 * MIN, 9));
+    return sessionOf({
+      sid: "cccccccc-0003", name: "docs site search", kind: "interactive", cwd: "/work/docs", startedAt: now - 22 * MIN - 30_000, mains: [main],
+      agents: [
+        agentOf("s1", live, { label: "Find where the search index is built" }),
+        agentOf("s2", tool, { label: "Measure index build time on a full deploy", type: "general-purpose", model: "opus" }),
+        agentOf("s3", over, { label: "List pages added since the last release", done: true }),
+      ],
+    });
+  }
+  /** The demo's busy job: a now-line, tasks, the main thread on a tool, and a workflow with two agents done and three running. */
+  function busy(now: number, name = "flaky test hunt", upMin = 64, sid = "bbbbbbbb-0002"): F.Session {
+    const main = tailOf(on("fix/flaky-payments", [
+      prompt(now - 29 * MIN, "find out why the payment tests are flaky and fix them"),
+      ...calls(30, now - 4 * MIN, upMin),
+      reply(now - 3 * MIN - 20_000, "Three tests fail intermittently, all in the payments suite. I'm running each two hundred times under load to find which ones share a cause.", 611_000),
+      reply(now - 2 * MIN - 40_000, "Two of the three share a cause: both read the clock twice and assume the same second. The third is separate. I've started a workflow with one agent per test, and a reviewer to confirm each fix.", 611_000),
+      { ...toolCall(now - 2 * MIN, "Workflow", { description: "Bisect and fix the flaky payment tests" }), message: { ...toolCall(now - 2 * MIN, "Workflow", { description: "Bisect and fix the flaky payment tests" }).message, usage: { input_tokens: 4, cache_read_input_tokens: 611_000, output_tokens: 60 } } },
+    ]));
+    const member = (id: string, label: string, phase: string, tail: F.Tail, done = false) => agentOf(id, tail, { label, type: "workflow-subagent", model: "opus", wf: "wf_1", phase, done });
+    const agents = [
+      member("w1", "reproduce:refund-rounding", "Reproduce", tailOf(calls(14, now - 14 * MIN, 21)), true),
+      member("w2", "reproduce:retry-backoff", "Reproduce", tailOf(calls(14, now - 12 * MIN, 22)), true),
+      member("w3", "fix:retry-backoff", "Fix", tailOf([...calls(16, now - 30_000, 23), toolCall(now - 20_000), toolResult(now - 19_000)])),
+      member("w4", "fix:clock-in-refund", "Fix", tailOf([...calls(16, now - 30_000, 24), toolCall(now - 8_000), toolResult(now - 7_000)])),
+      member("w5", "review:clock-in-refund", "Fix", tailOf([...calls(12, now - 5 * MIN, 25), toolCall(now - 4 * MIN, "Bash", { description: "Run the refund tests 200 times under load" })])),
+    ];
+    const wf: F.Workflow = { id: "wf_1", name: "bisect-and-fix", status: "running", phase: "Fix", phases: [], seen: ["Reproduce", "Fix"], started: now - 14 * MIN - 30_000, finished: 0, agents, lastT: now };
+    return sessionOf({
+      sid, name, startedAt: now - upMin * MIN - 30_000, mains: [main], workflows: [wf],
+      job: { state: "working", detail: "bisecting the three payment tests that fail one run in twenty", needs: "" },
+      tasks: { done: 2, doing: 1, total: 6, active: "Fixing the clock-dependent tests" },
+    });
+  }
+  const three = (now: number) => [waiting(now), withAgents(now), busy(now)];
+  const six = (now: number) => [waiting(now), busy(now), ...["search reindex", "billing export", "upgrade tooling", "onboarding emails"].map((name, i) => busy(now, name, 71 + 12 * i, `${"defg"[i].repeat(8)}-001${i}`))];
+  /** The views as render() hands them over: in order, quiet ones left out unless asked for. */
+  const viewsOf = (sessions: F.Session[], now: number, all = false) => F.buildViews(sessions, now, 80).filter((v) => all || !F.isHidden(v));
+  /** Plan the blocks without drawing them: each block's rows, and what the ladder left it. */
+  function plan(sessions: F.Session[], W: number, avail: number, now = NOW, focus = false) {
+    const g = F.grid(W);
+    const blocks = viewsOf(sessions, now).map((v) => F.blockOf(v, g, now, F.laneWindow(now, W), focus));
+    const fit = F.fitBlocks(blocks, g, avail, now);
+    return { ...fit, blocks, heights: blocks.map((b) => (b.folded ? 0 : F.blockRows(b, g, now))) };
+  }
+  const draw = (sessions: F.Session[], W: number, avail: number, now = NOW, focus = false) => plain(F.detailView(viewsOf(sessions, now), W, avail, now, 0, focus));
+  /** Nothing is "new since you looked" unless a test says so. */
+  const quietly = <T>(run: () => T): T => {
+    const before = F.seen.at;
+    F.seen.at = NOW + MIN;
+    try {
+      return run();
+    } finally {
+      F.seen.at = before;
+    }
+  };
+
+  // Not demo text: the design's specimen, which exercises every formatting rule.
+  const SPECIMEN =
+    "The slow part is the join against `audit_log`, which has **no index** on `run_id`. Adding one takes the export from 41 minutes to 3.\n\n" +
+    "- the index builds in about 90 seconds on a copy of the data\n" +
+    "- nothing else writes to that column often enough for the extra index to cost anything worth worrying about\n" +
+    "  - checked the last 30 days of writes\n\n" +
+    "```sql\nCREATE INDEX CONCURRENTLY audit_log_run_id\n  ON audit_log (run_id);\nANALYZE audit_log;\nSELECT pg_size_pretty(pg_relation_size('audit_log_run_id'));\n```\n\n" +
+    "I ran the full export twice with the index in place to confirm the timing holds.\n\n" +
+    "The second run was slightly faster because the cache was warm.\n\nNothing in the export output changed.\n\nRow counts match exactly.\n\n" +
+    "Shall I add the index on staging first, or go straight to a migration?";
+
+  test("the design's specimen: a clipped reply keeps its final line, and the mark sits on the row above", () => {
+    const rows = F.replyRows(SPECIMEN, 92);
+    expect(rows.length).toBe(15);
+    const shown = F.clipReply(rows, 10, 92);
+    expect(shown.map((r) => text(r.segs))).toEqual([
+      "The slow part is the join against audit_log, which has no index on run_id. Adding one takes",
+      "the export from 41 minutes to 3.",
+      "• the index builds in about 90 seconds on a copy of the data",
+      "• nothing else writes to that column often enough for the extra index to cost anything worth",
+      "  worrying about",
+      "  – checked the last 30 days of writes",
+      "│ CREATE INDEX CONCURRENTLY audit_log_run_id",
+      "│   ON audit_log (run_id);",
+      "│ ANALYZE audit_log;",
+      "Shall I add the index on staging first, or go straight to a migration?",
+    ]);
+    expect(shown.map((r) => r.mark)).toEqual([undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, "… +5 lines", undefined]);
+    // In colour: the two names are code colour, "no index" is bold white, the rest is text colour.
+    const styled = Object.fromEntries(rows[0].map(([t, color, isBold]) => [t, [color, !!isBold]]));
+    expect(styled["audit_log"]).toEqual([F.C.code, false]);
+    expect(styled["run_id"]).toEqual([F.C.code, false]);
+    expect(styled["no index"]).toEqual([F.C.white, true]);
+    expect(styled["The slow part is the join against "]).toEqual([F.C.text, false]);
+    expect(rows[2][0]).toEqual(["• ", F.C.cyan]); // bullet
+    expect(rows[5][0]).toEqual(["  – ", F.C.dim]); // nested bullet
+    expect(rows[6][0]).toEqual(["│ ", F.C.faint]); // code gutter
+    expect(rows[6][1][1]).toBe(F.C.code);
+  });
+
+  test("markdown is rendered, not stripped", () => {
+    const md = (s: string, w = 60, focus = false) => F.replyRows(s, w, { focus }).map(text);
+    expect(md("# The plan\n\nFirst para.\nSecond line.")).toEqual(["The plan", "First para.", "Second line."]); // blank lines are not kept
+    expect(md("# The plan\n\nFirst para.", 60, true)).toEqual(["The plan", "", "First para."]); // …except in focus
+    expect(F.replyRows("## Bold **heading**", 60)[0]).toEqual([["Bold heading", F.C.white, true]]);
+    expect(md("1. first\n2. second item that is long enough to wrap around the line\n10. tenth", 30)).toEqual(["1. first", "2. second item that is long", "   enough to wrap around the", "   line", "10. tenth"]);
+    expect(md("> quoted words that go on and on past the edge", 24)).toEqual(["│ quoted words that go", "│ on and on past the", "│ edge"]);
+    expect(md("- one\n* two\n+ three\n    - deep\n        - deeper")).toEqual(["• one", "• two", "• three", "  – deep", "  – deeper"]); // deeper levels are flattened to the second
+    expect(md("see [the docs](https://example.com/a/b) and https://github.com/pdaddyo/claude-fleet/pull/12?x=1.")).toEqual(["see the docs and github.com/…/12."]);
+    expect(md("before\n\n---\n<!-- a note\nto self -->\nafter")).toEqual(["before", "after"]); // rules and comments are dropped
+    expect(md("*italic* and _also_ and ~~struck~~ and __strong__")).toEqual(["italic and also and struck and strong"]);
+    expect(md("- [x] shipped\n- [ ] still to do")).toEqual(["✓ shipped", "○ still to do"]);
+  });
+
+  test("a mark counts only where emphasis can be; anything doubtful stays as typed", () => {
+    const one = (s: string) => text(F.inlineSegs(s));
+    expect(one("rename coupon_code to promo_code")).toBe("rename coupon_code to promo_code");
+    expect(one("5*3*2 is 30")).toBe("5*3*2 is 30");
+    expect(one("src/*.ts and lib/*.ts")).toBe("src/*.ts and lib/*.ts");
+    expect(one("src/**/*.ts")).toBe("src/**/*.ts");
+    expect(one("an **unclosed bold")).toBe("an **unclosed bold");
+    expect(one("a `lone backtick")).toBe("a `lone backtick");
+    expect(one("2 * 3 * 4")).toBe("2 * 3 * 4");
+    expect(one("\\*not italic\\*")).toBe("*not italic*");
+    expect(F.inlineSegs("`a*b*c` stays code")[0]).toEqual(["a*b*c", F.C.code]);
+    expect(F.inlineSegs("**bold with `code` inside**")).toEqual([["bold with ", F.C.white, true], ["code", F.C.code, true], [" inside", F.C.white, true]]);
+    expect(F.shortUrl("https://example.com")).toBe("example.com");
+    expect(F.shortUrl("https://example.com/docs")).toBe("example.com/docs");
+    expect(F.shortUrl("https://example.com/a/b/c.html#top")).toBe("example.com/…/c.html");
+  });
+
+  test("wrapping happens after the marks are gone, and a styled span may run across the break", () => {
+    const rows = F.wrapSegs(F.inlineSegs("plain words then **a bold run that is long** and `code` to finish"), 20);
+    expect(rows.map(text)).toEqual(["plain words then a", "bold run that is", "long and code to", "finish"]);
+    for (const r of rows) expect(F.width(text(r))).toBeLessThanOrEqual(20);
+    expect(rows[0][rows[0].length - 1]).toEqual(["a", F.C.white, true]); // the bold span starts on one row…
+    expect(rows[1][0]).toEqual(["bold run that is", F.C.white, true]); // …and carries on across two more
+    expect(rows[2][0]).toEqual(["long", F.C.white, true]);
+    expect(F.wrapSegs([["a-very-long-word-with-no-spaces-in-it"]], 10).map(text)).toEqual(["a-very-lon", "g-word-wit", "h-no-space", "s-in-it"]);
+    expect(F.wrapSegs([["  spaced    out  "]], 20).map(text)).toEqual(["spaced out"]);
+    expect(F.wrapSegs([], 20)).toEqual([]);
+  });
+
+  test("code fences, tables and the lines they hide", () => {
+    const md = (s: string, w = 60, focus = false) => F.replyRows(s, w, { focus }).map(text);
+    const code = "```ts\n" + Array.from({ length: 14 }, (_, i) => `  const line${i} = ${"x".repeat(i * 5)};`).join("\n") + "\n```";
+    expect(md(code, 30)).toEqual(["│   const line0 = ;", "│   const line1 = xxxxx;", "│   const line2 = xxxxxxxxxx;", "│ … +11 lines"]); // indentation kept
+    expect(md(code, 24)[2]).toBe("│   const line2 = xxxxx…"); // cut, never wrapped
+    expect(md(code, 30, true).length).toBe(13); // 12 lines in focus, then the count
+    expect(md(code, 30, true)[12]).toBe("│ … +2 lines");
+    const table = "| Name | Count |\n| --- | ---: |\n| alpha | 1 |\n| beta | 22 |\n| gamma | 333 |";
+    expect(md(table)).toEqual(["Name  │ Count", "alpha │ 1", "beta  │ 22", "… +1 row"]); // the rule row is dropped
+    expect(F.replyRows(table, 60)[0][0]).toEqual(["Name ", F.C.white, true]); // header row bold
+    expect(md(table, 60, true)).toEqual(["Name  │ Count", "alpha │ 1", "beta  │ 22", "gamma │ 333"]);
+    const wide = "| a | b | c | d | e |\n|---|---|---|---|---|\n" + "| xxxxxxxxxxxxxxxx | yyyyyyyyyyyyyyyy | zzzzzzzzzzzz | wwwwwwwwwwwwwww | vvvvvvvvv |\n".repeat(12);
+    expect(md(wide)).toEqual(["table · 5 columns x 12 rows"]);
+    for (const row of F.replyRows(SPECIMEN + "\n\n" + table + "\n\n" + code, 40)) expect(F.width(text(row))).toBeLessThanOrEqual(40);
+  });
+
+  test("an earlier reply is flattened to plain text", () => {
+    expect(F.flatReply("## Done\n\nThe **table** is in `place`.\n- 41,208 rows\n\n```\nselect 1;\n```\n---\n| a | b |\n|---|---|\n| 1 | 2 |")).toBe("Done The table is in place. • 41,208 rows select 1; a · b 1 · 2");
+    expect(F.clipWords("one two three four", 9)).toBe("one two");
+    expect(F.clipWords("one two three four", 7)).toBe("one two");
+    expect(F.clipWords("onetwothreefour", 7)).toBe("onetwot");
+    expect(F.cutTo("one two three", 7)).toBe("one tw…");
+    expect(F.cutTo("short", 7)).toBe("short");
+  });
+
+  test("clipping a reply: from the top, the mark on the last row before the cut, the final line kept from 3 rows up", () => {
+    const rows = F.replyRows(["first paragraph", "second paragraph", "third paragraph", "fourth paragraph", "the question at the end?"].join("\n\n"), 40);
+    const shown = (cap: number) => F.clipReply(rows, cap, 40).map((r) => text(r.segs) + (r.mark ? ` [${r.mark}]` : ""));
+    expect(shown(0)).toEqual([]);
+    expect(shown(1)).toEqual(["first paragraph [… +4 lines]"]);
+    expect(shown(2)).toEqual(["first paragraph", "second paragraph [… +3 lines]"]);
+    expect(shown(3)).toEqual(["first paragraph", "second paragraph [… +2 lines]", "the question at the end?"]);
+    expect(shown(4)).toEqual(["first paragraph", "second paragraph", "third paragraph [… +1 line]", "the question at the end?"]);
+    expect(shown(5)).toEqual(["first paragraph", "second paragraph", "third paragraph", "fourth paragraph", "the question at the end?"]);
+    expect(shown(9)).toEqual(shown(5));
+    // The row that carries the mark is shortened at a word boundary to make room for it.
+    const long = F.replyRows("Two of the three share a cause: both read the clock twice and assume the same second. The third is separate. I've started a workflow with one agent per test, and a reviewer to confirm each fix.", 92);
+    expect(F.clipReply(long, 1, 92).map((r) => [text(r.segs), r.mark])).toEqual([["Two of the three share a cause: both read the clock twice and assume the same", "… +2 lines"]]);
+    // A final paragraph that wraps is shown by its start, not by its last few words.
+    const wrapsAtEnd = F.replyRows("one\n\ntwo\n\nthree\n\nI have not run it for real, because dropping a column cannot be undone.", 40);
+    expect(F.clipReply(wrapsAtEnd, 3, 40).map((r) => text(r.segs))).toEqual(["one", "two", "I have not run it for real, because …"]);
+    // One long paragraph is simply kept from the top.
+    const single = F.replyRows("word ".repeat(60).trim(), 40);
+    expect(F.clipReply(single, 3, 40).map((r) => r.mark)).toEqual([undefined, undefined, `… +${single.length - 3} lines`]);
+  });
+
+  test("one glyph per step: spaced out up to 10, packed up to 20, scaled to 20 cells beyond", () => {
+    const strip = (d: number, r: number, n: number) => text(F.stepStrip(d, r, n));
+    expect(strip(2, 1, 6)).toBe("✓ ✓ ◐ ○ ○ ○");
+    expect(strip(10, 0, 10)).toBe("✓ ✓ ✓ ✓ ✓ ✓ ✓ ✓ ✓ ✓");
+    expect(strip(3, 2, 12)).toBe("✓✓✓◐◐○○○○○○○");
+    expect(strip(30, 4, 60)).toBe("✓✓✓✓✓✓✓✓✓✓◐○○○○○○○○○");
+    expect(F.width(strip(199, 1, 200))).toBe(20);
+    expect(strip(0, 0, 0)).toBe("");
+    expect(F.stepStrip(1, 1, 3).map((s) => s[1])).toEqual([F.C.green, F.C.white, F.C.faint]);
+  });
+
+  test("three sessions at 150 columns: the block the design shows, on the design's columns", () => {
+    quietly(() => {
+      expect(plan(three(NOW), 150, 38).heights).toEqual([11, 8, 14]);
+      const rows = draw(three(NOW), 150, 38);
+      expect(rows.length).toBe(35); // 33 rows of sessions and the two blank rows between them
+      const at = (line: string, what: string) => line.indexOf(what) + 1; // the 1-based column, as the design counts
+      // Title row: thick rail at 2, title from 5, place ending at 104, state ending at 149.
+      expect(rows[0]).toBe(" ██ C H E C K O U T   F L O W   R E D E S I G N            work/shop @ feature/checkout-v2 · bg aaaaaaaa                   ▲ N E E D S   Y O U  ·  6m");
+      expect(rows[1].slice(0, 105)).toBe(" ██ Approve dropping the legacy coupon_code column before I run the migration?".padEnd(105));
+      expect(rows[1]).toMatch(/ tools$/);
+      expect(F.width(rows[1])).toBe(149);
+      // Body: thin rail, the now-line at 5, then prompt, earlier reply and newest reply with ages ending at 104.
+      expect(rows[2].slice(0, 50)).toBe(" ▌  migration drafted and tested against a copy".padEnd(50));
+      expect(rows[3].slice(0, 104)).toBe(" ▌  ▸ move coupons to the new promotions table and remove the old column".padEnd(101) + "29m");
+      expect(rows[4].slice(0, 104)).toBe(" ▌  ◇ The new promotions table is in place and every read now goes through it. All 212 checkout".padEnd(102) + "7m");
+      expect(rows[5]).toBe(" ▌    tests pass.");
+      expect(rows[6].slice(0, 104)).toBe(" ▌  ◆ The migration that drops coupon_code is written and has run cleanly against a copy of the".padEnd(102) + "6m");
+      expect(rows.slice(7, 11)).toEqual([" ▌    data.", " ▌    • 41,208 rows were copied to promotions", " ▌    • 0 rows differ between the old column and the new table", " ▌    I have not run it for real, because dropping a column cannot be undone."]);
+      expect(rows[11]).toBe("");
+      // The instruments sit in the lane beside the left stack, from its first row, and cost no row: context bar, key, figures.
+      expect(at(rows[2], "░")).toBeGreaterThanOrEqual(107);
+      expect(rows[2]).toMatch(/ 37% of 1\.0M$/);
+      expect(at(rows[3], "■")).toBe(107);
+      expect(at(rows[4], " out")).toBeGreaterThan(107);
+      expect(rows[6].length).toBe(104); // nothing beside the fourth row of the stack
+      // A promoted prompt is the subheading, with ▸ and its age, and is not repeated below.
+      expect(rows[12]).toBe(" ██ D O C S   S I T E   S E A R C H                              work/docs @ main · interactive cccccccc                   ● W O R K I N G  ·  up 22m");
+      expect(rows[13].slice(0, 104)).toBe(" ██ ▸ why does search miss pages added this week?".padEnd(101) + "29m");
+      expect(rows.filter((r) => r.includes("why does search miss")).length).toBe(1);
+      // Roster: label 7-48, action from 51, type and model ending at 104, age ending at 149.
+      expect(rows[16].slice(0, 59)).toBe(" ▌  ⠋ main thread                                 thinking ");
+      expect(rows[17].slice(0, 104)).toBe(" ▌  ⠋ Find where the search index is built        thinking".padEnd(89) + "Explore · haiku");
+      expect(rows[18].slice(0, 104)).toBe(" ▌  ◐ Measure index build time on a full deploy   Bash  Build the site with the index …   general · opus");
+      expect(rows[17]).toMatch(/ {9}live$/);
+      expect(rows[18]).toMatch(/ {11}3m$/);
+      expect(rows[19]).toBe(" ▌  ✓ 1 agent finished in the last 30m  ·  d lists them");
+      for (const r of rows.slice(16, 19)) expect(F.width(r)).toBe(149);
+      // The busy block: tasks row, main thread on a tool (its action runs to 104), workflow with trail and strip, agents indented 2.
+      expect(rows[21]).toBe(" ██ F L A K Y   T E S T   H U N T                           work/shop @ fix/flaky-payments · bg bbbbbbbb                  ● W O R K I N G  ·  up 1h04");
+      expect(rows[22].slice(0, 66)).toBe(" ██ bisecting the three payment tests that fail one run in twenty ");
+      expect(rows[29]).toBe(" ▌  ✓ ✓ ◐ ○ ○ ○  2/6  Fixing the clock-dependent tests");
+      expect(rows[30].slice(0, 98)).toBe(" ▌  ◐ main thread                                 Workflow  Bisect and fix the flaky payment tests".padEnd(98));
+      expect(rows[31].slice(0, 104)).toBe(" ▌  ≡ bisect-and-fix                              ✓ Reproduce  ◐ Fix                      ✓ ✓ ◐ ◐ ◐  2/5");
+      expect(rows[31]).toMatch(/ up 14m$/);
+      expect(rows[32].slice(0, 104)).toBe(" ▌    ⠋ fix:retry-backoff                         thinking".padEnd(100) + "opus");
+      expect(rows[34].slice(0, 104)).toBe(" ▌    ◐ review:clock-in-refund                    Bash  Run the refund tests 200 times…             opus");
+      // No tree lines and no word labels anywhere.
+      for (const r of rows) expect(r).not.toMatch(/[├└]|claude ▸|you {4}▸|context |tasks |phase /);
+    });
+  });
+
+  test("34 rows: only steps 1 to 3 of the ladder are needed, and every session keeps its prompt, its newest reply, its tasks and every thread", () => {
+    quietly(() => {
+      const p = plan(three(NOW), 150, 30);
+      expect(p.heights).toEqual([9, 7, 12]);
+      expect(p.gaps).toBe(true);
+      expect(p.rows).toBe(30);
+      expect(p.blocks.map((b) => b.keep.earlier)).toEqual([[0], [], [0]]); // earlier replies went (4 rows)…
+      expect(p.blocks.map((b) => b.keep.done)).toEqual([false, false, false]); // …and the finished-agents line (1)
+      for (const b of p.blocks) expect([b.keep.reply, b.keep.main || !b.v.showMain, b.keep.fold, b.keep.top3, b.keep.roster]).toEqual([10, true, false, false, true]);
+      expect(p.blocks.map((b) => b.keep.prompt)).toEqual([1, 0, 1]); // the middle one's prompt is its subheading
+      expect(p.blocks[0].keep.now).toBe(true);
+      const rows = draw(three(NOW), 150, 30);
+      expect(rows.length).toBe(30);
+      expect(rows.join("\n")).not.toContain("◇");
+      expect(rows.join("\n")).not.toContain("finished in the last");
+      expect(rows.filter((r) => r.includes("main thread")).length).toBe(2);
+    });
+  });
+
+  test("six sessions in 38 rows: the squeezed five-row block, the waiting session's seven rows, and the top two with their agents", () => {
+    quietly(() => {
+      const p = plan(six(NOW), 150, 38);
+      expect(p.heights).toEqual([7, 8, 8, 5, 5, 5]);
+      expect(p.gaps).toBe(false);
+      expect(p.rows).toBe(38);
+      const rows = draw(six(NOW), 150, 38);
+      expect(rows.length).toBe(38);
+      // The waiting session keeps title, question, prompt and 4 reply lines with its final line.
+      expect(rows.slice(2, 7).map((r) => r.slice(0, 98).trimEnd())).toEqual([
+        " ▌  ▸ move coupons to the new promotions table and remove the old column",
+        " ▌  ◆ The migration that drops coupon_code is written and has run cleanly against a copy of the",
+        " ▌    data.",
+        " ▌    • 41,208 rows were copied to promotions                                            … +1 line",
+        " ▌    I have not run it for real, because dropping a column cannot be undone.",
+      ]);
+      // The squeezed block: title, subheading with sparkline, one reply line beside the context bar, tasks beside the key, workflow row.
+      const squeezed = rows.slice(33, 38);
+      expect(squeezed[0]).toContain("O N B O A R D I N G   E M A I L S");
+      expect(squeezed[1].slice(0, 66)).toBe(" ██ bisecting the three payment tests that fail one run in twenty ");
+      expect(squeezed[2].slice(0, 104)).toBe(" ▌  ◆ Two of the three share a cause: both read the clock twice and assume the same     … +2 lines    2m");
+      expect(squeezed[2]).toMatch(/ 61% of 1\.0M$/);
+      expect(squeezed[3].slice(0, 107)).toBe(" ▌  ✓ ✓ ◐ ○ ○ ○  2/6  Fixing the clock-dependent tests".padEnd(106) + "■");
+      expect(squeezed[4].slice(0, 104)).toBe(" ▌  ≡ bisect-and-fix                              ✓ Reproduce  ◐ Fix                      ✓ ✓ ◐ ◐ ◐  2/5");
+      // The rows left over unfold the agents of the top two working sessions, and nobody else's.
+      expect(rows.filter((r) => r.includes("fix:retry-backoff")).length).toBe(2);
+      expect(rows.slice(7, 15).filter((r) => /fix:|review:/.test(r)).length).toBe(3);
+      // Lost: earlier replies, the gaps, the prompts of the working sessions, the main-thread rows.
+      expect(rows.join("\n")).not.toContain("◇");
+      expect(rows).not.toContain("");
+      expect(rows.join("\n")).not.toContain("main thread");
+      expect(rows.filter((r) => r.includes("▸ find out why")).length).toBe(0);
+    });
+  });
+
+  test("rows left over are handed back in reverse order, top session first", () => {
+    quietly(() => {
+      // Two rows more than the six sessions need: not enough to unfold a third workflow's agents (3 rows),
+      // so they go to the step before that, the main-thread row, for the top two working sessions.
+      const p = plan(six(NOW), 150, 40);
+      expect(p.heights).toEqual([7, 9, 9, 5, 5, 5]);
+      expect(p.rows).toBe(40);
+      const rows = draw(six(NOW), 150, 40);
+      expect(rows.flatMap((r, i) => (r.includes("main thread") ? [i] : []))).toEqual([11, 20]);
+      // With every row it could want, nothing is cut and the blank rows are back.
+      const roomy = plan(six(NOW), 150, 200);
+      expect(roomy.heights).toEqual([11, 14, 14, 14, 14, 14]);
+      expect(roomy.gaps).toBe(true);
+      // A cut to the newest reply comes back a line at a time.
+      const long = busy(NOW);
+      long.mains[0].says[1].text = Array.from({ length: 9 }, (_, i) => `Paragraph ${i + 1} of the reply.`).join("\n\n");
+      const natural = plan([long], 150, 100).heights[0];
+      expect(natural).toBe(20);
+      const less2 = plan([long], 150, natural - 2).blocks[0].keep;
+      expect([less2.earlier, less2.reply]).toEqual([[0], 10]); // two rows short: the earlier reply goes, the newest is untouched
+      const less5 = plan([long], 150, natural - 5).blocks[0].keep;
+      expect([less5.earlier, less5.reply]).toEqual([[0], 6]); // five short: capped at 4 by step 4, then the two spare rows handed back as lines
+    });
+  });
+
+  test("a session that needs you never gives up its title, its whole question or two lines of the reply", () => {
+    quietly(() => {
+      for (let avail = 14; avail <= 38; avail++) {
+        const p = plan(six(NOW), 150, avail);
+        const rows = draw(six(NOW), 150, avail);
+        expect(rows.length).toBeLessThanOrEqual(avail);
+        expect(p.blocks[0].folded).toBe(false);
+        expect(rows[0]).toContain("N E E D S   Y O U");
+        expect(rows[1]).toContain("Approve dropping the legacy coupon_code column before I run the migration?");
+        expect(rows[2] + rows[3]).toContain("The migration that drops coupon_code");
+        expect(p.blocks[0].keep.reply).toBeGreaterThanOrEqual(2);
+      }
+      // At 110 columns the question wraps to two rows instead of being cut, and both stay.
+      const narrow = draw(six(NOW), 110, 16);
+      expect(narrow.slice(1, 3).map((r) => r.slice(0, 77).trim())).toEqual(["██ Approve dropping the legacy coupon_code column before I run the", "██ migration?"]);
+    });
+  });
+
+  test("whole sessions fold into one line from the bottom, never one that needs you", () => {
+    quietly(() => {
+      const p = plan(six(NOW), 150, 9);
+      expect(p.blocks.map((b) => b.folded)).toEqual([false, false, false, true, true, true]);
+      const rows = draw(six(NOW), 150, 9);
+      expect(rows.length).toBe(9);
+      expect(rows[8]).toBe(" … 3 more: billing export, upgrade tooling, onboarding emails");
+      expect(rows.slice(4, 8).map((r) => r.slice(0, 4))).toEqual([" ██ ", " ██ ", " ██ ", " ██ "]); // what is left of the working ones: title and subheading, a small far card
+      // Before a session folds it has given up everything but its two head rows.
+      expect(plan(six(NOW), 150, 14).heights).toEqual([4, 2, 2, 2, 2, 2]);
+      // Too small even for the ladder: the waiting session is the last to go, and is still named.
+      expect(draw(six(NOW), 150, 1)).toEqual([" … 6 more: ▲ checkout flow redesign, flaky test hunt, search reindex, billing export, upgrade tooling, onboarding emails"]);
+      expect(draw(six(NOW), 150, 0)).toEqual([]);
+    });
+  });
+
+  test("the renderer never returns more rows than it was given, nor a row wider than the screen, at any size", () => {
+    quietly(() => {
+      const idle = sessionOf({ sid: "eeeeeeee-0005", name: "release notes draft", status: "idle", kind: "interactive", mains: [tailOf([prompt(NOW - 29 * MIN, "draft the release notes"), reply(NOW - 12 * MIN, "The draft is in `docs/releases/4.2.md`. Shall I open a pull request with it?")])] });
+      const sets: [string, F.Session[], boolean][] = [["three", three(NOW), false], ["six", six(NOW), false], ["with a quiet one", [...three(NOW), idle], true], ["one", [busy(NOW)], false], ["none", [], false]];
+      for (const [name, sessions, all] of sets)
+        for (const W of [60, 80, 99, 100, 110, 129, 130, 150, 200])
+          for (let avail = 0; avail <= 60; avail++)
+            for (const focus of sessions.length === 1 ? [false, true] : [false]) {
+              const views = F.buildViews(sessions, NOW, 80).filter((v) => all || !F.isHidden(v));
+              const g = F.grid(W);
+              const blocks = views.map((v) => F.blockOf(v, g, NOW, F.laneWindow(NOW, W), focus));
+              const fit = F.fitBlocks(blocks, g, avail, NOW);
+              const rows = F.detailView(views, W, avail, NOW, 0, focus).map(strip);
+              const where = `${name} at ${W}x${avail}${focus ? " in focus" : ""}`;
+              if (rows.length > avail) throw new Error(`${where}: ${rows.length} rows`);
+              if (avail > 0 && views.length && rows.length !== fit.rows) throw new Error(`${where}: drew ${rows.length} rows but planned ${fit.rows}`);
+              for (const r of rows) {
+                if (Bun.stringWidth(r) > W) throw new Error(`${where}: a row ${Bun.stringWidth(r)} cells wide: ${r}`);
+                if (/undefined|NaN/.test(r)) throw new Error(`${where}: ${r}`);
+                if (r.trim() && r[0] !== " ") throw new Error(`${where}: column 1 is not blank: ${r}`);
+              }
+            }
+    });
+  });
+
+  test("110 columns: the instruments become one row under the head, the conversation runs the full width, a workflow shows its current phase", () => {
+    quietly(() => {
+      expect(plan(three(NOW), 110, 38).heights).toEqual([12, 9, 15]); // the whole screen at 110 by 44, nothing dropped
+      const rows = draw(three(NOW), 110, 38);
+      expect(rows.length).toBe(38);
+      expect(rows[0]).toBe(" ██ C H E C K O U T   F L O W   R E D E S I G N    shop @ feature/checkout-v2      ▲ N E E D S   Y O U  ·  6m"); // the place lost its kind and id, then its parent folder
+      expect(rows[2].trimEnd()).toBe(" ██ migration?");
+      expect(rows[3]).toMatch(/^ ▌  [▌█░]{20}  37% of 1\.0M   ■ Used 372k   \S+ out$/);
+      expect(rows[4]).toBe(" ▌  migration drafted and tested against a copy");
+      expect(rows[5]).toBe(" ▌  ▸ move coupons to the new promotions table and remove the old column".padEnd(106) + "29m"); // ages end at 109
+      expect(rows[6]).toBe(" ▌  ◇ The new promotions table is in place and every read now goes through it. All 212 checkout tests".padEnd(107) + "7m");
+      expect(rows[8]).toBe(" ▌  ◆ The migration that drops coupon_code is written and has run cleanly against a copy of the data.".padEnd(107) + "6m");
+      const wf = rows.find((r) => r.includes("bisect-and-fix"))!;
+      expect(wf.slice(0, 77)).toBe(" ▌  ≡ bisect-and-fix                        ◐ Fix              ✓ ✓ ◐ ◐ ◐  2/5"); // label 7-42, action 45-77, no passed phases
+      const tool = rows.find((r) => r.includes("review:clock-in-refund"))!;
+      expect(tool.slice(0, 77)).toBe(" ▌    ◐ review:clock-in-refund              Bash  Run the refund tests 200 t…");
+      expect(tool).not.toContain("opus"); // the type-and-model column is dropped
+      for (const r of rows) expect(F.width(r)).toBeLessThanOrEqual(109);
+      // Under 100 columns the place leaves the title row and agent rows lose the action column.
+      const small = draw(three(NOW), 90, 60);
+      expect(small[0]).toBe(" ██ C H E C K O U T   F L O W   R E D E S I G N                ▲ N E E D S   Y O U  ·  6m");
+      expect(small.find((r) => r.includes("review:clock-in-refund"))).not.toContain("Bash");
+      // Above 150 the lane stays 30 cells and the measure stops at 96.
+      const wide = draw(three(NOW), 200, 60);
+      expect(wide[6].indexOf("6m") + 2).toBe(154);
+      expect(wide[5].slice(0, 150).trimEnd()).toBe(" ▌    pass."); // the first line of that reply filled the measure: 96 cells, to column 102
+      expect(wide[4].slice(0, 150).trimEnd().length).toBeLessThanOrEqual(102);
+    });
+  });
+
+  test("idle, finished and your-turn sessions shown with a: the two head rows only, title in text colour", () => {
+    quietly(() => {
+      const turn = sessionOf({ sid: "eeeeeeee-0005", name: "release notes draft", status: "idle", kind: "interactive", cwd: "/work/docs", mains: [tailOf(on("docs/release-4.2", [prompt(NOW - 29 * MIN, "draft the release notes for 4.2"), ...calls(12, NOW - 13 * MIN), reply(NOW - 12 * MIN - 20_000, "The draft is in `docs/releases/4.2.md`: 14 changes under Features, Fixes and Upgrading.\n\nShall I open a pull request with it?")]))] });
+      const done = sessionOf({ sid: "dddddddd-0004", name: "rename billing module", status: "idle", mains: [tailOf([reply(NOW - 50 * MIN, "Merged.")])], job: { state: "done", detail: "merged", needs: "" } });
+      const views = F.buildViews([busy(NOW), turn, done], NOW, 80);
+      expect(views.map((v) => [v.state, v.quiet])).toEqual([["working", false], ["yourTurn", true], ["finished", true]]);
+      const raw = F.detailView(views, 150, 60, NOW, 0, false);
+      const rows = plain(raw);
+      expect(rows.length).toBe(14 + 1 + 2 + 1 + 2);
+      expect(rows[15]).toBe(" ██ R E L E A S E   N O T E S   D R A F T            work/docs @ docs/release-4.2 · interactive eeeeeeee                  ▸ Y O U R   T U R N  ·  12m");
+      expect(rows[16].slice(0, 104).trimEnd()).toBe(" ██ ◆ The draft is in docs/releases/4.2.md: 14 changes under Features, Fixes and Upgrading.");
+      expect(rows[18]).toContain("✓ F I N I S H E D");
+      expect(rows[19].slice(0, 104)).toBe(" ██ ◆ Merged.".padEnd(101) + "50m");
+      const bold = (c: F.RGB, s: string) => F.bold(F.fg(c, s));
+      expect(raw[15]).toContain(bold(F.C.text, "R E L E A S E   N O T E S   D R A F T")); // text colour, not white
+      expect(raw[0]).toContain(bold(F.C.white, "F L A K Y   T E S T   H U N T"));
+      expect(raw[15]).toContain(F.fg(F.C.blue, "██")); // your turn is blue
+      // In focus the same session gets its body: the prompt and the whole reply.
+      const focused = plain(F.detailView([views[1]], 150, 60, NOW, 0, true));
+      expect(focused.slice(2).map((r) => r.slice(0, 98).trimEnd())).toEqual([
+        " ▌  ▸ draft the release notes for 4.2",
+        " ▌  ◆ The draft is in docs/releases/4.2.md: 14 changes under Features, Fixes and Upgrading.",
+        " ▌",
+        " ▌    Shall I open a pull request with it?",
+      ]);
+    });
+  });
+
+  test("focus: one session takes the screen, with every stored reply in full and every agent", () => {
+    quietly(() => {
+      const s = busy(NOW);
+      const said = (n: number) => `Reply ${n}, first paragraph.\n\n- a bullet in reply ${n}\n- another\n\nReply ${n}, last paragraph.`;
+      s.mains[0].says = [1, 2, 3, 4, 5, 6].map((n) => ({ text: said(n), t: NOW - (8 - n) * MIN }));
+      const views = F.buildViews([s], NOW, 80);
+      const all = plain(F.detailView(views, 150, 80, NOW, 0, true));
+      for (let n = 1; n <= 6; n++) for (const part of [`Reply ${n}, first paragraph.`, `• a bullet in reply ${n}`, `Reply ${n}, last paragraph.`]) expect(all.filter((r) => r.includes(part)).length).toBe(1);
+      expect(all.filter((r) => r.includes("◇")).length).toBe(5);
+      expect(all.filter((r) => r.slice(0, 104).trimEnd() === " ▌").length).toBe(12); // a blank row between paragraphs
+      expect(all.filter((r) => /fix:|review:/.test(r)).length).toBe(3);
+      // Outside focus the dashboard shows the two before the newest, flattened, and the newest formatted.
+      const dash = plain(F.detailView(views, 150, 80, NOW, 0, false));
+      expect(dash.filter((r) => r.includes("◇")).length).toBe(2);
+      expect(dash.join("\n")).not.toContain("Reply 3");
+      expect(dash.some((r) => r.includes("◇ Reply 5, first paragraph. • a bullet in reply 5 • another Reply 5, last paragraph."))).toBe(true);
+      // When even one session is too much for the screen, focus comes back down the same ladder: oldest replies first.
+      const tight = plain(F.detailView(views, 150, 24, NOW, 0, true));
+      expect(tight.length).toBeLessThanOrEqual(24);
+      expect(tight.join("\n")).not.toContain("Reply 1,");
+      expect(tight.some((r) => r.includes("Reply 6, last paragraph."))).toBe(true);
+    });
+  });
+
+  test("new since you looked, a stalled thread and the runway each show where the design puts them", () => {
+    const before = F.seen.at;
+    try {
+      const s = busy(NOW);
+      F.seen.at = NOW - 3 * MIN; // you looked three minutes ago: the newest reply (2m) is new, the one before it (3m) is not
+      const views = F.buildViews([s], NOW, 80);
+      const raw = F.detailView(views, 150, 40, NOW, 0, false);
+      const rows = plain(raw);
+      const newest = rows.findIndex((r) => r.includes("◆ Two of the three"));
+      expect(rows[newest].slice(0, 104)).toMatch(/ new$/);
+      expect(raw[newest]).toContain(F.bold(F.fg(F.C.white, "◆")));
+      expect(raw[newest]).toContain(F.bold(F.fg(F.C.white, "new")));
+      expect(rows[rows.findIndex((r) => r.includes("◇ Three tests"))].slice(0, 104)).toMatch(/ 3m$/);
+      // A thread the stall watch has marked: red ◐ and age, and its action says so first.
+      views[0].stall = { session: false, threads: ["w5"], count: 1, since: NOW - 4 * MIN };
+      views[0].state = "stalled";
+      const stalled = F.detailView(views, 150, 40, NOW, 0, false);
+      const row = stalled.find((r) => r.includes("review:clock-in-refund"))!;
+      expect(strip(row).slice(0, 104)).toBe(" ▌    ◐ review:clock-in-refund                    stalled? Bash  Run the refund tests …             opus");
+      expect(row).toContain(F.fg(F.C.red, "◐"));
+      expect(row).toContain(F.bold(F.fg(F.C.red, "stalled? ")));
+      expect(row).toContain(F.bold(F.fg(F.C.red, "4m")));
+      expect(strip(stalled[0])).toMatch(/◐ S T A L L E D \?  ·  4m$/);
+      expect(stalled[0]).toContain(F.fg(F.C.red, "██"));
+      // The runway sits at the right end of the key row, and the key gives way to it.
+      const growing = busy(NOW);
+      growing.mains[0].ctxLog = Array.from({ length: 11 }, (_, i): [number, number] => [NOW - (10 - i) * MIN, 611_000 - 97_500 + i * 9_750]);
+      const key = plain(F.detailView(F.buildViews([growing], NOW, 80), 150, 40, NOW, 0, false))[3];
+      expect(key).toMatch(/■ Used \d+k {2,}full in ~40m$/);
+      expect(F.width(key)).toBe(149);
+    } finally {
+      F.seen.at = before;
+    }
+  });
+
+  test("both head rows of a session are click targets that focus it", () => {
+    quietly(() => {
+      const sessions = three(NOW);
+      F.detailView(viewsOf(sessions, NOW), 150, 38, NOW, 5);
+      const targets = F.clickTargets().filter((h) => h.act.startsWith("focus:"));
+      expect(targets.slice(-6).map((h) => [h.row, h.act])).toEqual([
+        [6, "focus:aaaaaaaa-0001"], [7, "focus:aaaaaaaa-0001"],
+        [18, "focus:cccccccc-0003"], [19, "focus:cccccccc-0003"],
+        [27, "focus:bbbbbbbb-0002"], [28, "focus:bbbbbbbb-0002"],
+      ]);
+      for (const h of targets.slice(-6)) expect([h.x0, h.x1]).toEqual([1, 150]);
+    });
   });
 });
 
