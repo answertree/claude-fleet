@@ -937,7 +937,11 @@ const ls = (d: string): string[] => {
     return [];
   }
 };
+/** FLEET_MACHINE_FIXTURE (test only): a JSON file that stands in for this machine (CPU, memory, load, processes), so a frame can be reproduced exactly. */
+let machineFixture: any;
+const fixtureMachine = (): any => (machineFixture ??= (process.env.FLEET_MACHINE_FIXTURE && readJson(process.env.FLEET_MACHINE_FIXTURE)) || false);
 const alive = (pid: number) => {
+  if (fixtureMachine() && (fixtureMachine().procs ?? []).some((p: any) => p.pid === pid)) return true; // a made-up process is as alive as its fixture says
   try {
     process.kill(pid, 0);
     return true;
@@ -1187,6 +1191,19 @@ export const machine = {
 };
 
 export function sampleMachine() {
+  const fx = fixtureMachine();
+  if (fx) {
+    machine.cores = fx.cores ?? [];
+    machine.cpu = fx.cpu ?? (machine.cores.length ? sum(machine.cores) / machine.cores.length : 0);
+    machine.hist = fx.hist ?? [machine.cpu];
+    machine.load = fx.load ?? 0;
+    machine.memTotal = fx.memTotal ?? machine.memTotal;
+    machine.memUsed = fx.memUsed ?? 0;
+    machine.procs = (fx.procs ?? []).map((p: any) => ({ pid: +p.pid, ppid: +(p.ppid ?? 1), cpu: +(p.cpu ?? 0), rss: +(p.rss ?? 0), name: String(p.name ?? "") }));
+    machine.kids = new Map();
+    for (const p of machine.procs) machine.kids.set(p.ppid, [...(machine.kids.get(p.ppid) ?? []), p]);
+    return;
+  }
   const cpus = os.cpus();
   const snap = cpus.map((c) => {
     const total = c.times.user + c.times.nice + c.times.sys + c.times.idle + c.times.irq;
@@ -1681,13 +1698,15 @@ function usageRow(W: number, now: number): string {
     line += fg(C.dim, `  ${label} `) + gauge(l.pct, GW, tone) + fg(tone, ` ${Math.round(l.pct)}%`) + fg(C.dim, resets ? " · " + resets : "");
     used += width(text);
   }
-  const tail: [string, RGB][] = [];
-  if (a.extra && W >= 120) tail.push(["   extra usage ", C.dim], a.extra.enabled ? [`${a.extra.used} of ${a.extra.limit}`, stale ? C.dim : C.text] : ["off", C.dim]);
-  if (stale || a.reason) tail.push([`   (${stale ? `as of ${hhmm(a.asOf)}` : "shared figures"}${a.reason ? " · " + a.reason : ""})`, C.dim]);
-  for (const [text, color] of tail) {
-    if (used + width(text) > W - 1) break;
-    line += fg(color, text);
-    used += width(text);
+  // While a read is failing, say so before anything else that is optional.
+  if (stale || a.reason) {
+    const why = fit(`(${stale ? `as of ${hhmm(a.asOf)}` : "shared figures"}${a.reason ? " · " + a.reason : ""})`, Math.min(W - 1 - used - 3, 70)).trimEnd();
+    line += "   " + fg(C.dim, why);
+    used += 3 + width(why);
+  }
+  if (a.extra && W >= 120) {
+    const text = a.extra.enabled ? `${a.extra.used} of ${a.extra.limit}` : "off";
+    if (used + 15 + width(text) <= W - 1) line += fg(C.dim, "   extra usage ") + fg(stale || !a.extra.enabled ? C.dim : C.text, text);
   }
   return line;
 }
@@ -2217,26 +2236,26 @@ export interface View {
 export function buildViews(sessions: Session[], now: number, sayWidth: number, since = now - opt.windowMin * 60_000): View[] {
   const recent = (a: Agent) => Math.max(a.tail.lastT, a.tail.mtime) >= since;
   const order: Record<AgentState, number> = { active: 0, tool: 1, quiet: 2, done: 3 };
-  const pick = (list: Agent[]) =>
+  const pick = (list: Agent[], stuck: string[]) =>
     list
       .filter((a) => recent(a) && (opt.showDone || !a.done))
-      .sort((a, b) => order[stateOf(a, now)] - order[stateOf(b, now)] || a.tail.birth - b.tail.birth);
+      .sort((a, b) => Number(stuck.includes(b.id)) - Number(stuck.includes(a.id)) || order[stateOf(a, now)] - order[stateOf(b, now)] || a.tail.birth - b.tail.birth);
 
   return sessions
     .map((s) => {
+      const facts = factsOf(s);
+      const stall = stallOf(s, facts, now);
       const groups: Group[] = [];
       for (const wf of s.workflows) {
         const live = wf.status === "running" && wf.lastT >= since;
         const justFinished = wf.status !== "running" && Math.max(wf.finished, wf.lastT) >= since;
-        if (live || justFinished) groups.push({ wf, rows: pick(wf.agents), hidden: 0 });
+        if (live || justFinished) groups.push({ wf, rows: pick(wf.agents, stall.threads), hidden: 0 }); // a stalled agent is the last to be folded away
       }
       groups.sort((a, b) => a.wf!.started - b.wf!.started);
-      const solo = pick(s.agents);
+      const solo = pick(s.agents, stall.threads);
       if (solo.length) groups.push({ rows: solo, hidden: 0 });
       const doneCount = opt.showDone ? 0 : s.agents.filter((a) => a.done && recent(a)).length;
       const lastT = Math.max(0, ...s.mains.map((m) => m.mtime), ...s.agents.map((a) => a.tail.mtime));
-      const facts = factsOf(s);
-      const stall = stallOf(s, facts, now);
       const m = facts.main;
       return {
         s,
@@ -2479,9 +2498,11 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
     const status = f.needs ? `⚠ NEEDS YOU${f.main ? " · " + ago(quiet) : ""}` : stalled ? `stalled? · ${ago(now - v.stall.since)}` : f.yourTurn ? `your turn · ${ago(now - (f.main?.say?.t ?? now))}` : `${s.job?.state === "working" ? "working" : s.status || "?"} · up ${ago(now - s.startedAt)}`;
     const statusTone = f.needs ? C.yellow : stalled ? C.red : f.yourTurn ? C.purple : busyNow ? C.green : C.dim;
     const idW = 13;
-    const whereW = W >= 160 ? 34 : W >= 125 ? 22 : 0;
     const statusW = 19;
-    const nameW = W - 3 - idW - 2 - (whereW ? whereW + 2 : 0) - statusW - 2 - S - 2 - rightW - 1;
+    // The place column appears only where the name keeps 18 cells beside it (it used to squeeze the name to 2 at 130 columns).
+    const nameRoom = W - 3 - idW - 2 - statusW - 2 - S - 2 - rightW - 1;
+    const whereW = W >= 160 ? 34 : nameRoom - 24 >= 18 ? 22 : 0;
+    const nameW = nameRoom - (whereW ? whereW + 2 : 0);
     hits.push({ row: out.length + 1, x0: 1, x1: W, act: "focus:" + s.sid });
     out.push(
       " " +
@@ -2711,7 +2732,7 @@ if (import.meta.main) {
   if (opt.once) {
     sampleMachine();
     if (opt.usage) await fetchUsage();
-    await new Promise((r) => setTimeout(r, 300)); // a second CPU sample, so the gauge is a rate
+    if (!fixtureMachine()) await new Promise((r) => setTimeout(r, 300)); // a second CPU sample, so the gauge is a rate
     refresh();
     const cols = Number(process.env.COLUMNS) || process.stdout.columns || 140;
     const rows = Number(process.env.LINES) || process.stdout.rows || 45;

@@ -109,6 +109,20 @@ Without `--usage`, Claude Fleet makes no network requests at all.
 
 `bun demo.ts` builds a throwaway set of fake sessions and runs the dashboard against it; it accepts the same options. `bun run screenshots` regenerates the images above from that demo.
 
+The demo has options of its own, so every state can be seen without waiting for it to happen:
+
+| Option | Shows |
+| --- | --- |
+| `--six` | Six sessions sharing the screen: one waiting on you, five working. |
+| `--all` | As well as the finished job, a session waiting for your next prompt and an idle one. |
+| `--stalled` | An agent that has sat on a tool call for 14 minutes while its session is idle. |
+| `--runway` | A session whose context is growing steadily, so its forecast appears. |
+| `--ended` | A completed workflow and a failed one. |
+| `--account <state>` | A made-up account (it turns `--usage` on): `current`, `extra-off`, `early` (the 5-hour limit runs out before it resets), `stale`, `none`, `remote`. |
+| `--seen <minutes>` | The screen as if you last looked that many minutes ago. |
+| `--surprise` | `--stalled --runway --account early --seen 18` together. |
+| `--real-machine` | This machine's CPU, memory and load instead of the made-up ones. |
+
 `bun test` runs the tests in `fleet.test.ts` (Bun's built-in runner, no packages). `tools/check-frames` renders the demo at seven terminal sizes in all three modes and fails if a frame has the wrong number of rows, a line wider than the terminal, or the text "undefined" or "NaN" on it. `bun run check` runs both.
 
 These environment variables exist for tests and screenshots only:
@@ -117,6 +131,7 @@ These environment variables exist for tests and screenshots only:
 | --- | --- |
 | `FLEET_HOME` | Look here instead of `~/.claude` (the demo uses it). |
 | `FLEET_NOW` | Pin the clock, in milliseconds since 1970, so `--once` prints the same frame every time. |
+| `FLEET_MACHINE_FIXTURE` | Take CPU, memory, load and the process list from this JSON file instead of sampling the machine. Processes listed in it count as alive. |
 | `FLEET_USAGE_FIXTURE` | Take the usage figures from this JSON file instead of reading the login and asking Anthropic. A `fetchedAt` in the file sets their age. Figures from a fixture are never saved to the shared file. |
 | `FLEET_SEEN` | Start the "seen" mark at this time (milliseconds since 1970) instead of at launch, so a single frame can show things as new. |
 | `FLEET_USAGE_FAIL` | Make the usage read fail with this reason. With `FLEET_USAGE_FIXTURE` also set, the fixture stands in for the shared file, which shows the "as of" state. |

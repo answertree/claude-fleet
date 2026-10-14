@@ -15,8 +15,8 @@ process.env.FLEET_HOME = path.join(SCRATCH, "home");
 delete process.env.FLEET_USAGE_FIXTURE;
 delete process.env.FLEET_USAGE_FAIL;
 afterAll(() => fs.rmSync(SCRATCH, { recursive: true, force: true }));
-/** A fixed clock for every test: Tue 13 Oct 2026, 23:51:22 local time. */
-const NOW = new Date(2026, 9, 13, 23, 51, 22).getTime();
+/** A fixed clock for every test: Tue 13 Oct 2026, 23:51:22. (bun test runs in UTC, so local-time formatting is the same on every machine.) */
+const NOW = Date.UTC(2026, 9, 13, 23, 51, 22);
 const MIN = 60_000;
 const strip = (s: string) => s.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "");
 
@@ -1143,5 +1143,65 @@ describe("since you looked", () => {
     expect(strip(F.buttonBar(150, 44, 1))).not.toContain("Retry usage"); // only while a usage read is failing
     for (const W of [80, 100, 110, 130, 150, 200]) expect(F.cells(F.buttonBar(W, 44, 3))).toBeLessThanOrEqual(W);
     resetSeen(NOW);
+  });
+});
+
+describe("demo", () => {
+  const FIXED = String(NOW);
+  /** One frame of the demo as plain text, with a pinned clock. */
+  const demo = (args: string[], cols = 200, rows = 60) => {
+    const r = Bun.spawnSync(["bun", path.join(here, "demo.ts"), "--once", ...args], { env: { ...process.env, FLEET_NOW: FIXED, TZ: "UTC", COLUMNS: String(cols), LINES: String(rows) }, timeout: 30_000 });
+    expect(r.stderr.toString()).toBe("");
+    expect(r.exitCode).toBe(0);
+    return r.stdout.toString();
+  };
+  /** Lower case with the spaces out, so a word is found however a renderer letter-spaces or pads it. */
+  const squash = (frame: string) => strip(frame).toLowerCase().replace(/[ \t]/g, "");
+
+  test("a pinned clock gives the same frame every time, and --once never touches the terminal title", () => {
+    const a = demo(["--surprise"], 150, 44);
+    const b = demo(["--surprise"], 150, 44);
+    expect(a).toBe(b);
+    expect(a).not.toContain("\x1b]"); // no title sequence
+    expect(a.split("\n").length).toBe(45); // 44 rows and the final line break
+    expect(strip(a).split("\n")[0]).toContain("23:51:22"); // the pinned clock, in the UTC the demo is run in here
+  });
+
+  test("the default demo is today's three sessions with one finished job kept off the screen", () => {
+    const frame = squash(demo([]));
+    for (const name of ["checkoutflowredesign", "flakytesthunt", "docssitesearch"]) expect(frame).toContain(name);
+    expect(frame).not.toContain("searchreindex");
+    expect(frame).not.toContain("stalled?");
+    expect(frame).not.toContain("fullin~");
+    expect(frame).toContain("aall·1idle");
+    expect(frame).toContain("bun212%"); // the made-up machine
+  });
+
+  test("--surprise shows a stalled agent, a context forecast and things new since you looked", () => {
+    const frame = squash(demo(["--surprise"]));
+    expect(frame).toContain("stalled?");
+    expect(frame).toContain("fullin~40m");
+    expect(frame).toMatch(/seen·\d+new/);
+    expect(frame).toContain("86%"); // the 5-hour limit that runs out before it resets
+  });
+
+  test("--six, --all and --ended add their sessions and workflows", () => {
+    const sixFrame = squash(demo(["--six", "--mode", "compact"]));
+    for (const name of ["checkoutflow", "flakytesthunt", "searchreindex", "billingexport", "upgradetooling", "onboardingemails"]) expect(sixFrame).toContain(name);
+    const allFrame = squash(demo(["--all", "--ended", "--mode", "compact"]));
+    for (const name of ["releasenotesdraft", "scratch", "renamebillingmodule", "link-check", "reindex-preview", "completed", "failed", "412ktok"]) expect(allFrame).toContain(name);
+    expect(allFrame).toContain("aall·3idle");
+  });
+
+  test("--account shows each account state without a real account", () => {
+    expect(squash(demo(["--account", "current"]))).toContain("38%");
+    expect(squash(demo(["--account", "current"]))).toContain("£12of£50");
+    expect(squash(demo(["--account", "extra-off"]))).toContain("12%"); // the Opus week, returned only here
+    expect(squash(demo(["--account", "stale"]))).toContain("anthropicanswered429");
+    expect(squash(demo(["--account", "stale"]))).toMatch(/asof\d\d:\d\d/);
+    expect(squash(demo(["--account", "none"]))).toContain("keychain:noanswerin5s");
+    expect(squash(demo(["--account", "remote"]))).toContain("keychain:closedtoremote");
+    expect(squash(demo(["--account", "remote"]))).toContain("uretryusage");
+    expect(squash(demo(["--account", "current"]))).not.toContain("uretryusage");
   });
 });
