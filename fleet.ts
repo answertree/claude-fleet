@@ -37,6 +37,9 @@ Usage: bun fleet.ts [minutes] [options]
   --bell         ring the terminal bell when a session starts waiting on you
   --no-mouse     do not capture mouse clicks
   --once         print one frame and exit
+  --glyphs       print a test card of every glyph the screen uses, to check that
+                 your terminal draws each one a single cell wide, and exit
+  --plain-glyphs use fallbacks for glyphs some fonts lack (≡ ┿ ╌ ◇)
 
 Keys: 1 2 3 view mode · + - window · a all sessions · d finished agents
       tab focus next session · b bell · esc leave focus · q quit
@@ -54,11 +57,14 @@ export const opt = {
   usage: false,
   mouse: true,
   once: false,
+  plainGlyphs: false, // --plain-glyphs: fallbacks for fonts that lack ≡ ┿ ╌ ◇
 };
 
 /** Read the command line into `opt`. Returns the one-shot command it asked for, if any. */
-export function parseArgs(argv: string[]): "help" | undefined {
+export function parseArgs(argv: string[]): "help" | "glyphs" | undefined {
   if (argv.includes("--help") || argv.includes("-h")) return "help";
+  setPlainGlyphs(argv.includes("--plain-glyphs"));
+  if (argv.includes("--glyphs")) return "glyphs";
   const TAKES_VALUE = ["--mode"];
   const valueOf = (flag: string) => (argv.includes(flag) ? argv[argv.indexOf(flag) + 1] : undefined);
   const modeArg = valueOf("--mode");
@@ -81,24 +87,42 @@ const hits: { row: number; x0: number; x1: number; act: string }[] = [];
 // ───────────────────────── colour and text helpers ─────────────────────────
 
 export type RGB = [number, number, number];
+/** The palette. One law: warm means you. Amber only where the person is needed, red only where something is broken or nearly out. */
 export const C = {
-  dim: [92, 99, 112] as RGB,
-  faint: [58, 64, 74] as RGB,
-  text: [198, 205, 215] as RGB,
-  white: [245, 247, 250] as RGB,
-  green: [80, 200, 120] as RGB,
-  yellow: [229, 181, 68] as RGB,
-  red: [240, 98, 92] as RGB,
-  blue: [97, 170, 255] as RGB,
-  purple: [190, 148, 255] as RGB,
-  cyan: [86, 205, 214] as RGB,
+  white: [245, 247, 250] as RGB, // bold: titles, the clock, counts, the question, the current phase
+  text: [198, 205, 215] as RGB, // the newest reply, live labels, figures
+  dim: [92, 99, 112] as RGB, // earlier replies, places, labels, units, ages
+  faint: [58, 64, 74] as RGB, // gauge tracks, empty buckets, free context, rules
+  amber: [229, 181, 68] as RGB, // you are needed: ▲, NEEDS YOU, that session's rail, the masthead tile
+  tint: [52, 38, 0] as RGB, // background behind a waiting session's title and question
+  warmDim: [150, 130, 90] as RGB, // dim text on the tint
+  red: [240, 98, 92] as RGB, // broken or nearly out: ✗, failed, any limit at 80% or more, stalled
+  green: [80, 200, 120] as RGB, // alive: ●, WORKING, the spinner, "live", ✓ inside strips
+  done: [62, 128, 92] as RGB, // receded green: ✓ on rows that are history, passed phases, "none waiting"
+  blue: [97, 170, 255] as RGB, // you: ▸ and YOUR TURN
+  pale: [150, 190, 245] as RGB, // the text of your prompt
+  cyan: [86, 205, 214] as RGB, // Claude: the brand, ◆, bullets, pending tool names
+  purple: [190, 148, 255] as RGB, // workflow, and nothing else
+  code: [150, 196, 204] as RGB, // inline code and code lines
+  calm: [96, 170, 182] as RGB, // a limit gauge below 60%
+  button: [40, 45, 54] as RGB,
+  yellow: [229, 181, 68] as RGB, // the old name for amber, still used by the old renderer
+};
+/** Sparkline ramps, low to high. Hue says whose activity it is, height says how much. */
+export const RAMP = {
+  fleet: [[40, 110, 90], [120, 240, 170]] as [RGB, RGB],
+  session: [[52, 84, 150], [150, 200, 255]] as [RGB, RGB],
+  agent: [[38, 86, 110], [96, 214, 226]] as [RGB, RGB], // agents and the main thread
+  workflow: [[90, 70, 140], [200, 165, 255]] as [RGB, RGB],
+  machine: [[40, 100, 110], [150, 225, 235]] as [RGB, RGB], // cpu gauge, history and cores: a rate, so it never turns warm
 };
 export const fg = (c: RGB, s: string) => `\x1b[38;2;${c[0]};${c[1]};${c[2]}m${s}\x1b[39m`;
 export const bold = (s: string) => `\x1b[1m${s}\x1b[22m`;
 export const mix = (a: RGB, b: RGB, t: number): RGB => [0, 1, 2].map((i) => Math.round(a[i] + (b[i] - a[i]) * t)) as RGB;
 
+const ZERO_WIDTH = /[\p{Mn}\p{Me}\p{Cf}]/u; // combining marks, variation selectors, joiners, direction marks
 export function charWidth(cp: number): number {
-  if (cp < 0x1100) return 1;
+  if (cp < 0x300) return cp === 0xad ? 0 : 1;
   if (
     (cp >= 0x1100 && cp <= 0x115f) ||
     (cp >= 0x2e80 && cp <= 0xa4cf) ||
@@ -106,12 +130,76 @@ export function charWidth(cp: number): number {
     (cp >= 0xf900 && cp <= 0xfaff) ||
     (cp >= 0xfe30 && cp <= 0xfe6f) ||
     (cp >= 0xff00 && cp <= 0xff60) ||
-    (cp >= 0x1f300 && cp <= 0x1faff)
+    (cp >= 0x1f300 && cp <= 0x1faff) ||
+    (cp >= 0x20000 && cp <= 0x3fffd)
   )
     return 2;
-  return 1;
+  return ZERO_WIDTH.test(String.fromCodePoint(cp)) ? 0 : 1;
 }
 export const width = (s: string) => [...s].reduce((n, ch) => n + charWidth(ch.codePointAt(0)!), 0);
+
+// Codepoints below U+3000 that Unicode gives an emoji form (emoji-data.txt, Emoji=Yes). A terminal or
+// font may draw any of them as a two-cell colour picture, which is what pushes columns out of line on iOS.
+const EMOJI_FORM: number[] = [
+  0xa9, 0xa9, 0xae, 0xae, 0x203c, 0x203c, 0x2049, 0x2049, 0x2122, 0x2122, 0x2139, 0x2139, 0x2194, 0x2199, 0x21a9, 0x21aa, 0x231a, 0x231b,
+  0x2328, 0x2328, 0x23cf, 0x23cf, 0x23e9, 0x23f3, 0x23f8, 0x23fa, 0x24c2, 0x24c2, 0x25aa, 0x25ab, 0x25b6, 0x25b6, 0x25c0, 0x25c0, 0x25fb, 0x25fe,
+  0x2600, 0x2604, 0x260e, 0x260e, 0x2611, 0x2611, 0x2614, 0x2615, 0x2618, 0x2618, 0x261d, 0x261d, 0x2620, 0x2620, 0x2622, 0x2623, 0x2626, 0x2626,
+  0x262a, 0x262a, 0x262e, 0x262f, 0x2638, 0x263a, 0x2640, 0x2640, 0x2642, 0x2642, 0x2648, 0x2653, 0x265f, 0x2660, 0x2663, 0x2663, 0x2665, 0x2666,
+  0x2668, 0x2668, 0x267b, 0x267b, 0x267e, 0x267f, 0x2692, 0x2697, 0x2699, 0x2699, 0x269b, 0x269c, 0x26a0, 0x26a1, 0x26a7, 0x26a7, 0x26aa, 0x26ab,
+  0x26b0, 0x26b1, 0x26bd, 0x26be, 0x26c4, 0x26c5, 0x26c8, 0x26c8, 0x26ce, 0x26cf, 0x26d1, 0x26d1, 0x26d3, 0x26d4, 0x26e9, 0x26ea, 0x26f0, 0x26f5,
+  0x26f7, 0x26fa, 0x26fd, 0x26fd, 0x2702, 0x2702, 0x2705, 0x2705, 0x2708, 0x270d, 0x270f, 0x270f, 0x2712, 0x2712, 0x2714, 0x2714, 0x2716, 0x2716,
+  0x271d, 0x271d, 0x2721, 0x2721, 0x2728, 0x2728, 0x2733, 0x2734, 0x2744, 0x2744, 0x2747, 0x2747, 0x274c, 0x274c, 0x274e, 0x274e, 0x2753, 0x2755,
+  0x2757, 0x2757, 0x2763, 0x2764, 0x2795, 0x2797, 0x27a1, 0x27a1, 0x27b0, 0x27b0, 0x27bf, 0x27bf, 0x2934, 0x2935, 0x2b05, 0x2b07, 0x2b1b, 0x2b1c,
+  0x2b50, 0x2b50, 0x2b55, 0x2b55,
+];
+/** True when Unicode gives this codepoint an emoji form, so it is not safe to draw in a one-cell column. */
+export function hasEmojiForm(cp: number): boolean {
+  if (cp >= 0x1f000 && cp <= 0x1ffff) return true;
+  if (cp < 0xa9 || cp > 0x2b55) return false;
+  for (let i = 0; i < EMOJI_FORM.length; i += 2) if (cp >= EMOJI_FORM[i] && cp <= EMOJI_FORM[i + 1]) return true;
+  return false;
+}
+/** Pictures that stand for something the safe glyph set can say. Everything else with an emoji form is dropped. */
+const SAFE_SWAP: Record<string, string> = {
+  "✅": "✓", "☑": "✓", "✔": "✓", "❌": "✗", "✖": "✗", "❎": "✗",
+  "⚠": "!", "❗": "!", "❕": "!", "‼": "!!", "⁉": "!?", "❓": "?", "❔": "?",
+  "➡": "→", "⬅": "←", "⬆": "↑", "⬇": "↓", "↔": "<->", "▶": "▸", "◀": "◂", "▪": "■", "▫": "□",
+  "©": "(c)", "®": "(R)", "™": "TM", "ℹ": "i", "⭐": "*",
+};
+/**
+ * Reduce text that came from a session (replies, prompts, questions, now-lines, labels, tool hints,
+ * names) to glyphs that are exactly one cell wide everywhere, so nothing it contains can push a column
+ * out of line. Ticks and crosses become ✓ and ✗; other emoji, variation selectors, joiners, combining
+ * marks, control characters and terminal escape sequences are removed; tabs become two spaces;
+ * full-width Latin becomes plain Latin; any other double-width character becomes "?". Line breaks stay.
+ * Afterwards every character other than a line break is one cell: width(s) equals its character count.
+ */
+export function safeText(s: string): string {
+  if (/^[\x20-\x7e\n]*$/.test(s)) return s; // plain ASCII, the usual case
+  s = s
+    .replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, "")
+    .replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)?/g, "")
+    .replace(/\r\n?|[\u2028\u2029]/g, "\n")
+    .replace(/\t/g, "  ")
+    .normalize("NFC");
+  let out = "";
+  for (const ch of s) {
+    const cp = ch.codePointAt(0)!;
+    const swap = SAFE_SWAP[ch];
+    if (cp === 0x0a) out += ch;
+    else if (cp < 0x20 || (cp >= 0x7f && cp < 0xa0)) continue;
+    else if (swap !== undefined) out += swap;
+    else if (cp < 0x300) out += cp === 0xa0 ? " " : cp === 0xad ? "" : ch;
+    else if ((cp >= 0x2000 && cp <= 0x200a) || cp === 0x202f || cp === 0x205f || cp === 0x3000) out += " ";
+    else if (cp >= 0xff01 && cp <= 0xff5e) out += String.fromCodePoint(cp - 0xfee0);
+    else if (hasEmojiForm(cp) || ZERO_WIDTH.test(ch)) continue;
+    else if (charWidth(cp) !== 1) out += "?";
+    else out += ch;
+  }
+  return out;
+}
+/** Session text as one safe line: safeText(), then every run of white space becomes one space. */
+export const safeLine = (s: unknown): string => safeText(String(s ?? "")).replace(/\s+/g, " ").trim();
 
 /** Truncate or pad plain text to exactly `w` display columns. */
 export function fit(s: string, w: number, align: "l" | "r" = "l", keepSpacing = false): string {
@@ -280,6 +368,266 @@ export function tallSpark(counts: number[], max: number, h: number, lo: RGB, hi:
 
 export const SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
 
+// ───────────────────────── vocabulary ─────────────────────────
+
+/**
+ * Every glyph the screen may use, in one table: `g` is the glyph, `plain` the fallback --plain-glyphs
+ * swaps in for a font that lacks it, `is` what it means. None has an emoji form and none is outside box
+ * drawing, block elements, braille, the common geometric shapes, ✓ ✗ and Latin punctuation; the test
+ * suite checks that. Retired, never to be drawn again: ⚠ ⚙ ⎇ ▪ ◈ ▤ ┆.
+ */
+export const GLYPHS = {
+  needs: { g: "▲", is: "needs you: blocked on the person" },
+  working: { g: "●", is: "working: a session that is alive and busy" },
+  you: { g: "▸", is: "you: something you typed, or your turn" },
+  claude: { g: "◆", is: "Claude: the brand, and its newest reply" },
+  earlier: { g: "◇", plain: "◆", is: "an earlier Claude reply" },
+  live: { g: SPIN[0], is: "live: wrote within the last minute (animated)" },
+  progress: { g: "◐", is: "in progress: started, not finished" },
+  idle: { g: "○", is: "not started, quiet or idle" },
+  done: { g: "✓", is: "done" },
+  failed: { g: "✗", is: "failed, stopped or unavailable" },
+  workflow: { g: "≡", plain: "◇", is: "workflow" },
+  railThick: { g: "██", is: "state rail on a session's head rows" },
+  railThin: { g: "▌", is: "state rail on body rows; half a cell of context" },
+  gaugeFill: { g: "━", is: "gauge: filled" },
+  gaugeTrack: { g: "─", is: "gauge: remaining; rules" },
+  gaugeNone: { g: "╌", plain: "─", is: "gauge: no reading" },
+  pace: { g: "┼", is: "pace tick on the empty track" },
+  paceFilled: { g: "┿", plain: "┼", is: "pace tick inside the filled part" },
+  ctxFull: { g: "█", is: "context window: a full cell" },
+  ctxFree: { g: "░", is: "context window: free space" },
+  swatch: { g: "■", is: "colour key swatch" },
+  bullet: { g: "•", is: "bullet in a reply" },
+  nested: { g: "–", is: "nested bullet" },
+  gutter: { g: "│", is: "code-line and quote gutter" },
+  cut: { g: "…", is: "text was cut" },
+  at: { g: "@", is: "joins folder and branch" },
+  sep: { g: "·", is: "separates facts on one line" },
+  tick: { g: "┴", is: "time-axis tick at each third of the window" },
+  seen: { g: "▼", is: "when you last looked" },
+} satisfies Record<string, { g: string; plain?: string; is: string }>;
+export type IconName = keyof typeof GLYPHS;
+/** The glyph to draw for each name: ICON.needs, ICON.workflow… Always read glyphs from here, so --plain-glyphs reaches them. */
+export const ICON = Object.fromEntries(Object.entries(GLYPHS).map(([k, v]) => [k, v.g])) as Record<IconName, string>;
+/** --plain-glyphs: swap in the fallbacks (≡→◇, ┿→┼, ╌→─, ◇→◆) for a terminal font that lacks the originals. */
+export function setPlainGlyphs(on: boolean) {
+  opt.plainGlyphs = on;
+  for (const [k, v] of Object.entries(GLYPHS) as [IconName, { g: string; plain?: string }][]) ICON[k] = on && v.plain ? v.plain : v.g;
+}
+
+export type SessionState = "needs" | "stalled" | "working" | "yourTurn" | "idle" | "finished";
+/** Each session state has its own glyph, word and colour, so the screen still reads without colour. Listed in sort order. */
+export const STATE: Record<SessionState, { glyph: string; word: string; color: RGB }> = {
+  needs: { glyph: "▲", word: "NEEDS YOU", color: C.amber },
+  stalled: { glyph: "◐", word: "STALLED?", color: C.red },
+  working: { glyph: "●", word: "WORKING", color: C.green },
+  yourTurn: { glyph: "▸", word: "YOUR TURN", color: C.blue },
+  idle: { glyph: "○", word: "IDLE", color: C.dim },
+  finished: { glyph: "✓", word: "FINISHED", color: C.done },
+};
+export const STATE_ORDER = Object.keys(STATE) as SessionState[];
+
+/** One rule for every limit gauge (memory, 5h, 7d, extra, context %): calm below 60%, bold white to 79%, red from 80%. */
+export const limitTone = (pct: number): RGB => (pct >= 80 ? C.red : pct >= 60 ? C.white : C.calm);
+/** The figure printed beside a limit gauge follows the same rule, in text colour while calm. */
+export const figureTone = (pct: number): { color: RGB; bold: boolean } => (pct >= 80 ? { color: C.red, bold: true } : pct >= 60 ? { color: C.white, bold: true } : { color: C.text, bold: false });
+/** CPU is a rate, not a limit: its gauge, history and core strip run this cool ramp (t from 0 to 1) and never turn warm. */
+export const coolTone = (t: number): RGB => mix(RAMP.machine[0], RAMP.machine[1], Math.max(0, Math.min(1, t)));
+
+/** fleet --glyphs: every glyph between bars, so a glyph the terminal draws two cells wide pushes its closing bar out of line. */
+export function glyphCard(): string {
+  const cp = (g: string) => [...g].map((ch) => "U+" + ch.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")).join(" ");
+  const row = (g: string, note: string) => {
+    const cells = width(g);
+    return ` |${g}|${" ".repeat(3 - cells)} |${g.repeat(Math.floor(10 / cells))}|  ${fit(cp(g), 15, "l", true)}${note}`;
+  };
+  const ruler = " | |   |1234567890|  every closing bar below should sit under these";
+  const lines = ["Claude Fleet glyph test card" + (opt.plainGlyphs ? "  (--plain-glyphs)" : ""), "", ruler];
+  for (const [name, v] of Object.entries(GLYPHS) as [IconName, { g: string; plain?: string; is: string }][]) {
+    if (name === "live") continue; // the spinner's frames are listed below
+    lines.push(row(ICON[name], v.is + (v.plain ? (opt.plainGlyphs ? `  (standing in for ${v.g})` : `  (--plain-glyphs draws ${v.plain})`) : "")));
+  }
+  for (const g of BARS) lines.push(row(g, g === BARS[0] ? "activity over time, lowest to highest" : ""));
+  for (const g of SPIN) lines.push(row(g, g === SPIN[0] ? "live spinner, one frame each" : ""));
+  lines.push(ruler, "", "If a bar is out of line, that glyph is not one cell wide in this terminal. Try --plain-glyphs.");
+  return lines.join("\n") + "\n";
+}
+
+// ───────────────────────── layout grid ─────────────────────────
+
+/**
+ * The columns every row shares, for a terminal `W` cells wide. Columns count from 1 and ranges include
+ * both ends, as in the design; column c is string index c - 1. Columns 1 and W stay blank.
+ */
+export interface Grid {
+  W: number;
+  wide: boolean; // 130 and up: instruments sit beside the conversation, agents get a type column
+  narrow: boolean; // 100 to 129: instruments become one vitals row, the conversation runs the full width
+  small: boolean; // under 100: also today's header, no action column, no place on the title row
+  rail: number; // the state rail: ██ fills rail and rail + 1, ▌ sits on rail
+  icon: number; // speaker, task and thread glyphs
+  childIcon: number; // a workflow's agents, indented 2
+  text: number; // conversation text and roster labels start here
+  textEnd: number; // the left stack ends here; the place on the title row ends here too
+  measure: number; // cells of conversation text, from `text`
+  ageEnd: number; // ages in the conversation are right-aligned to end here
+  lane: number; // the lane: every sparkline on the screen sits in these columns
+  laneW: number; // …and has this many buckets
+  laneEnd: number;
+  fig: number; // figure field: totals, right-aligned to figEnd; roster ages end at figEnd too
+  figW: number;
+  figEnd: number;
+  label: number; // roster: thread label (from `text`; a workflow's agents start 2 further in)
+  labelEnd: number;
+  action: number; // roster: what the thread is doing
+  actionEnd: number;
+  type: number; // roster: type and model, right-aligned to typeEnd; 0 when there is no such column
+  typeEnd: number;
+  gaugeW: number; // header gauges
+  histW: number; // header cpu history
+  machine: number; // header blocks: machine from `machine` to machineEnd, account from `account` to accountEnd
+  machineEnd: number;
+  account: number;
+  accountEnd: number;
+}
+export function grid(W: number): Grid {
+  const wide = W >= 130;
+  const laneW = wide ? 30 : 20;
+  const figW = wide ? 12 : 9;
+  const figEnd = W - 1;
+  const lane = W - figW - laneW - 1;
+  const laneEnd = lane + laneW - 1;
+  const textEnd = lane - 3;
+  const actionEnd = textEnd - (wide ? 17 : 0);
+  const labelEnd = 7 + Math.min(42, Math.floor((actionEnd - 6) * 0.52)) - 1;
+  const account = wide ? 61 : 42;
+  return {
+    W,
+    wide,
+    narrow: !wide && W >= 100,
+    small: W < 100,
+    rail: 2,
+    icon: 5,
+    childIcon: 7,
+    text: 7,
+    textEnd,
+    measure: wide ? Math.min(96, textEnd - 12) : Math.min(96, W - 14),
+    ageEnd: wide ? textEnd : figEnd,
+    lane,
+    laneW,
+    laneEnd,
+    fig: laneEnd + 2,
+    figW,
+    figEnd,
+    label: 7,
+    labelEnd,
+    action: labelEnd + 3,
+    actionEnd,
+    type: wide ? textEnd - 14 : 0,
+    typeEnd: wide ? textEnd : 0,
+    gaugeW: wide ? 12 : 8,
+    histW: wide ? 20 : 12,
+    machine: 2,
+    machineEnd: account - 4,
+    account,
+    accountEnd: textEnd,
+  };
+}
+
+const ANSI = /\x1b\[[0-9;?]*[a-zA-Z]/g;
+/** Display cells a string takes once its colour codes are left out. */
+export const cells = (s: string) => width(s.replace(ANSI, ""));
+
+/**
+ * One screen row as cells, so text can be put at the columns grid() gives instead of being padded into
+ * place. Columns count from 1. Later text overwrites earlier text; anything past the last column is dropped.
+ */
+export class Row {
+  private cell: { ch: string; color?: RGB; bold?: boolean; raw?: boolean }[];
+  private bg: (RGB | undefined)[];
+  constructor(public W: number, bg?: RGB) {
+    this.cell = Array.from({ length: W }, () => ({ ch: " " }));
+    this.bg = new Array(W).fill(bg);
+  }
+  /** Put plain text starting at `col`. Returns the column after it. */
+  put(col: number, text: string, color: RGB = C.text, isBold = false): number {
+    for (const ch of text) {
+      const w = charWidth(ch.codePointAt(0)!);
+      if (w === 0) continue;
+      if (col >= 1 && col + w - 1 <= this.W) {
+        this.cell[col - 1] = { ch, color, bold: isBold };
+        if (w === 2) this.cell[col] = { ch: "" };
+      }
+      col += w;
+    }
+    return col;
+  }
+  /** Put plain text so that it ends at `end`. Returns the column before it. */
+  putr(end: number, text: string, color: RGB = C.text, isBold = false): number {
+    this.put(end - width(text) + 1, text, color, isBold);
+    return end - width(text);
+  }
+  /** Put several pieces one after another: [text, colour, bold?]. Returns the column after the last. */
+  segs(col: number, parts: [string, RGB?, boolean?][]): number {
+    for (const [text, color, isBold] of parts) col = this.put(col, text, color, isBold);
+    return col;
+  }
+  /** The same, ending at `end`. */
+  segsr(end: number, parts: [string, RGB?, boolean?][]): number {
+    const start = end - parts.reduce((n, p) => n + width(p[0]), 0) + 1;
+    this.segs(start, parts);
+    return start - 1;
+  }
+  /** Place something already coloured (a sparkline, a gauge, a context bar) that is `w` cells wide. Dropped if it does not fit. */
+  paste(col: number, ansi: string, w = cells(ansi)): number {
+    if (col >= 1 && w > 0 && col + w - 1 <= this.W) {
+      this.cell[col - 1] = { ch: ansi, raw: true };
+      for (let i = 1; i < w; i++) this.cell[col - 1 + i] = { ch: "" };
+    }
+    return col + w;
+  }
+  /** Set the background from column `from` to `to`, for the amber tint. */
+  tint(bg: RGB | undefined, from = 1, to = this.W): this {
+    for (let c = Math.max(1, from); c <= Math.min(this.W, to); c++) this.bg[c - 1] = bg;
+    return this;
+  }
+  /** The plain text of the row, without colour. */
+  plain(): string {
+    return this.cell.map((c) => (c.raw ? c.ch.replace(ANSI, "") : c.ch)).join("");
+  }
+  toString(): string {
+    let out = "";
+    let last = this.W;
+    while (last > 0 && this.cell[last - 1].ch === " " && !this.bg[last - 1]) last--; // nothing to draw past here
+    let bg: RGB | undefined;
+    for (let i = 0; i < last; ) {
+      const c = this.cell[i];
+      if (this.bg[i] !== bg) {
+        bg = this.bg[i];
+        out += bg ? `\x1b[48;2;${bg[0]};${bg[1]};${bg[2]}m` : "\x1b[49m";
+      }
+      if (c.raw || c.ch === "") {
+        out += c.ch;
+        i++;
+        continue;
+      }
+      // Gather the run of cells that share a style and a background.
+      let run = "";
+      let j = i;
+      for (; j < last; j++) {
+        const d = this.cell[j];
+        if (d.raw || d.ch === "" || d.color !== c.color || !!d.bold !== !!c.bold || this.bg[j] !== bg) break;
+        run += d.ch;
+      }
+      const painted = c.color ? fg(c.color, run) : run;
+      out += c.bold ? bold(painted) : painted;
+      i = j;
+    }
+    return out + (bg ? "\x1b[49m" : "");
+  }
+}
+
 // ───────────────────────── transcript tailing ─────────────────────────
 
 export interface Tail {
@@ -301,6 +649,7 @@ export interface Tail {
   say?: { text: string; t: number }; // last thing Claude wrote
   says: { text: string; t: number }[]; // its last few messages, oldest first
   summary?: string; // the session's own "while you were away" summary
+  summaryT?: number; // when it was written, so it can be compared with the last prompt
   ctx?: { used: number; model: string; req: string };
   parts?: Partial<Record<PartKey, number>>; // characters per context category, from the transcript's own attachments
 }
@@ -345,14 +694,15 @@ export function hintFor(name: string, input: any): string {
   return "";
 }
 
+/** Read one transcript line into the tail. Text a session wrote is made safe here, once, so everything drawn later already is. */
 export function ingest(t: Tail, line: string) {
   if (ATTACHMENT.test(line.slice(0, 2000)) || (line.length < 400_000 && ATTACHMENT.test(line))) return absorb(t, line);
   if (line.length < 2 || !line.includes('"timestamp"')) {
     if (line.length < 20_000 && (line.includes('"ai-title"') || line.includes('"last-prompt"'))) {
       try {
         const o = JSON.parse(line);
-        if (typeof o.aiTitle === "string") t.title = o.aiTitle;
-        if (typeof o.lastPrompt === "string") t.lastPrompt = o.lastPrompt;
+        if (typeof o.aiTitle === "string") t.title = safeLine(o.aiTitle);
+        if (typeof o.lastPrompt === "string") t.lastPrompt = safeText(o.lastPrompt);
       } catch {}
     }
     return;
@@ -375,17 +725,20 @@ export function ingest(t: Tail, line: string) {
   }
   const ts = Date.parse(o.timestamp);
   if (Number.isNaN(ts)) return;
-  if (o.type === "system" && o.subtype === "away_summary" && typeof o.content === "string") t.summary = o.content;
+  if (o.type === "system" && o.subtype === "away_summary" && typeof o.content === "string") {
+    t.summary = safeText(o.content);
+    t.summaryT = ts;
+  }
   if (o.type !== "assistant" && o.type !== "user") return;
   t.lastT = Math.max(t.lastT, ts);
-  if (typeof o.gitBranch === "string" && o.gitBranch) t.branch = o.gitBranch;
+  if (typeof o.gitBranch === "string" && o.gitBranch) t.branch = safeLine(o.gitBranch);
   const content = o.message?.content;
   if (o.type === "assistant") {
     if (Array.isArray(content)) {
       for (const item of content) {
         if (item?.type === "tool_use") {
           t.tools.push(ts);
-          t.lastTool = { name: String(item.name), hint: hintFor(item.name, item.input), t: ts };
+          t.lastTool = { name: safeLine(item.name), hint: safeLine(hintFor(item.name, item.input)), t: ts };
         }
       }
     }
@@ -394,7 +747,7 @@ export function ingest(t: Tail, line: string) {
     if (typeof out === "number" && o.message?.id) t.tokens.set(o.message.id, [ts, out]);
     if (!o.isSidechain) {
       if (Array.isArray(content)) for (const item of content) if (item?.type === "text" && typeof item.text === "string" && item.text.trim()) {
-          t.say = { text: item.text, t: ts };
+          t.say = { text: safeText(item.text), t: ts };
           t.says.push(t.say);
           if (t.says.length > 6) t.says.shift();
         }
@@ -409,7 +762,7 @@ export function ingest(t: Tail, line: string) {
     // Something the person typed. Harness-injected turns start with a tag; skip those.
     const texts: string[] = typeof content === "string" ? [content] : Array.isArray(content) ? content.filter((i: any) => i?.type === "text").map((i: any) => String(i.text ?? "")) : [];
     const typed = texts.map((x) => x.trim()).find((x) => x && !x.startsWith("<"));
-    if (typed) t.ask = { text: typed, t: ts };
+    if (typed) t.ask = { text: safeText(typed), t: ts };
   }
 }
 
@@ -519,13 +872,15 @@ export interface Agent {
   tail: Tail;
   done: boolean;
   wf?: string;
+  phase?: string; // the workflow phase it was started in
 }
 export interface Workflow {
   id: string;
   name: string;
   status: string;
-  phase: string;
-  phases: string[];
+  phase: string; // the current phase
+  phases: string[]; // the declared phase list; known only once the workflow's state file exists
+  seen: string[]; // phases that have started, in order, from the journal: what has happened, never a guess
   started: number;
   finished: number;
   agents: Agent[];
@@ -580,27 +935,41 @@ function meta(jsonl: string): any {
   return m ?? {};
 }
 
-const journalCache = new Map<string, { mtime: number; started: Map<string, any>; results: Set<string> }>();
-function journal(file: string) {
+interface Journal {
+  mtime: number;
+  started: Map<string, any>; // agent id -> its "started" entry
+  results: Set<string>; // agents that have reported a result
+  phases: string[]; // phases in the order their first agent started
+}
+/** Read a workflow journal's text: who started, in which phase, and who has finished. */
+export function readJournal(text: string, mtime = 0): Journal {
+  const started = new Map<string, any>();
+  const results = new Set<string>();
+  const phases: string[] = [];
+  for (const line of text.split("\n")) {
+    if (!line) continue;
+    try {
+      const o = JSON.parse(line);
+      if (o.type === "started") {
+        started.set(o.agentId, o);
+        const phase = safeLine(o.phase);
+        if (phase && !phases.includes(phase)) phases.push(phase);
+      } else if (o.type === "result") results.add(o.agentId);
+    } catch {}
+  }
+  return { mtime, started, results, phases };
+}
+const journalCache = new Map<string, Journal>();
+function journal(file: string): Journal {
   let mtime = 0;
   try {
     mtime = fs.statSync(file).mtimeMs;
   } catch {
-    return { mtime: 0, started: new Map<string, any>(), results: new Set<string>() };
+    return readJournal("");
   }
   const hit = journalCache.get(file);
   if (hit && hit.mtime === mtime) return hit;
-  const started = new Map<string, any>();
-  const results = new Set<string>();
-  for (const line of fs.readFileSync(file, "utf8").split("\n")) {
-    if (!line) continue;
-    try {
-      const o = JSON.parse(line);
-      if (o.type === "started") started.set(o.agentId, o);
-      else if (o.type === "result") results.add(o.agentId);
-    } catch {}
-  }
-  const entry = { mtime, started, results };
+  const entry = readJournal(fs.readFileSync(file, "utf8"), mtime);
   journalCache.set(file, entry);
   return entry;
 }
@@ -635,6 +1004,36 @@ export function shortModel(m: unknown): string {
     .replace(/-\d{8}$/, "");
 }
 
+/** The phase a workflow is in: the latest-started phase that still has an agent running, else the latest started. */
+export function currentPhase(seen: string[], running: Agent[]): string {
+  const live = running.map((a) => seen.indexOf(a.phase ?? "")).filter((i) => i >= 0);
+  return seen[live.length ? Math.max(...live) : seen.length - 1] ?? "";
+}
+
+export interface PhaseStep {
+  name: string;
+  state: "done" | "now" | "next"; // ✓ passed, ◐ current, ○ later
+}
+/**
+ * A workflow's phase trail, oldest first. Passed and current phases come from the journal's "started"
+ * entries. Later phases appear only when the declared list is known (wf.phases), which today means the
+ * workflow's state file exists. A phase that still has an agent running counts as current, so two can be.
+ */
+export function phaseTrail(wf: Workflow): PhaseStep[] {
+  const live = wf.status === "running";
+  const busy = new Set(wf.agents.filter((a) => !a.done).map((a) => a.phase ?? ""));
+  const list = wf.phases.length ? [...wf.phases, ...wf.seen.filter((p) => !wf.phases.includes(p))] : wf.seen;
+  const at = list.indexOf(wf.phase);
+  return list.map((name, i) => {
+    const started = wf.seen.includes(name);
+    if (live && (name === wf.phase || busy.has(name))) return { name, state: "now" };
+    if (live && wf.phases.length && (at >= 0 ? i > at : !started)) return { name, state: "next" };
+    return { name, state: started || !live ? "done" : "next" };
+  });
+}
+/** How a workflow ended: ✓ completed, ✗ anything else that is not running (failed, stopped, cancelled). */
+export const wfOutcome = (wf: Workflow): "running" | "completed" | "failed" => (wf.status === "running" ? "running" : wf.status === "completed" ? "completed" : "failed");
+
 function loadAgent(file: string, wf?: string, started?: any, done = false): Agent | undefined {
   const tail = pump(file);
   if (!tail) return undefined;
@@ -642,12 +1041,13 @@ function loadAgent(file: string, wf?: string, started?: any, done = false): Agen
   const finalTool = !!tail.lastTool && FINAL_TOOLS.has(tail.lastTool.name) && tail.lastResultT >= tail.lastTool.t;
   return {
     id: path.basename(file, ".jsonl").replace(/^agent-/, ""),
-    label: String(started?.label || m.description || path.basename(file, ".jsonl")),
-    type: String(m.agentType ?? ""),
-    model: shortModel(m.model),
+    label: safeLine(started?.label || m.description || path.basename(file, ".jsonl")),
+    type: safeLine(m.agentType),
+    model: safeLine(shortModel(m.model)),
     tail,
     done: done || finalTool,
     wf,
+    phase: wf ? safeLine(started?.phase ?? m.workflowPhase) : undefined,
   };
 }
 
@@ -676,7 +1076,6 @@ export function scan(now: number): Session[] {
         const wfDir = path.join(sub, "workflows", wfId);
         const j = journal(path.join(wfDir, "journal.jsonl"));
         const state = readJson(path.join(dir, "workflows", wfId + ".json"));
-        const script = scripts.find((s) => s.endsWith(`-${wfId}.js`));
         const wfAgents: Agent[] = [];
         for (const name of ls(wfDir)) {
           if (!name.startsWith("agent-") || !name.endsWith(".jsonl")) continue;
@@ -686,14 +1085,15 @@ export function scan(now: number): Session[] {
         }
         const lastT = Math.max(j.mtime, ...wfAgents.map((a) => a.tail.mtime), 0);
         const running = wfAgents.filter((a) => !a.done);
-        const latest = [...j.started.values()].pop();
-        const phases: string[] = Array.isArray(state?.phases) ? state.phases.map((p: any) => String(p?.title ?? "")) : [];
+        const script = scripts.find((x) => x.endsWith(`-${wfId}.js`));
+        const phases: string[] = Array.isArray(state?.phases) ? state.phases.map((p: any) => safeLine(p?.title)).filter(Boolean) : [];
         workflows.push({
           id: wfId,
-          name: String(state?.workflowName || (script ? script.slice(0, -(wfId.length + 4)) : wfId)),
-          status: state?.status ? String(state.status) : running.length ? "running" : "stopped",
-          phase: String(running[0] ? (j.started.get(running[0].id)?.phase ?? "") : (latest?.phase ?? "")),
+          name: safeLine(state?.workflowName || (script ? script.slice(0, -(wfId.length + 4)) : wfId)),
+          status: state?.status ? safeLine(state.status) : running.length ? "running" : "stopped",
+          phase: currentPhase(j.phases, running),
           phases,
+          seen: j.phases,
           started: state?.startTime ?? Math.min(...wfAgents.map((a) => a.tail.birth), now),
           finished: state ? (state.startTime ?? 0) + (state.durationMs ?? 0) : 0,
           agents: wfAgents,
@@ -713,25 +1113,25 @@ export function scan(now: number): Session[] {
         done: open.filter((t) => t.status === "completed").length,
         doing: open.filter((t) => t.status === "in_progress").length,
         total: open.length,
-        active: String(current?.activeForm || current?.subject || ""),
+        active: safeLine(current?.activeForm || current?.subject),
       };
     }
 
     let job: Session["job"];
     if (reg.jobId && /^[\w-]+$/.test(String(reg.jobId))) {
       const st = readJson(path.join(CLAUDE, "jobs", String(reg.jobId), "state.json"));
-      if (st) job = { state: String(st.state ?? ""), detail: typeof st.detail === "string" ? st.detail : "", needs: typeof st.needs === "string" ? st.needs : "" };
+      if (st) job = { state: safeLine(st.state), detail: typeof st.detail === "string" ? safeText(st.detail) : "", needs: typeof st.needs === "string" ? safeText(st.needs) : "" };
     }
 
     const title = mains.map((m) => m.title).find(Boolean);
-    const named = reg.name && reg.name !== sid.slice(0, 8) ? String(reg.name) : title || String(reg.name ?? sid.slice(0, 8));
+    const named = safeLine(reg.name && reg.name !== sid.slice(0, 8) ? reg.name : title || (reg.name ?? sid.slice(0, 8)));
     sessions.push({
       sid,
       pid: reg.pid,
       name: named,
-      kind: String(reg.kind ?? ""),
-      status: String(reg.status ?? ""),
-      cwd: String(reg.cwd ?? ""),
+      kind: safeLine(reg.kind),
+      status: safeLine(reg.status),
+      cwd: safeLine(reg.cwd),
       startedAt: Number(reg.startedAt ?? now),
       mains,
       agents,
@@ -1019,7 +1419,9 @@ export interface Facts {
   main?: Tail;
   needs: string; // non-empty when the session is waiting on the person
   yourTurn: boolean; // finished its turn and is idle
-  now: string; // one-line summary of what it is doing
+  finished: boolean; // a background job that says it is done
+  working: boolean; // busy, or a background job that says it is working
+  now: string; // one-line summary of what it is doing: the now-line
 }
 export function factsOf(s: Session): Facts {
   const main = [...s.mains].sort((x, y) => y.mtime - x.mtime)[0];
@@ -1032,7 +1434,79 @@ export function factsOf(s: Session): Facts {
   const idle = s.status !== "busy";
   // A background job says so itself; otherwise: idle, and Claude spoke last.
   const yourTurn = !needs && (s.job ? s.job.state === "done" : idle && !!main?.say && (!main.ask || main.say.t >= main.ask.t));
-  return { main, needs: clean(needs), yourTurn, now: clean(s.job?.detail || main?.summary || "") };
+  // The now-line is the job's own detail, or the away summary when that is newer than the last prompt.
+  const summary = main?.summary && (main.summaryT ?? 0) >= (main.ask?.t ?? 0) ? main.summary : "";
+  return { main, needs: clean(needs), yourTurn, finished: s.job?.state === "done", working: s.status === "busy" || s.job?.state === "working", now: clean(s.job?.detail || summary) };
+}
+
+/**
+ * The one state a session is in. `stalled` is the stall watch's verdict (stallOf), which only matters
+ * while the session is working. Sort order on screen: needs, stalled, working, then the quiet ones.
+ */
+export function sessionState(f: Facts, stalled = false): SessionState {
+  if (f.needs) return "needs";
+  if (f.finished) return "finished";
+  if (f.working) return stalled ? "stalled" : "working";
+  return f.yourTurn ? "yourTurn" : "idle";
+}
+/** Sort key: needs you first, then stalled, then working; within a state the newest session first. */
+export const byState = (a: { state: SessionState; s: Session }, b: { state: SessionState; s: Session }) =>
+  STATE_ORDER.indexOf(a.state) - STATE_ORDER.indexOf(b.state) || b.s.startedAt - a.s.startedAt;
+
+/** When the session's state began: how long it has waited, been stalled, been up, or since Claude last spoke. */
+export function stateSince(s: Session, f: Facts, state: SessionState, stalledSince = 0): number {
+  const m = f.main;
+  const lastWrite = Math.max(m?.lastT ?? 0, m?.mtime ?? 0);
+  if (state === "needs") return m?.lastTool && m.lastTool.name === "AskUserQuestion" && m.lastTool.t > m.lastResultT ? m.lastTool.t : lastWrite;
+  if (state === "stalled") return stalledSince || lastWrite;
+  if (state === "working") return s.startedAt;
+  if (state === "yourTurn") return m?.say?.t ?? lastWrite;
+  return lastWrite;
+}
+/** The time printed after the state word: "up 1h04" while working, otherwise how long ago the state began. Empty when unknown. */
+export function stateTime(s: Session, f: Facts, state: SessionState, now: number, stalledSince = 0): string {
+  const since = stateSince(s, f, state, stalledSince);
+  if (!since) return "";
+  return state === "working" ? `up ${ago(now - since)}` : ago(now - since);
+}
+
+/** The first line of a reply as plain text: markdown marks dropped, fences and blank lines skipped. */
+export function firstLine(text: string): string {
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("```") || /^[|:\- ]+$/.test(line)) continue;
+    const flat = clean(line.replace(/^[-*+]\s+/, ""));
+    if (flat) return flat;
+  }
+  return "";
+}
+
+export interface Subheading {
+  source: "question" | "now" | "task" | "prompt" | "reply" | "none";
+  text: string; // one safe line, not yet cut to width
+  t?: number; // when it was said, where that is known: a prompt's or a reply's age
+}
+/**
+ * What a session's second row says. Needs you: the question. Working (or stalled): the now-line, else
+ * the current task, else your last prompt (drawn with ▸ and its age, and then not repeated below), else
+ * the first line of Claude's newest reply (drawn with ◆). Your turn, idle, finished: the reply, else the now-line.
+ */
+export function subheading(s: Session, f: Facts, state: SessionState): Subheading {
+  const m = f.main;
+  const said = m?.say ? firstLine(m.say.text) : "";
+  const reply = (): Subheading | undefined => (said ? { source: "reply", text: said, t: m!.say!.t } : undefined);
+  const nowLine = (): Subheading | undefined => (f.now ? { source: "now", text: f.now } : undefined);
+  if (state === "needs") return { source: "question", text: f.needs };
+  if (state === "working" || state === "stalled") {
+    const typed = clean(m?.ask?.text || m?.lastPrompt || "");
+    return (
+      nowLine() ??
+      (s.tasks?.active ? { source: "task", text: s.tasks.active } : undefined) ??
+      (typed ? { source: "prompt", text: typed, t: m?.ask?.t } : undefined) ??
+      reply() ?? { source: "none", text: "" }
+    );
+  }
+  return reply() ?? nowLine() ?? { source: "none", text: "" };
 }
 
 export type AgentState = "active" | "tool" | "quiet" | "done";
@@ -1061,6 +1535,7 @@ export interface View {
   msgs: { lines: string[]; t: number }[]; // Claude's last few messages, newest first, wrapped
   alloc: number[]; // lines shown of each
   facts: Facts;
+  state: SessionState;
   lastT: number;
 }
 
@@ -1100,10 +1575,11 @@ export function buildViews(sessions: Session[], now: number, sayWidth: number, s
         alloc: m?.say ? [1] : [],
         showTalk: (m?.say ? 1 : 0) + (m?.ask || m?.lastPrompt ? 1 : 0),
         facts,
+        state: sessionState(facts),
         lastT,
       };
     })
-    .sort((a, b) => Number(b.showNeeds) - Number(a.showNeeds) || Number(b.s.status === "busy") - Number(a.s.status === "busy") || b.s.startedAt - a.s.startedAt);
+    .sort(byState);
 }
 
 /** Sessions nobody needs to look at: finished background jobs, and idle sessions with nothing running under them. */
@@ -1543,8 +2019,9 @@ function refresh() {
 }
 
 if (import.meta.main) {
-  if (parseArgs(process.argv.slice(2)) === "help") {
-    process.stdout.write(HELP);
+  const command = parseArgs(process.argv.slice(2));
+  if (command) {
+    process.stdout.write(command === "help" ? HELP : glyphCard());
     process.exit(0);
   }
 
