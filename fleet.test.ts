@@ -1814,6 +1814,24 @@ describe("the detail view", () => {
     }
   });
 
+  test("render() draws detail mode with this view and leaves compact mode's tree alone", () => {
+    const before = { ...F.opt };
+    try {
+      F.opt.mode = "detail";
+      const detail = F.render(three(NOW), 150, 44, NOW).map(strip);
+      expect(detail.length).toBe(44);
+      expect(detail.some((r) => r.startsWith(" ██ C H E C K O U T   F L O W   R E D E S I G N"))).toBe(true);
+      expect(detail.some((r) => r.startsWith(" ▌  ≡ bisect-and-fix"))).toBe(true);
+      expect(detail.join("\n")).not.toMatch(/[├└]/);
+      F.opt.mode = "compact";
+      const compact = F.render(three(NOW), 150, 44, NOW).map(strip);
+      expect(compact.join("\n")).toMatch(/[├└]─/);
+      expect(compact.join("\n")).not.toContain("C H E C K O U T");
+    } finally {
+      Object.assign(F.opt, before);
+    }
+  });
+
   test("both head rows of a session are click targets that focus it", () => {
     quietly(() => {
       const sessions = three(NOW);
