@@ -2460,6 +2460,7 @@ interface ReplyTone {
 const BRIGHT: ReplyTone = { text: C.text, strong: C.white, code: C.code, bullet: C.cyan };
 const RECEDED: ReplyTone = { text: C.dim, strong: C.dim, code: C.dim, bullet: C.dim };
 const wordChar = (ch: string | undefined) => !!ch && /[\p{L}\p{N}]/u.test(ch);
+const SPAN_MAX = 600; // how far ahead a mark's partner is looked for: emphasis and link text are short, and a reply full of stray marks must not be slow to read
 
 /** A bare address cut down to host/…/last part. */
 export function shortUrl(url: string): string {
@@ -2489,7 +2490,7 @@ export function inlineSegs(src: string, tone: ReplyTone = BRIGHT): Seg[] {
     if (!after || after === " " || after === ch) return -1;
     if ((ch === "_" || single) && wordChar(src[i - 1])) return -1; // inside a word: snake_case, 5*3
     if (single && !/[\p{L}\p{N}`\["'(]/u.test(after)) return -1; // "*.ts" is a pattern, not emphasis
-    for (let j = src.indexOf(mark, i + mark.length + 1); j >= 0; j = src.indexOf(mark, j + 1)) {
+    for (let j = src.indexOf(mark, i + mark.length + 1); j >= 0 && j - i <= SPAN_MAX; j = src.indexOf(mark, j + 1)) {
       const before = src[j - 1];
       const next = src[j + mark.length];
       if (before === " " || before === "\\") continue;
@@ -2540,9 +2541,10 @@ export function inlineSegs(src: string, tone: ReplyTone = BRIGHT): Seg[] {
     }
     if (ch === "[" || (ch === "!" && src[i + 1] === "[")) {
       const open = ch === "!" ? i + 1 : i;
-      const close = src.indexOf("](", open + 1);
+      const near = src.slice(open, open + SPAN_MAX);
+      const close = near.indexOf("](") < 0 ? -1 : open + near.indexOf("](");
       const end = close > 0 ? src.indexOf(")", close + 2) : -1;
-      if (end > 0 && !src.slice(open + 1, close).includes("[")) {
+      if (end > 0 && end - close <= 2100 && !src.slice(open + 1, close).includes("[")) {
         flush();
         const label = src.slice(open + 1, close);
         if (label.trim()) out.push(...inlineSegs(label, tone));
@@ -2551,7 +2553,7 @@ export function inlineSegs(src: string, tone: ReplyTone = BRIGHT): Seg[] {
         continue;
       }
     }
-    if ((ch === "h" || ch === "<") && !wordChar(src[i - 1])) {
+    if ((src.startsWith("http", i) || src.startsWith("<http", i)) && !wordChar(src[i - 1])) {
       const m = /^<?(https?:\/\/[^\s<>`]+)/.exec(src.slice(i, i + 2100));
       if (m) {
         const url = m[1].replace(/[.,;:!?'")\]]+$/, "");
@@ -2731,16 +2733,13 @@ function formatReply(text: string, w: number, tone: ReplyTone, focus: boolean): 
   }
   return rows;
 }
-/** The same reply is formatted once, not once a second. */
-const replyCache = new Map<string, Seg[][]>();
-function replyRowsOnce(text: string, w: number, focus: boolean, receded: boolean): Seg[][] {
-  const key = `${w}|${focus ? 1 : 0}${receded ? 1 : 0}${opt.plainGlyphs ? 1 : 0}|${text}`;
-  let rows = replyCache.get(key);
-  if (!rows) {
-    if (replyCache.size > 300) replyCache.clear();
-    replyCache.set(key, (rows = replyRows(text, w, { focus, receded })));
-  }
-  return rows;
+/** A reply is formatted once for each width it is drawn at, not once a second: what was made is remembered against the reply itself. */
+const made = new WeakMap<object, { text: string; at: Map<string, unknown> }>();
+function once<T>(say: { text: string }, key: string, make: () => T): T {
+  let entry = made.get(say);
+  if (!entry || entry.text !== say.text) made.set(say, (entry = { text: say.text, at: new Map() }));
+  if (!entry.at.has(key)) entry.at.set(key, make());
+  return entry.at.get(key) as T;
 }
 
 /** A reply as one plain line, for an earlier reply: marks, fences, rules and table rules gone, bullets kept as •. */
@@ -2836,20 +2835,23 @@ export function blockOf(v: View, g: Grid, now: number, win: Win, focus = false):
   const m = f.main;
   const body = focus || !v.quiet;
   const subW = g.textEnd - g.icon + 1;
-  const sub = subheading(s, f, state);
+  const typed = clean(m?.ask?.text || m?.lastPrompt || "");
+  const typedAt = m?.ask?.text ? m.ask.t : undefined;
+  let sub = subheading(s, f, state);
+  if (sub.source === "none" && typed) sub = { source: "prompt", text: typed, t: typedAt }; // a quiet session with no reply and no now-line: better its last prompt than an empty row
   const question = state === "needs" ? wrap(f.needs, subW) : [];
   if (question.length > 3) question.splice(2, question.length, cutTo(question.slice(2).join(" "), subW));
   const nowLine = state === "needs" && f.now && f.now !== f.needs ? f.now : "";
-  const typed = clean(m?.ask?.text || m?.lastPrompt || "");
-  const prompt = body && typed && sub.source !== "prompt" ? { text: typed, lines: wrap(typed, g.measure), t: m?.ask?.text ? m.ask.t : undefined } : undefined;
+  const prompt = body && typed && sub.source !== "prompt" ? { text: typed, lines: wrap(typed, g.measure), t: typedAt } : undefined;
   const says = body && m ? m.says : [];
   const last = says[says.length - 1];
-  const lastRows = last ? replyRowsOnce(last.text, g.measure, focus, false) : [];
+  const formatted = (say: { text: string }, receded: boolean) => once(say, `rows ${g.measure} ${focus} ${receded} ${opt.plainGlyphs}`, () => replyRows(say.text, g.measure, { focus, receded }));
+  const lastRows = last ? formatted(last, false) : [];
   // A one-line reply that is already the subheading, whole, is not said twice.
   const inHead = sub.source === "reply" && lastRows.length === 1 && width(sub.text) <= subW - 9;
   const newest = last && lastRows.length && !inHead ? { rows: lastRows, t: last.t } : undefined;
   const earlier = (focus ? says.slice(0, -1) : says.slice(0, -1).slice(-2))
-    .map((x) => ({ flat: wrap(flatReply(x.text), g.measure), rich: focus ? replyRowsOnce(x.text, g.measure, true, true) : undefined, t: x.t }))
+    .map((x) => ({ flat: once(x, `flat ${g.measure} ${opt.plainGlyphs}`, () => wrap(flatReply(x.text), g.measure)), rich: focus ? formatted(x, true) : undefined, t: x.t }))
     .filter((x) => x.flat.length);
   // Threads keep a steady order (live, in a tool, quiet, finished; then by age) so a row does not jump when it stalls.
   const groups = body ? v.groups.map((x) => ({ wf: x.wf, rows: [...x.rows].sort((a, b) => AGENT_ORDER[stateOf(a, now)] - AGENT_ORDER[stateOf(b, now)] || a.tail.birth - b.tail.birth) })) : [];

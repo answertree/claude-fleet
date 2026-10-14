@@ -1317,6 +1317,13 @@ describe("the detail view", () => {
     expect(F.shortUrl("https://example.com/a/b/c.html#top")).toBe("example.com/…/c.html");
   });
 
+  test("a reply full of stray marks is still read quickly", () => {
+    const started = performance.now();
+    for (const mark of ["*a ", "_a ", "[x ", "`a ", "~~a ", "![ ", "<http "]) expect(F.replyRows(mark.repeat(40_000), 92).length).toBeGreaterThan(100);
+    expect(F.flatReply("*a ".repeat(40_000)).length).toBe(119_999);
+    expect(performance.now() - started).toBeLessThan(5_000); // about half a second on the machine this was written on; without a bound on how far a mark's partner is sought, minutes
+  });
+
   test("wrapping happens after the marks are gone, and a styled span may run across the break", () => {
     const rows = F.wrapSegs(F.inlineSegs("plain words then **a bold run that is long** and `code` to finish"), 20);
     expect(rows.map(text)).toEqual(["plain words then a", "bold run that is", "long and code to", "finish"]);
@@ -1720,6 +1727,31 @@ describe("the detail view", () => {
         " ▌",
         " ▌    Shall I open a pull request with it?",
       ]);
+    });
+  });
+
+  test("a quiet session with no reply and no now-line shows its last prompt, not an empty row", () => {
+    quietly(() => {
+      const idle = sessionOf({ sid: "ffffffff-0006", name: "scratch", status: "idle", kind: "interactive", mains: [tailOf([prompt(NOW - 48 * MIN, "what does the totals helper round to?")])] });
+      const views = F.buildViews([idle], NOW, 80);
+      expect([views[0].state, views[0].quiet]).toEqual(["idle", true]);
+      const rows = plain(F.detailView(views, 150, 20, NOW, 0, false));
+      expect(rows.length).toBe(2);
+      expect(rows[1].slice(0, 104)).toBe(" ██ ▸ what does the totals helper round to?".padEnd(101) + "48m");
+    });
+  });
+
+  test("a reply is formatted once, and again when its text changes", () => {
+    quietly(() => {
+      const s = busy(NOW);
+      const views = () => F.buildViews([s], NOW, 80);
+      const g = F.grid(150);
+      const first = F.blockOf(views()[0], g, NOW, F.laneWindow(NOW, 150));
+      const second = F.blockOf(views()[0], g, NOW, F.laneWindow(NOW, 150));
+      expect(second.newest!.rows).toBe(first.newest!.rows); // the same rows, not an equal copy
+      expect(F.blockOf(views()[0], F.grid(110), NOW, F.laneWindow(NOW, 110)).newest!.rows).not.toBe(first.newest!.rows); // another width is another wrap
+      s.mains[0].says[1].text = "Something else entirely.";
+      expect(draw([s], 150, 40).some((r) => r.includes("◆ Something else entirely."))).toBe(true);
     });
   });
 
