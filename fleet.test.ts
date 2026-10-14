@@ -858,3 +858,120 @@ describe("runway", () => {
     expect(stale.limits[0].fullIn).toBeUndefined(); // no forecast from figures that are not current
   });
 });
+
+describe("stall watch", () => {
+  const STALL = 10 * MIN;
+  /** A thread that made a tool call `quietMin` minutes ago; `answered` says whether its result came back. */
+  const thread = (quietMin: number, answered = false) => tailOf([toolCall(NOW - quietMin * MIN - 5_000), toolResult(NOW - quietMin * MIN - 4_000), toolCall(NOW - quietMin * MIN), ...(answered ? [toolResult(NOW - quietMin * MIN + 1)] : [])]);
+
+  test("a thread: a tool call outstanding, nothing written for the stall time, the tree under 1% CPU", () => {
+    const quiet = (min: number, pending = true) => ({ pending, lastWrite: NOW - min * MIN });
+    expect(F.threadStalled(quiet(14), 0.2, NOW, STALL)).toBe(true);
+    expect(F.threadStalled(quiet(10), 0, NOW, STALL)).toBe(true);
+    expect(F.threadStalled(quiet(9.9), 0, NOW, STALL)).toBe(false); // not long enough
+    expect(F.threadStalled(quiet(14), 1, NOW, STALL)).toBe(false); // something in the tree is still working
+    expect(F.threadStalled(quiet(14), 37.5, NOW, STALL)).toBe(false);
+    expect(F.threadStalled(quiet(14, false), 0, NOW, STALL)).toBe(false); // nothing outstanding: quiet, not stuck
+    expect(F.threadStalled(quiet(14), undefined, NOW, STALL)).toBe(false); // the process was not sampled: claim nothing
+    expect(F.threadStalled(quiet(14), 0, NOW, 0)).toBe(false); // --stall 0 turns it off
+    expect(F.threadStalled(quiet(4), 0, NOW, 3 * MIN)).toBe(true); // --stall 3
+  });
+
+  test("a session: busy, no thread at all has written for the stall time, the tree under 1% CPU", () => {
+    expect(F.sessionStalled(true, NOW - 11 * MIN, 0.4, NOW, STALL)).toBe(true);
+    expect(F.sessionStalled(false, NOW - 11 * MIN, 0.4, NOW, STALL)).toBe(false); // not busy: it is waiting on you, not stuck
+    expect(F.sessionStalled(true, NOW - 9 * MIN, 0.4, NOW, STALL)).toBe(false);
+    expect(F.sessionStalled(true, NOW - 11 * MIN, 3, NOW, STALL)).toBe(false);
+    expect(F.sessionStalled(true, NOW - 11 * MIN, undefined, NOW, STALL)).toBe(false);
+    expect(F.sessionStalled(true, NOW - 11 * MIN, 0, NOW, 0)).toBe(false);
+    expect(F.sessionStalled(true, 0, 0, NOW, STALL)).toBe(false); // nothing has ever been written
+  });
+
+  /** The verdict with the session's tree at `cpu` percent; "unknown" when its process was not sampled. */
+  const verdict = (s: F.Session, cpu: number | "unknown" = 0.3, stallMs = STALL) => {
+    const saved = { procs: F.machine.procs, kids: F.machine.kids };
+    F.machine.procs = cpu === "unknown" ? [] : [{ pid: s.pid, ppid: 1, cpu, rss: 1000, name: "claude" }];
+    F.machine.kids = new Map();
+    try {
+      return F.stallOf(s, F.factsOf(s), NOW, undefined, stallMs); // reads the tree's CPU itself, as the screen does
+    } finally {
+      Object.assign(F.machine, saved);
+    }
+  };
+
+  test("one agent stuck on a tool marks that thread and reports a count, while live agents carry on", () => {
+    const s = sessionOf({ sid: "b", mains: [thread(2)], agents: [agentOf("live", thread(0.2)), agentOf("stuck", thread(14)), agentOf("answered", thread(20, true)), agentOf("finished", thread(30), { done: true })] });
+    expect(verdict(s)).toEqual({ session: false, threads: ["stuck"], count: 1, since: NOW - 14 * MIN });
+    expect(F.sessionState(F.factsOf(s), verdict(s).count > 0)).toBe("stalled");
+    expect(F.stallKeys("b", verdict(s))).toEqual(["b/stuck"]);
+    expect(verdict(s, 12).count).toBe(0); // the tree is busy
+    expect(verdict(s, "unknown").count).toBe(0); // its process was not in the sample: claim nothing
+    expect(verdict(s, 0.3, 0).count).toBe(0); // --stall 0
+    expect(verdict(s, 0.3, 15 * MIN).count).toBe(0); // --stall 15
+  });
+
+  test("a whole session gone quiet is stalled, and its main thread with it when it holds a tool call", () => {
+    const s = sessionOf({ sid: "b", mains: [thread(12)], agents: [agentOf("a1", thread(15)), agentOf("a2", thread(11, true))] });
+    expect(verdict(s)).toEqual({ session: true, threads: ["main", "a1"], count: 2, since: NOW - 15 * MIN });
+    // Nothing outstanding anywhere, but busy and silent: the session itself is the one stalled thing.
+    const silent = sessionOf({ sid: "c", mains: [thread(12, true)] });
+    expect(verdict(silent)).toEqual({ session: true, threads: [], count: 1, since: NOW - 12 * MIN + 1 });
+    expect(F.stallKeys("c", verdict(silent))).toEqual(["c"]);
+    // The main thread waits on its agents: while one of them is writing, it is not stalled.
+    const waiting = sessionOf({ sid: "d", mains: [thread(25)], agents: [agentOf("a1", thread(1))] });
+    expect(verdict(waiting).count).toBe(0);
+  });
+
+  test("only a working session can be stalled, and only a running workflow's agents count", () => {
+    const stuck = [agentOf("stuck", thread(14))];
+    expect(verdict(sessionOf({ sid: "idle", status: "idle", mains: [thread(2)], agents: stuck })).count).toBe(0);
+    expect(verdict(sessionOf({ sid: "asks", status: "idle", job: { state: "blocked", detail: "", needs: "Approve?" }, mains: [thread(2)], agents: stuck })).count).toBe(0);
+    expect(verdict(sessionOf({ sid: "job", status: "idle", job: { state: "working", detail: "", needs: "" }, mains: [thread(2)], agents: stuck })).count).toBe(1);
+    const wf = (status: string): F.Workflow => ({ id: "wf_1", name: "w", status, phase: "Fix", phases: [], seen: ["Fix"], started: NOW - 20 * MIN, finished: 0, agents: [agentOf("w5", thread(14), { wf: "wf_1" })], lastT: NOW });
+    expect(verdict(sessionOf({ sid: "run", mains: [thread(2)], workflows: [wf("running")] })).threads).toEqual(["w5"]);
+    expect(verdict(sessionOf({ sid: "ended", mains: [thread(2)], workflows: [wf("failed")] })).count).toBe(0);
+  });
+
+  test("the bell rings once per newly stalled thing", () => {
+    const known = new Set<string>();
+    expect(F.newSince(known, ["b/stuck"])).toEqual(["b/stuck"]);
+    expect(F.newSince(known, ["b/stuck"])).toEqual([]); // still stalled: no second ring
+    expect(F.newSince(known, ["b/stuck", "b/other", "c"])).toEqual(["b/other", "c"]);
+    expect(F.newSince(known, [])).toEqual([]);
+    expect(F.newSince(known, ["b/stuck"])).toEqual(["b/stuck"]); // recovered and stalled again: it rings again
+  });
+
+  test("--stall sets the minutes, 0 turns the watch off, and its value is not taken for the window", () => {
+    const before = { ...F.opt };
+    try {
+      F.parseArgs([]);
+      expect(F.opt.stallMin).toBe(10);
+      F.parseArgs(["--stall", "3"]);
+      expect([F.opt.stallMin, F.opt.windowMin]).toEqual([3, before.windowMin]);
+      F.parseArgs(["60", "--stall", "0"]);
+      expect([F.opt.stallMin, F.opt.windowMin]).toEqual([0, 60]);
+    } finally {
+      Object.assign(F.opt, before);
+    }
+  });
+
+  test("a stalled session sorts under the ones that need you and above the working ones, and says so", () => {
+    const stuck = sessionOf({ sid: "stuck", name: "flaky test hunt", pid: 4242, startedAt: NOW - 64 * MIN, mains: [thread(2)], agents: [agentOf("review", thread(14))] });
+    const busy = sessionOf({ sid: "busy", name: "docs site search", pid: 4243, startedAt: NOW - 5 * MIN, mains: [thread(0.1)] });
+    const asks = sessionOf({ sid: "asks", name: "checkout flow redesign", pid: 4244, status: "idle", job: { state: "blocked", detail: "", needs: "Approve?" }, mains: [thread(6)] });
+    const procs = [4242, 4243, 4244].map((pid) => ({ pid, ppid: 1, cpu: pid === 4243 ? 9 : 0.2, rss: 1000, name: "claude" }));
+    const saved = { procs: F.machine.procs, kids: F.machine.kids };
+    F.machine.procs = procs;
+    F.machine.kids = new Map();
+    try {
+      const views = F.buildViews([busy, stuck, asks], NOW, 80);
+      expect(views.map((v) => [v.s.sid, v.state, v.stall.count])).toEqual([["asks", "needs", 0], ["stuck", "stalled", 1], ["busy", "working", 0]]);
+      expect(F.stateTime(stuck, views[1].facts, "stalled", NOW, views[1].stall.since)).toBe("14m");
+      const frame = F.render([busy, stuck, asks], 150, 40, NOW).map(strip).join("\n");
+      expect(frame).toContain("stalled? · 14m");
+      expect(frame).toContain("stalled? Bash");
+    } finally {
+      Object.assign(F.machine, saved);
+    }
+  });
+});

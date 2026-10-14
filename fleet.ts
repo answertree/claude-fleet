@@ -37,7 +37,10 @@ Usage: bun fleet.ts [minutes] [options]
   --all          also show idle and finished sessions
   --usage        show your Claude account usage limits (reads the stored Claude
                  Code login and asks api.anthropic.com every five minutes)
-  --bell         ring the terminal bell when a session starts waiting on you
+  --bell         ring the terminal bell when a session starts waiting on you,
+                 or when something stalls
+  --stall <min>  mark a thread "stalled?" after this many minutes sitting on a
+                 tool call in silence with the session idle (default 10, 0 = off)
   --no-mouse     do not capture mouse clicks
   --once         print one frame and exit
   --glyphs       print a test card of every glyph the screen uses, to check that
@@ -62,6 +65,7 @@ export const opt = {
   mouse: true,
   once: false,
   plainGlyphs: false, // --plain-glyphs: fallbacks for fonts that lack ≡ ┿ ╌ ◇
+  stallMin: 10, // --stall <minutes>: how long a thread may sit on a tool call in silence; 0 turns the stall watch off
 };
 
 /** Read the command line into `opt`. Returns the one-shot command it asked for, if any. */
@@ -69,7 +73,7 @@ export function parseArgs(argv: string[]): "help" | "glyphs" | undefined {
   if (argv.includes("--help") || argv.includes("-h")) return "help";
   setPlainGlyphs(argv.includes("--plain-glyphs"));
   if (argv.includes("--glyphs")) return "glyphs";
-  const TAKES_VALUE = ["--mode"];
+  const TAKES_VALUE = ["--mode", "--stall"];
   const valueOf = (flag: string) => (argv.includes(flag) ? argv[argv.indexOf(flag) + 1] : undefined);
   const modeArg = valueOf("--mode");
   if (MODES.includes(modeArg as Mode)) opt.mode = modeArg as Mode;
@@ -80,6 +84,8 @@ export function parseArgs(argv: string[]): "help" | "glyphs" | undefined {
   opt.bell = argv.includes("--bell");
   opt.usage = argv.includes("--usage") || process.env.FLEET_USAGE === "1";
   opt.mouse = !argv.includes("--no-mouse");
+  const stall = valueOf("--stall");
+  if (stall !== undefined && /^\d+(\.\d+)?$/.test(stall)) opt.stallMin = Number(stall);
   return undefined;
 }
 
@@ -1224,8 +1230,8 @@ export function sampleMachine() {
   } catch {}
 }
 
-/** CPU and memory of a process and everything it started. */
-export function treeUsage(pid: number): { cpu: number; rss: number } {
+/** CPU and memory of a process and everything it started. `known` is false when the process was not in the last sample. */
+export function treeUsage(pid: number): { cpu: number; rss: number; known: boolean } {
   const root = machine.procs.find((p) => p.pid === pid);
   let cpu = root?.cpu ?? 0;
   let rss = root?.rss ?? 0;
@@ -1239,7 +1245,7 @@ export function treeUsage(pid: number): { cpu: number; rss: number } {
     rss += p.rss;
     stack.push(...(machine.kids.get(p.pid) ?? []));
   }
-  return { cpu, rss };
+  return { cpu, rss, known: !!root };
 }
 
 export const gb = (bytes: number) => (bytes / 1024 ** 3 >= 10 ? Math.round(bytes / 1024 ** 3) : (bytes / 1024 ** 3).toFixed(1)) + "G";
@@ -1943,6 +1949,69 @@ export function subheading(s: Session, f: Facts, state: SessionState): Subheadin
   return reply() ?? nowLine() ?? { source: "none", text: "" };
 }
 
+// ───────────────────────── stall watch ─────────────────────────
+//
+// The third state worth knowing about: not working, not asking, just stuck. The evidence is
+// circumstantial (a tool may be waiting on another machine), so the screen words it as a question.
+
+/**
+ * A thread (the main thread or an agent) is stalled when it has had a tool call outstanding and has
+ * written nothing for `stallMs`, while the session's whole process tree is under 1% CPU. `treeCpu` is
+ * undefined when the session's process was not in the last sample; then nothing is claimed.
+ */
+export function threadStalled(th: { pending: boolean; lastWrite: number }, treeCpu: number | undefined, now: number, stallMs: number): boolean {
+  return stallMs > 0 && th.pending && treeCpu !== undefined && treeCpu < 1 && th.lastWrite > 0 && now - th.lastWrite >= stallMs;
+}
+/** A busy session is stalled when no thread at all has written for `stallMs` at under 1% CPU. */
+export function sessionStalled(busy: boolean, lastWrite: number, treeCpu: number | undefined, now: number, stallMs: number): boolean {
+  return stallMs > 0 && busy && treeCpu !== undefined && treeCpu < 1 && lastWrite > 0 && now - lastWrite >= stallMs;
+}
+
+export interface Stall {
+  session: boolean; // the whole session has gone quiet
+  threads: string[]; // the stalled threads: "main", or an agent's id
+  count: number; // how many things are stalled here: the threads, or 1 when only the session as a whole is
+  since: number; // when the longest-stalled of them last wrote, for "14m"; 0 when nothing is stalled
+}
+const NO_STALL: Stall = { session: false, threads: [], count: 0, since: 0 };
+const treeCpuOf = (pid: number): number | undefined => {
+  const u = treeUsage(pid);
+  return u.known ? u.cpu : undefined;
+};
+const lastWriteOf = (t: Tail) => Math.max(t.lastT, t.mtime);
+const pendingTool = (t: Tail) => !!t.lastTool && t.lastTool.t > t.lastResultT;
+/**
+ * The stall watch's verdict on one session. Only a working session can be stalled: one that needs you
+ * or has finished its turn is waiting on you, not stuck. The main thread waits on its agents, so it
+ * counts as stalled only when they have all gone quiet too.
+ */
+export function stallOf(s: Session, f: Facts, now: number, treeCpu: number | undefined = treeCpuOf(s.pid), stallMs = opt.stallMin * 60_000): Stall {
+  if (stallMs <= 0 || f.needs || !f.working) return NO_STALL;
+  const agents = [...s.agents, ...s.workflows.filter((w) => w.status === "running").flatMap((w) => w.agents)];
+  const everyone = [...s.mains, ...s.agents.map((a) => a.tail), ...s.workflows.flatMap((w) => w.agents.map((a) => a.tail))];
+  const lastWrite = Math.max(0, ...everyone.map(lastWriteOf));
+  const session = sessionStalled(true, lastWrite, treeCpu, now, stallMs);
+  const threads: string[] = [];
+  let since = session ? lastWrite : Infinity;
+  if (session && f.main && pendingTool(f.main)) threads.push("main");
+  for (const a of agents) {
+    if (a.done || !threadStalled({ pending: pendingTool(a.tail), lastWrite: lastWriteOf(a.tail) }, treeCpu, now, stallMs)) continue;
+    threads.push(a.id);
+    since = Math.min(since, lastWriteOf(a.tail));
+  }
+  if (!session && !threads.length) return NO_STALL;
+  return { session, threads, count: threads.length || 1, since };
+}
+/** One name per stalled thing, so the bell rings once for each: "sid" for a session, "sid/thread" for a thread. */
+export const stallKeys = (sid: string, st: Stall): string[] => (st.threads.length ? st.threads.map((id) => `${sid}/${id}`) : st.session ? [sid] : []);
+/** The members of `current` that were not in `known`; `known` is then brought up to date. Used to ring the bell once per new thing. */
+export function newSince(known: Set<string>, current: string[]): string[] {
+  const fresh = current.filter((k) => !known.has(k));
+  known.clear();
+  for (const k of current) known.add(k);
+  return fresh;
+}
+
 export type AgentState = "active" | "tool" | "quiet" | "done";
 export function stateOf(a: Agent, now: number): AgentState {
   if (a.done) return "done";
@@ -1970,6 +2039,7 @@ export interface View {
   alloc: number[]; // lines shown of each
   facts: Facts;
   state: SessionState;
+  stall: Stall; // the stall watch's verdict: stall.count things are stalled in this session
   lastT: number;
 }
 
@@ -1995,6 +2065,7 @@ export function buildViews(sessions: Session[], now: number, sayWidth: number, s
       const doneCount = opt.showDone ? 0 : s.agents.filter((a) => a.done && recent(a)).length;
       const lastT = Math.max(0, ...s.mains.map((m) => m.mtime), ...s.agents.map((a) => a.tail.mtime));
       const facts = factsOf(s);
+      const stall = stallOf(s, facts, now);
       const m = facts.main;
       return {
         s,
@@ -2009,7 +2080,8 @@ export function buildViews(sessions: Session[], now: number, sayWidth: number, s
         alloc: m?.say ? [1] : [],
         showTalk: (m?.say ? 1 : 0) + (m?.ask || m?.lastPrompt ? 1 : 0),
         facts,
-        state: sessionState(facts),
+        state: sessionState(facts, stall.count > 0),
+        stall,
         lastT,
       };
     })
@@ -2154,11 +2226,12 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
       const s = v.s;
       const f = v.facts;
       const busyNow = s.status === "busy";
-      const tone = f.needs ? C.yellow : f.yourTurn ? C.purple : busyNow ? C.green : C.dim;
+      const stalled = v.state === "stalled";
+      const tone = f.needs ? C.yellow : stalled ? C.red : f.yourTurn ? C.purple : busyNow ? C.green : C.dim;
       const bandTone = f.needs && frame % 2 ? mix(C.yellow, C.faint, 0.6) : tone;
       const band = " " + fg(bandTone, "██") + " ";
       const tint = (line: string, w: number) => (f.needs ? `\x1b[48;2;52;38;0m${line}${" ".repeat(Math.max(0, w))}\x1b[49m` : line);
-      const state = f.needs ? "NEEDS YOU" : f.yourTurn ? "YOUR TURN" : s.job?.state === "working" || busyNow ? "WORKING" : "IDLE";
+      const state = f.needs ? "NEEDS YOU" : stalled ? "STALLED?" : f.yourTurn ? "YOUR TURN" : s.job?.state === "working" || busyNow ? "WORKING" : "IDLE";
       const stateText = state.split("").join(" ");
       const nameRoom = W - 4 - width(stateText) - 4;
       const spaced = s.name.toUpperCase().split("").join(" ");
@@ -2190,10 +2263,10 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
     if (shown.length > cards.length) out.push(fg(C.dim, `   … ${shown.length - cards.length} more session${shown.length - cards.length === 1 ? "" : "s"} not shown (screen full)`));
   }
 
-  const agentRow = (a: Agent, prefix: string): string => {
+  const agentRow = (a: Agent, prefix: string, stalled = false): string => {
     const st = stateOf(a, now);
     const quietFor = now - Math.max(a.tail.lastT, a.tail.mtime);
-    const dot = st === "active" ? spin : st === "tool" ? fg(C.yellow, "●") : st === "done" ? fg(C.dim, "✓") : fg(C.dim, "○");
+    const dot = stalled ? fg(C.red, "◐") : st === "active" ? spin : st === "tool" ? fg(C.yellow, "●") : st === "done" ? fg(C.dim, "✓") : fg(C.dim, "○");
     const pending = a.tail.lastTool && a.tail.lastTool.t > a.tail.lastResultT ? a.tail.lastTool : undefined;
     const doing =
       st === "done" ? "finished" : pending ? `${pending.name}${pending.hint ? ": " + pending.hint : ""}` : st === "quiet" ? (a.id === "main" ? "waiting" : "no activity") : "thinking";
@@ -2208,9 +2281,9 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
       (META ? "  " + fg(C.dim, fit([shortType(a.type), a.model].filter(Boolean).join(" · "), META)) : "") +
       "  " +
       spark(b, agentMax, [38, 86, 110], [96, 214, 226]) +
-      (ACT ? "  " + fg(st === "tool" ? C.yellow : C.dim, fit(doing, ACT)) : "") +
+      (ACT ? "  " + fg(stalled ? C.red : st === "tool" ? C.yellow : C.dim, fit((stalled ? "stalled? " : "") + doing, ACT)) : "") +
       " " +
-      fg(st === "active" ? C.green : C.dim, fit(st === "active" ? "live" : ago(quietFor), 6, "r"))
+      fg(stalled ? C.red : st === "active" ? C.green : C.dim, fit(st === "active" ? "live" : ago(quietFor), 6, "r"))
     );
   };
 
@@ -2222,7 +2295,8 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
     const home = os.homedir();
     const where = s.cwd.replace(home, "~").split("/").slice(-2).join("/") + (branch && branch !== "HEAD" ? ` ⎇ ${branch}` : "");
     const busyNow = s.status === "busy";
-    const dot = v.facts.needs ? fg(C.yellow, "▲") : busyNow ? fg(C.green, "●") : fg(C.dim, "○");
+    const stalled = v.state === "stalled";
+    const dot = v.facts.needs ? fg(C.yellow, "▲") : stalled ? fg(C.red, "◐") : busyNow ? fg(C.green, "●") : fg(C.dim, "○");
     const f = v.facts;
     const wide = W >= 120;
     const use = treeUsage(s.pid);
@@ -2235,8 +2309,8 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
       (wide ? "  " + fg(ctxPct >= 0 ? toneFor(ctxPct) : C.dim, fit(ctxPct >= 0 ? `ctx ${Math.round(ctxPct)}%` : "", 8, "r")) + "  " + fg(use.cpu >= 100 ? C.yellow : C.dim, fit(use.cpu >= 1 ? `cpu ${Math.round(use.cpu)}%` : "", 9, "r")) : "");
     const rightW = 10 + 2 + 8 + (wide ? 2 + 8 + 2 + 9 : 0);
     const quiet = now - Math.max(f.main?.lastT ?? 0, f.main?.mtime ?? 0);
-    const status = f.needs ? `⚠ NEEDS YOU${f.main ? " · " + ago(quiet) : ""}` : f.yourTurn ? `your turn · ${ago(now - (f.main?.say?.t ?? now))}` : `${s.job?.state === "working" ? "working" : s.status || "?"} · up ${ago(now - s.startedAt)}`;
-    const statusTone = f.needs ? C.yellow : f.yourTurn ? C.purple : busyNow ? C.green : C.dim;
+    const status = f.needs ? `⚠ NEEDS YOU${f.main ? " · " + ago(quiet) : ""}` : stalled ? `stalled? · ${ago(now - v.stall.since)}` : f.yourTurn ? `your turn · ${ago(now - (f.main?.say?.t ?? now))}` : `${s.job?.state === "working" ? "working" : s.status || "?"} · up ${ago(now - s.startedAt)}`;
+    const statusTone = f.needs ? C.yellow : stalled ? C.red : f.yourTurn ? C.purple : busyNow ? C.green : C.dim;
     const idW = 13;
     const whereW = W >= 160 ? 34 : W >= 125 ? 22 : 0;
     const statusW = 19;
@@ -2251,7 +2325,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
         fg(C.dim, fit(`${s.kind || "cli"} ${s.sid.slice(0, 8)}`, idW)) +
         (whereW ? "  " + fg(C.blue, fit(where, whereW)) : "") +
         "  " +
-        (f.needs ? bold(fg(statusTone, fit(status, statusW))) : fg(statusTone, fit(status, statusW))) +
+        (f.needs || stalled ? bold(fg(statusTone, fit(status, statusW))) : fg(statusTone, fit(status, statusW))) +
         "  " +
         spark(b, sessionMax, [52, 84, 150], [150, 200, 255]) +
         right +
@@ -2273,6 +2347,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
     if (v.showTasks) children.push({ kind: "tasks" });
     const main = f.main;
     if (v.showMain && main) children.push({ kind: "agent", a: { id: "main", label: "main thread", type: "", model: "", tail: main, done: false } });
+    const isStalled = (a: Agent) => v.stall.threads.includes(a.id);
     for (const g of v.groups) {
       if (g.wf) children.push({ kind: "wf", g });
       else {
@@ -2338,7 +2413,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
             (t.active ? fg(C.dim, "  ▸ ") + fg(C.text, fit(t.active, Math.max(0, W - 30 - PW))) : ""),
         );
       } else if (c.kind === "agent") {
-        out.push(agentRow(c.a, elbow));
+        out.push(agentRow(c.a, elbow, isStalled(c.a)));
       } else if (c.kind === "more") {
         out.push(fg(C.faint, elbow) + fg(C.dim, `… ${c.n} more agent${c.n === 1 ? "" : "s"} (screen full)`));
       } else if (c.kind === "done") {
@@ -2375,7 +2450,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
         );
         c.g.rows.forEach((a, ai) => {
           const lastA = ai === c.g.rows.length - 1 && !c.g.hidden;
-          out.push(agentRow(a, stem + (lastA ? "└─ " : "├─ ")));
+          out.push(agentRow(a, stem + (lastA ? "└─ " : "├─ "), isStalled(a)));
         });
         if (c.g.hidden) out.push(fg(C.faint, stem + "└─ ") + fg(C.dim, `… ${c.g.hidden} more agent${c.g.hidden === 1 ? "" : "s"} (screen full)`));
       }
@@ -2443,17 +2518,17 @@ export function buttonBar(W: number, row: number): string {
 
 let sessions: Session[] = [];
 const needing = new Set<string>();
+const stalledNow = new Set<string>();
 function refresh() {
   const now = clock();
   sessions = scan(now);
   prune(now);
   sampleMachine();
   if (opt.usage && !opt.once) tickUsage(now); // --once has already made its one read
-  // Ring once when a session starts waiting on the person.
-  const nowNeeding = new Set(sessions.filter((s) => factsOf(s).needs).map((s) => s.sid));
-  if (opt.bell && !opt.once) for (const sid of nowNeeding) if (!needing.has(sid)) process.stdout.write("\x07");
-  needing.clear();
-  for (const sid of nowNeeding) needing.add(sid);
+  // Ring once when a session starts waiting on the person, and once for each thing that newly stalls.
+  const facts = sessions.map((s) => ({ s, f: factsOf(s) }));
+  const rings = newSince(needing, facts.filter((x) => x.f.needs).map((x) => x.s.sid)).length + newSince(stalledNow, facts.flatMap((x) => stallKeys(x.s.sid, stallOf(x.s, x.f, now)))).length;
+  if (opt.bell && !opt.once) process.stdout.write("\x07".repeat(rings));
 }
 
 if (import.meta.main) {

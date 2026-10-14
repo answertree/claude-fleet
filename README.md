@@ -70,7 +70,9 @@ Every control is a button on the bottom row, and each has a key.
 | `esc` | Leave focus (or quit) |
 | `q` | Quit |
 
-Options: `--mode detail|compact|far`, `--all`, `--usage`, `--bell`, `--no-mouse`, `--once` (print one frame and exit), and a number for the window in minutes. `bun fleet.ts --help` lists them.
+Options: `--mode detail|compact|far`, `--all`, `--usage`, `--bell`, `--stall <minutes>`, `--no-mouse`, `--once` (print one frame and exit), and a number for the window in minutes. `bun fleet.ts --help` lists them.
+
+`bun fleet.ts --glyphs` prints a test card of every glyph the screen uses, each between two bars, so you can check that your terminal (an iPad over mosh, say) draws each one a single cell wide. If one is out of line, `--plain-glyphs` swaps in fallbacks for the four that fonts most often lack.
 
 Capturing clicks means a plain drag no longer selects text. Hold Shift (Option in iTerm2 and Terminal.app) while dragging, or start with `--no-mouse`.
 
@@ -92,6 +94,7 @@ Without `--usage`, Claude Fleet makes no network requests at all.
 ## Things to know
 
 - **It reads Claude Code's on-disk files, which are not a documented interface.** It was written against Claude Code 2.1.296 on macOS. Another version may move things, and parts of the screen will then come up empty. Linux should work but has not been tried.
+- **"Stalled?" is a question, not a finding.** A thread is marked when it has had a tool call outstanding and written nothing for ten minutes (`--stall <minutes>`; 0 turns it off) while the session's whole process tree is under 1% CPU. A tool that is waiting on another machine looks exactly the same. Only a session that is working can be marked.
 - **Agent status is inferred.** A spinner means the agent wrote to its transcript in the last minute. A yellow dot means a tool call has been outstanding longer than that. A grey circle means quiet with nothing outstanding.
 - **Context categories are estimates (marked `≈`).** They are sized from the length of the prompt, tool definitions, memory files and skill listing recorded in the transcript, with the rest counted as messages. They will not match `/context` exactly, and small categories are drawn slightly larger than scale so they stay visible.
 - **The window size is assumed:** 1M tokens for Opus, Sonnet and Fable 5 models, or anything already past 200k; otherwise 200k.
