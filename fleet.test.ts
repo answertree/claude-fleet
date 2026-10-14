@@ -2079,7 +2079,7 @@ describe("header and chrome", () => {
       for (const line of lines) expect(F.width(line)).toBeLessThanOrEqual(cols);
       const text = lines.join("\n");
       for (const word of ["needs you", "stalled?", "working", "your turn", "idle", "finished", "you", "Claude", "earlier", "live", "in progress", "not started", "done", "failed", "workflow", "no reading", "pace", "context", "rail"]) expect([cols, word, text.includes(word)]).toEqual([cols, word, true]);
-      for (const glyph of ["▲", "◐", "●", "▸", "○", "✓", "✗", "◆", "◇", "⠋", "≡", "━", "┼", "╌", "█", "▌", "░", "┴", "▼"]) expect([cols, glyph, text.includes(glyph)]).toEqual([cols, glyph, true]);
+      for (const glyph of ["▲", "◐", "●", "▸", "○", "✓", "✗", "◆", "◇", "⠋", "≡", "━", "┼", "┿", "╌", "█", "▌", "░", "■", "•", "…", "┴", "▼"]) expect([cols, glyph, text.includes(glyph)]).toEqual([cols, glyph, true]);
       for (const key of ["1 2 3", "+ -", "a ", "d ", "tab", "esc", "b ", "u ", "space", "? ", "q "]) expect([cols, key, lines.some((l) => l.includes(key))]).toEqual([cols, key, true]);
       expect(lines.at(-1)).toContain("any key or click returns");
     }
