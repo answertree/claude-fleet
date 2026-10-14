@@ -2693,7 +2693,7 @@ export interface Keep {
   ctx: boolean; // the context row, where it has a row to itself
   main: boolean; // the main-thread row
   done: boolean; // the "n agents finished" line
-  top3: boolean; // agent groups longer than 3 show their 3 most active
+  agents: number; // how many agents an agent group shows before "… n more agents"
   fold: boolean; // agents are folded into their workflow's row, or into one line
   roster: boolean; // workflow rows and the folded agents line
   question: number; // rows of the question
@@ -2760,7 +2760,7 @@ export function blockOf(v: View, g: Grid, now: number, win: Win, focus = false):
       ctx: body,
       main: body && v.showMain && !!m,
       done: body && v.doneCount > 0,
-      top3: false,
+      agents: Infinity,
       fold: false,
       roster: body,
       question: 3,
@@ -2842,8 +2842,8 @@ function rosterOf(b: Block, now: number): Thread[] {
   const rank = (a: Agent) => (b.v.stall.threads.includes(a.id) ? -1 : AGENT_ORDER[stateOf(a, now)]); // a stalled agent is the last to be folded away
   for (const grp of b.groups) {
     let rows = grp.rows;
-    if (k.top3 && rows.length > 3) {
-      const kept = new Set([...rows].sort((x, y) => rank(x) - rank(y)).slice(0, 3));
+    if (rows.length > k.agents) {
+      const kept = new Set([...rows].sort((x, y) => rank(x) - rank(y)).slice(0, k.agents)); // the most active, in the order they were in
       rows = rows.filter((a) => kept.has(a));
     }
     const more = grp.rows.length - rows.length;
@@ -2881,18 +2881,43 @@ export const blockRows = (b: Block, g: Grid, now: number): number => rowsOfParts
 interface Change {
   undo: () => void;
   stands: () => boolean; // false once a later cut has gone further; that one has to come back first
-  reply?: [from: number, to: number]; // a cut to the newest reply, which can be handed back a line at a time
+  /** For a cut that can come back in part (lines of a reply, agents of a group): restore as much as still fits, fullest first. False when nothing does. */
+  ease?: (fits: () => boolean, spare: number) => boolean;
   fold?: boolean; // the whole session went into the "… n more" line
 }
 const change = (make: () => void, undo: () => void, stands: () => boolean, extra: Partial<Change> = {}): Change => (make(), { undo, stands, ...extra });
 const needsYou = (b: Block) => b.v.state === "needs";
 const turnOff = (b: Block, key: "now" | "tasks" | "ctx" | "main" | "done" | "roster") => (b.keep[key] ? change(() => (b.keep[key] = false), () => (b.keep[key] = true), () => !b.keep[key]) : undefined);
-const turnOn = (b: Block, key: "top3" | "fold") => (b.keep[key] ? undefined : change(() => (b.keep[key] = true), () => (b.keep[key] = false), () => b.keep[key]));
-/** Cap the newest reply at `lines`, when it is showing more. */
+const foldAgents = (b: Block) => (b.keep.fold ? undefined : change(() => (b.keep.fold = true), () => (b.keep.fold = false), () => b.keep.fold));
+/** Cap the newest reply at `lines`, when it is showing more. It comes back a line at a time. */
 function replyTo(b: Block, lines: number): Change | undefined {
   const from = b.keep.reply;
-  if (!b.newest || Math.min(from, b.newest.rows.length) <= lines) return undefined;
-  return change(() => (b.keep.reply = lines), () => (b.keep.reply = from), () => b.keep.reply === lines, { reply: [from, lines] });
+  const whole = Math.min(from, b.newest?.rows.length ?? 0);
+  if (whole <= lines) return undefined;
+  return change(() => (b.keep.reply = lines), () => (b.keep.reply = from), () => b.keep.reply === lines, {
+    ease: (fits, spare) => {
+      for (let n = Math.min(whole, lines + spare + 1); n > lines; n--) {
+        b.keep.reply = n === whole ? from : n;
+        if (fits()) return true;
+      }
+      return false;
+    },
+  });
+}
+/** Cap every agent group at its `most` most active, when one is showing more. They come back an agent at a time. */
+function agentsTo(b: Block, most: number): Change | undefined {
+  const from = b.keep.agents;
+  const longest = Math.max(0, ...b.groups.map((x) => x.rows.length));
+  if (Math.min(from, longest) <= most) return undefined;
+  return change(() => (b.keep.agents = most), () => (b.keep.agents = from), () => b.keep.agents === most, {
+    ease: (fits, spare) => {
+      for (let n = Math.min(longest, most + spare + 1); n > most; n--) {
+        b.keep.agents = n === longest ? from : n;
+        if (fits()) return true;
+      }
+      return false;
+    },
+  });
 }
 /** Cap one earlier reply at `lines`: the oldest that is showing more. `upTo` limits it to the first so many. */
 function earlierTo(b: Block, lines: number, upTo = b.earlier.length): Change | undefined {
@@ -2929,13 +2954,13 @@ const LADDER: { step: number; cut: "gaps" | ((b: Block) => Change | undefined) }
   { step: 4, cut: (b) => (b.focus ? replyTo(b, 10) : undefined) },
   { step: 4, cut: (b) => replyTo(b, 4) }, // the newest reply is capped at 4 lines,
   { step: 4, cut: (b) => (needsYou(b) ? undefined : replyTo(b, 2)) }, // then 2
-  { step: 5, cut: (b) => (b.groups.some((x) => x.rows.length > 3) ? turnOn(b, "top3") : undefined) }, // long agent groups: the 3 most active and "… n more agents"
+  { step: 5, cut: (b) => agentsTo(b, 3) }, // agent groups longer than 3: the 3 most active and "… n more agents"
   { step: 6, cut: (b) => turnOff(b, "now") }, // the dim now-line under a question
   { step: 7, cut: "gaps" }, // the blank rows between sessions
   { step: 8, cut: (b) => (needsYou(b) ? undefined : promptOff(b)) }, // your prompt
   { step: 9, cut: (b) => (needsYou(b) ? undefined : replyTo(b, 1)) }, // the newest reply shrinks to one line
   { step: 10, cut: (b) => turnOff(b, "main") }, // the main-thread row
-  { step: 11, cut: (b) => (b.groups.some((x) => (x.wf ? x.rows.length > 0 : x.rows.length > 1)) ? turnOn(b, "fold") : undefined) }, // agents fold
+  { step: 11, cut: (b) => (b.groups.some((x) => (x.wf ? x.rows.length > 0 : x.rows.length > 1)) ? foldAgents(b) : undefined) }, // agents fold: a workflow's into its own row, standalone ones into one line
   { step: 12, cut: (b) => (needsYou(b) ? promptOff(b) : undefined) }, // sessions that need you: the prompt,
   { step: 12, cut: (b) => (needsYou(b) ? replyTo(b, 2) : undefined) }, // then the reply down to 2 lines, and no further
   { step: 13, cut: (b) => (needsYou(b) ? undefined : replyTo(b, 0)) }, // the newest reply is removed
@@ -2952,8 +2977,9 @@ const LADDER: { step: number; cut: "gaps" | ((b: Block) => Change | undefined) }
 /**
  * Fit the blocks into `avail` rows by climbing the ladder, then hand back what is left over (the
  * design's step 17): the cuts are undone in reverse order, top session first, each one only if it
- * still fits; a cut to the newest reply comes back a line at a time. Last, a spare row goes to a second
- * line of a long prompt. Returns whether the blank rows between sessions survived, and the rows used.
+ * still fits; a cut to the newest reply comes back a line at a time, and a cut to an agent group an
+ * agent at a time. Last, a spare row goes to a second line of a long prompt. Returns whether the blank
+ * rows between sessions survived, and the rows used.
  */
 export function fitBlocks(blocks: Block[], g: Grid, avail: number, now: number): { gaps: boolean; rows: number } {
   const height = new Map<Block, number>();
@@ -2994,16 +3020,8 @@ export function fitBlocks(blocks: Block[], g: Grid, avail: number, now: number):
       if (b && before) (b.keep = before.keep), (b.folded = before.folded), height.delete(b);
       else gaps = false;
     };
-    if (b && c.reply) {
-      const [from, to] = c.reply;
-      const whole = Math.min(from, b.newest!.rows.length);
-      let lines = Math.min(whole, to + Math.max(0, avail - total()) + 1);
-      for (; lines > to; lines--) {
-        b.keep.reply = lines === whole ? from : lines;
-        height.delete(b);
-        if (!over()) break;
-      }
-      if (lines <= to) back();
+    if (b && c.ease) {
+      if (!c.ease(() => (height.delete(b), !over()), Math.max(0, avail - total()))) back();
       continue;
     }
     c.undo();

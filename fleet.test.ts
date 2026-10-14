@@ -1445,7 +1445,7 @@ describe("the detail view", () => {
       expect(p.rows).toBe(30);
       expect(p.blocks.map((b) => b.keep.earlier)).toEqual([[0], [], [0]]); // earlier replies went (4 rows)…
       expect(p.blocks.map((b) => b.keep.done)).toEqual([false, false, false]); // …and the finished-agents line (1)
-      for (const b of p.blocks) expect([b.keep.reply, b.keep.main || !b.v.showMain, b.keep.fold, b.keep.top3, b.keep.roster]).toEqual([10, true, false, false, true]);
+      for (const b of p.blocks) expect([b.keep.reply, b.keep.main || !b.v.showMain, b.keep.fold, b.keep.agents, b.keep.roster]).toEqual([10, true, false, Infinity, true]);
       expect(p.blocks.map((b) => b.keep.prompt)).toEqual([1, 0, 1]); // the middle one's prompt is its subheading
       expect(p.blocks[0].keep.now).toBe(true);
       const rows = draw(three(NOW), 150, 30);
@@ -1513,6 +1513,81 @@ describe("the detail view", () => {
       expect([less2.earlier, less2.reply]).toEqual([[0], 10]); // two rows short: the earlier reply goes, the newest is untouched
       const less5 = plan([long], 150, natural - 5).blocks[0].keep;
       expect([less5.earlier, less5.reply]).toEqual([[0], 6]); // five short: capped at 4 by step 4, then the two spare rows handed back as lines
+    });
+  });
+
+  test("step 5: an agent group longer than 3 folds to its 3 most active, and comes back an agent at a time", () => {
+    quietly(() => {
+      const quiet = (id: string) => agentOf(id, tailOf([toolCall(NOW - 8 * MIN), toolResult(NOW - 8 * MIN + 900)]));
+      const inTool = (id: string) => agentOf(id, tailOf([toolCall(NOW - 3 * MIN)]));
+      const live = (id: string) => agentOf(id, tailOf([toolCall(NOW - 5_000), toolResult(NOW - 4_000)]));
+      const s = sessionOf({ sid: "many-agents", mains: [tailOf([prompt(NOW - 5 * MIN, "look into it"), reply(NOW - 30_000, "On it.\n\nFirst the logs.")])], agents: [quiet("quiet-1"), quiet("quiet-2"), inTool("tool-1"), quiet("quiet-3"), live("live-1"), inTool("tool-2"), quiet("quiet-4")] });
+      const label = (row: string) => row.slice(4, 24).trim().replace(/^[⠋◐○] /, ""); // the row without its state glyph
+      const labels = (avail: number, stalled: string[] = []) => {
+        const views = F.buildViews([s], NOW, 80);
+        views[0].stall = { session: false, threads: stalled, count: stalled.length, since: stalled.length ? NOW - 3 * MIN : 0 };
+        return plain(F.detailView(views, 150, avail, NOW, 0, false)).slice(5).map(label);
+      };
+      // Rows 1 to 5 are the title, the promoted prompt, two reply lines and the main thread. With room, every agent: live, in a tool, then quiet.
+      expect(labels(30)).toEqual(["live-1", "tool-1", "tool-2", "quiet-1", "quiet-2", "quiet-3", "quiet-4"]);
+      // One row short: the 3 most active and a count. A working agent outranks a quiet one.
+      expect(plan([s], 150, 11).blocks[0].keep.agents).toBe(5); // 3, then the two spare rows handed back
+      expect(labels(11)).toEqual(["live-1", "tool-1", "tool-2", "quiet-1", "quiet-2", "… 2 more agents"]);
+      expect(labels(9)).toEqual(["live-1", "tool-1", "tool-2", "… 4 more agents"]);
+      // A stalled agent is the last to be folded away, and keeps its place in the list.
+      const mostlyLive = sessionOf({ sid: "live-ones", mains: s.mains, agents: [live("live-1"), live("live-2"), live("live-3"), live("live-4"), live("live-5"), inTool("stuck")] });
+      const views = F.buildViews([mostlyLive], NOW, 80);
+      views[0].stall = { session: false, threads: ["stuck"], count: 1, since: NOW - 3 * MIN };
+      expect(plain(F.detailView(views, 150, 9, NOW, 0, false)).slice(5).map(label)).toEqual(["live-1", "live-2", "stuck", "… 3 more agents"]);
+      // A count that would take the row of the one agent it hides is never drawn: four agents stay four.
+      const four = sessionOf({ sid: "four", mains: s.mains, agents: [live("live-1"), live("live-2"), live("live-3"), inTool("tool-1")] });
+      expect(plain(F.detailView(F.buildViews([four], NOW, 80), 150, 8, NOW, 0, false)).slice(4).map(label)).toEqual(["live-1", "live-2", "live-3", "tool-1"]);
+      // Shorter still (step 11): standalone agents fold into one line.
+      expect(plain(F.detailView(F.buildViews([s], NOW, 80), 150, 5, NOW, 0, false))[4]).toBe(" ▌  ⠋ 1 live   ◐ 2 in a tool   ○ 4 quiet");
+    });
+  });
+
+  test("spare rows: a long prompt gets a second line; without them it is one line, cut", () => {
+    quietly(() => {
+      const long = "find out why the payment tests are flaky and fix them, starting with the three that fail one run in twenty on the build machine but never locally";
+      const s = busy(NOW);
+      s.mains[0].ask = { text: long, t: NOW - 29 * MIN };
+      const first = " ▌  ▸ find out why the payment tests are flaky and fix them, starting with the three that fail one";
+      const roomy = draw([s], 150, 40);
+      expect(roomy.length).toBe(15);
+      expect(roomy.slice(2, 4).map((r) => r.slice(0, 98).trimEnd())).toEqual([first, " ▌    run in twenty on the build machine but never locally"]);
+      const exact = draw([s], 150, 14);
+      expect(exact[2].slice(0, 98)).toBe(first.slice(0, 97) + "…");
+      expect(exact[3]).toContain("◇");
+    });
+  });
+
+  test("a workflow that has ended: ✓ or ✗ in place of ≡, and how it ended in place of the trail", () => {
+    quietly(() => {
+      const s = busy(NOW);
+      const ended = (id: string, name: string, status: string, tokens?: number): F.Workflow => ({ ...s.workflows[0], id, name, status, tokens, finished: NOW - 4 * MIN, lastT: NOW - 4 * MIN, agents: s.workflows[0].agents.slice(0, 2) });
+      s.workflows = [ended("wf_2", "link-check", "completed", 412_000), ended("wf_3", "reindex-preview", "failed")];
+      const raw = F.detailView(F.buildViews([s], NOW, 80), 150, 40, NOW, 0, false);
+      const [okRow, badRow] = ["link-check", "reindex-preview"].map((name) => raw.find((r) => r.includes(name))!);
+      expect(strip(okRow).slice(0, 104)).toBe(" ▌  ✓ link-check                                  completed · 412k tok                          ✓ ✓  2/2");
+      expect(strip(okRow)).toMatch(/ 4m$/);
+      expect(strip(badRow).slice(0, 104)).toBe(" ▌  ✗ reindex-preview                             failed                                        ✓ ✓  2/2");
+      expect(badRow).toContain(F.fg(F.C.red, "✗"));
+      expect(badRow).toContain(F.fg(F.C.red, "failed"));
+      expect(okRow).not.toContain("≡");
+    });
+  });
+
+  test("with no left stack the context row still shows, with the key and the figures on its left", () => {
+    quietly(() => {
+      const s = sessionOf({ sid: "just-started", mains: [tailOf([{ ...toolCall(NOW - 5_000), message: { ...toolCall(NOW - 5_000).message, usage: { input_tokens: 4, cache_read_input_tokens: 120_000, output_tokens: 200 } } }, toolResult(NOW - 4_000)])] });
+      const rows = draw([s], 150, 20);
+      expect(rows.length).toBe(4);
+      expect(rows[2].slice(0, 104).trimEnd()).toBe(" ▌  ■ Used 120k   200 out");
+      expect(rows[2]).toMatch(/[█▌]+░+  12% of 1\.0M$/);
+      expect(rows[3].slice(0, 59)).toBe(" ▌  ⠋ main thread                                 thinking ");
+      // Step 14 takes the tasks row and then that context row; step 15 the roster. What is left is the two-row card.
+      expect(draw([s, waiting(NOW)], 150, 6).filter((r) => r.startsWith(" ▌")).length).toBe(2); // only the waiting session's two reply lines
     });
   });
 
