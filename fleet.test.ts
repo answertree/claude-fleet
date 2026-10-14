@@ -1371,6 +1371,22 @@ describe("header and chrome", () => {
     expect(hot[2]).toContain(F.bold(F.fg(F.C.red, "85%")));
   });
 
+  test("the core strip is one glyph a core, and past 18 cores neighbours are averaged so it keeps to its columns", () => {
+    const strip18 = (cores: number[], W = 150) =>
+      draw("off", () => {
+        F.machine.cores = cores;
+        return strip(F.header(fleet(F.grid(W).laneW), W, 44, NOW, NOW - WINDOW)[3]).slice(6, 26).trimEnd();
+      });
+    expect(strip18(MACHINE.cores)).toBe("▅▅▄▄▃▃▃▃▄▄▆▆▆▆▇▇   1"); // sixteen cores from column 7, then the detail at column 26
+    expect(strip18(Array.from({ length: 18 }, () => 50))).toBe("▅".repeat(18) + " 1"); // eighteen still fit, one cell short of the detail
+    expect(strip18(Array.from({ length: 24 }, (_, i) => (i % 2 ? 100 : 0)))).toBe("▅".repeat(12) + "       2"); // pairs: 0 and 100 average to 50
+    expect(strip18(Array.from({ length: 64 }, () => 100)).replace(/ .*/, "")).toBe("█".repeat(16)); // fours
+    expect(strip18(Array.from({ length: 19 }, () => 0)).replace(/ .*/, "")).toBe("▁".repeat(10));
+    // Narrow: load follows the strip, two cells on, wherever the strip ends.
+    expect(strip18(Array.from({ length: 18 }, () => 50), 110)).toBe("▅".repeat(18));
+    expect(draw("off", () => ((F.machine.cores = Array.from({ length: 18 }, () => 50)), strip(F.header(fleet(20), 110, 44, NOW, NOW - WINDOW)[3]).slice(0, 38)))).toBe(" core " + "▅".repeat(18) + "  load 14.6   ");
+  });
+
   test("runway in the header: pace ticks on the 5h and 7d gauges, and 'full in' in bold red when the limit fills before it resets", () => {
     expect(strip(F.limitGauge(38, 12, 170 / 300))).toBe("━━━━━─┼─────"); // 2h50 of 5 hours gone, 38% used: under pace, ┼ on the track
     expect(strip(F.limitGauge(86, 12, 215 / 300))).toBe("━━━━━━━━┿━──"); // the fill has passed the tick: ┿
