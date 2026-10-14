@@ -2238,6 +2238,17 @@ describe("the detail view", () => {
       ],
     });
   }
+  /** The demo's six tasks, as scan() reads them: two done, one in progress, three still to start, the last waiting on the one before it. */
+  function demoTasks(): NonNullable<F.Session["tasks"]> {
+    const items: F.TaskItem[] = ["Reproduce each failure", "Find the shared cause", "Fix clock-dependent tests", "Fix retry test", "Verify under load", "Open the pull request"].map((subject, i) => ({
+      id: String(i + 1),
+      subject,
+      activeForm: i === 2 ? "Fixing the clock-dependent tests" : "",
+      status: i < 2 ? "completed" : i === 2 ? "in_progress" : "pending",
+      blocked: i === 5,
+    }));
+    return { done: 2, doing: 1, total: 6, active: "Fixing the clock-dependent tests", items };
+  }
   /** The demo's busy job: a now-line, tasks, the main thread on a tool, and a workflow with two agents done and three running. */
   function busy(now: number, name = "flaky test hunt", upMin = 64, sid = "bbbbbbbb-0002"): F.Session {
     const main = tailOf(on("fix/flaky-payments", [
@@ -2259,11 +2270,14 @@ describe("the detail view", () => {
     return sessionOf({
       sid, name, startedAt: now - upMin * MIN - 30_000, mains: [main], workflows: [wf],
       job: { state: "working", detail: "bisecting the three payment tests that fail one run in twenty", needs: "" },
-      tasks: { done: 2, doing: 1, total: 6, active: "Fixing the clock-dependent tests" },
+      tasks: { ...demoTasks(), items: [] }, // counted, not itemised: the design's frames were drawn before the task list; listed() gives it the items
     });
   }
+  /** A session with the demo's six tasks itemised, as scan() reads them, so the task list is drawn. */
+  const listed = (s: F.Session) => ((s.tasks = demoTasks()), s);
   const three = (now: number) => [waiting(now), withAgents(now), busy(now)];
-  const six = (now: number) => [waiting(now), busy(now), ...["search reindex", "billing export", "upgrade tooling", "onboarding emails"].map((name, i) => busy(now, name, 71 + 12 * i, `${"defg"[i].repeat(8)}-001${i}`))];
+  /** The design's six sessions: one needs you, five working, each with its tasks listed. */
+  const six = (now: number) => [waiting(now), busy(now), ...["search reindex", "billing export", "upgrade tooling", "onboarding emails"].map((name, i) => busy(now, name, 71 + 12 * i, `${"defg"[i].repeat(8)}-001${i}`))].map((s) => (s.tasks ? listed(s) : s));
   /** The views as render() hands them over: in order, quiet ones left out unless asked for. */
   const viewsOf = (sessions: F.Session[], now: number, all = false) => F.buildViews(sessions, now).filter((v) => all || !F.isHidden(v));
   /** Plan the blocks without drawing them: each block's rows, and what the ladder left it. */
@@ -2581,7 +2595,7 @@ describe("the detail view", () => {
       expect(rows.flatMap((r, i) => (r.includes("main thread") ? [i] : []))).toEqual([11, 20]);
       // With every row it could want, nothing is cut and the blank rows are back.
       const roomy = plan(six(NOW), 150, 200);
-      expect(roomy.heights).toEqual([11, 14, 14, 14, 14, 14]);
+      expect(roomy.heights).toEqual([11, 18, 18, 18, 18, 18]); // each working session's four task rows too
       expect(roomy.gaps).toBe(true);
       // A cut to the newest reply comes back a line at a time.
       const long = busy(NOW);
@@ -2931,35 +2945,34 @@ describe("the detail view", () => {
     const current = items.find((t) => t.status === "in_progress");
     return { done: items.filter((t) => t.status === "completed").length, doing: items.filter((t) => t.status === "in_progress").length, total: items.length, active: current ? current.activeForm || current.subject : "", items };
   }
-  /** The demo's six tasks: two done, one in progress, three still to start, the last waiting on the one before it. */
-  function demoTasks(): F.Session["tasks"] {
-    const t = tasksOf("ddrppb", ["Reproduce each failure", "Find the shared cause", "Fix clock-dependent tests", "Fix retry test", "Verify under load", "Open the pull request"])!;
-    t.items[2].activeForm = t.active = "Fixing the clock-dependent tests";
-    return t;
-  }
   /** Fourteen tasks as the demo's --many-tasks has them: three done, two in progress, nine to start, three of those blocked. */
   const manyTasks = () => tasksOf("dddrrpbpppppbb");
   const withTasks = (s: F.Session, tasks: F.Session["tasks"]) => ((s.tasks = tasks), s);
-  /** The tasks row and the task list under it, from drawn rows: [the tasks row, the list rows]. The tasks row is undefined when it is not drawn. */
+  /** A working session whose subheading is not a now-line: it falls to the task in progress. */
+  const noNowLine = (s: F.Session) => ((s.job = undefined), s);
+  /**
+   * The tasks row and the task list under it, from drawn rows: [the tasks row, the list rows]. The tasks
+   * row is undefined when it is not drawn. The list hangs 2 cells in; a wrapped task's further rows 2 more.
+   */
   function taskRowsOf(rows: string[]): { strip?: string; list: string[] } {
     const at = rows.findIndex((r) => /^ ▌  ([✓◐○] ?)+  \d+\/\d+|^ ▌  ✓ \d+\/\d+ tasks done/.test(r));
     if (at < 0) return { list: [] };
     const list: string[] = [];
     for (const r of rows.slice(at + 1)) {
-      if (!/^ ▌  ([✓◐○] (?!main thread)|… \d+ more task)/.test(r)) break;
+      if (!/^ ▌    ([✓◐○] |… \d+ more task|  \S)/.test(r)) break;
       list.push(r.slice(0, 104).trimEnd());
     }
     return { strip: rows[at].slice(0, 104).trimEnd(), list };
   }
 
-  test("the task list: tasks in progress first, then those still to start, each in task order; done tasks are counted, not listed", () => {
+  test("the task list hangs 2 cells in under the tasks row: tasks in progress first, then those still to start, each in task order; done tasks are counted, not listed", () => {
     quietly(() => {
       const s = withTasks(busy(NOW), tasksOf("prdbrp", ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot"]));
       s.tasks!.items[4].activeForm = ""; // no active form: the subject stands in
       const raw = F.detailView(viewsOf([s], NOW), 150, 60, NOW, 0, false);
       const { strip: row, list } = taskRowsOf(plain(raw));
       expect(row).toBe(" ▌  ✓ ◐ ◐ ○ ○ ○  1/6");
-      expect(list).toEqual([" ▌  ◐ Working on Bravo", " ▌  ◐ Echo", " ▌  ○ Alpha", " ▌  ○ Delta · blocked", " ▌  ○ Foxtrot"]);
+      expect(list).toEqual([" ▌    ◐ Working on Bravo", " ▌    ◐ Echo", " ▌    ○ Alpha", " ▌    ○ Delta · blocked", " ▌    ○ Foxtrot"]);
       // In progress: a bold white ◐ and the text in the text colour. Still to start: a dim ○ and the subject in dim; "· blocked" in faint.
       const rawOf = (text: string) => raw.find((r) => strip(r).includes(text))!;
       expect(rawOf("Working on Bravo")).toContain(F.bold(F.fg(F.C.white, "◐")));
@@ -2968,17 +2981,19 @@ describe("the detail view", () => {
       expect(rawOf("○ Alpha")).toContain(F.fg(F.C.dim, "Alpha"));
       expect(rawOf("○ Delta")).toContain(F.fg(F.C.dim, "Delta"));
       expect(rawOf("○ Delta")).toContain(F.fg(F.C.faint, " · blocked"));
-      // Glyph at the icon column, text at the text column, as every row of the conversation.
-      for (const r of list) expect([...r].slice(4, 7).map((ch) => (ch === " " ? "space" : /[◐○]/.test(ch) ? "glyph" : "text"))).toEqual(["glyph", "space", "text"]);
+      // Glyph at column 7 and text at column 9, as a workflow's agents sit under its row, so the list does not read as more threads:
+      // the main-thread row under it keeps its glyph at column 5.
+      for (const r of list) expect([...r].slice(4, 9).map((ch) => (ch === " " ? "space" : /[◐○]/.test(ch) ? "glyph" : "text"))).toEqual(["space", "space", "glyph", "space", "text"]);
+      expect(plain(raw).find((r) => r.includes("main thread"))!.indexOf("◐")).toBe(4);
       // Every task done: the tasks row says so, and there is nothing to list.
       const done = taskRowsOf(draw([withTasks(busy(NOW), tasksOf("ddd"))], 150, 60));
       expect([done.strip, done.list]).toEqual([" ▌  ✓ 3/3 tasks done", []]);
       // No tasks in progress: the tasks row has no current task, and the list starts with what is still to start.
-      expect(taskRowsOf(draw([withTasks(busy(NOW), tasksOf("dpp"))], 150, 60)).list).toEqual([" ▌  ○ Task 2", " ▌  ○ Task 3"]);
+      expect(taskRowsOf(draw([withTasks(busy(NOW), tasksOf("dpp"))], 150, 60)).list).toEqual([" ▌    ○ Task 2", " ▌    ○ Task 3"]);
     });
   });
 
-  test("a subject longer than the measure is cut with … where the conversation's text ends; a blocked one keeps its mark", () => {
+  test("a subject longer than the room is cut with … where the conversation's text ends; a blocked one keeps its mark", () => {
     quietly(() => {
       const long = "A".repeat(200);
       const s = withTasks(busy(NOW), tasksOf("rb", [long]));
@@ -2986,17 +3001,18 @@ describe("the detail view", () => {
       for (const W of [150, 200, 110, 80]) {
         const g = F.grid(W);
         const { list } = taskRowsOf(draw([s], W, 60).map((r) => r.padEnd(W)));
-        expect(list).toEqual([" ▌  ◐ " + "B".repeat(g.measure - 1) + "…", " ▌  ○ " + "A".repeat(g.measure - 11) + "… · blocked"].map((r) => r.slice(0, 104)));
+        expect(list).toEqual([" ▌    ◐ " + "B".repeat(g.measure - 3) + "…", " ▌    ○ " + "A".repeat(g.measure - 13) + "… · blocked"].map((r) => r.slice(0, 104)));
+        expect(F.width(list[0])).toBe(g.text + g.measure - 1); // the last cell of the conversation's measure
       }
     });
   });
 
-  test("while the list shows, the tasks row is the strip and the count; once the list is cut to nothing it names the task in progress again", () => {
+  test("while the list shows the task in progress, the tasks row is the strip and the count; once it does not, the tasks row names it again", () => {
     quietly(() => {
-      const s = () => withTasks(busy(NOW), demoTasks());
+      const s = () => listed(busy(NOW));
       expect(taskRowsOf(draw([s()], 150, 60))).toEqual({
         strip: " ▌  ✓ ✓ ◐ ○ ○ ○  2/6",
-        list: [" ▌  ◐ Fixing the clock-dependent tests", " ▌  ○ Fix retry test", " ▌  ○ Verify under load", " ▌  ○ Open the pull request · blocked"],
+        list: [" ▌    ◐ Fixing the clock-dependent tests", " ▌    ○ Fix retry test", " ▌    ○ Verify under load", " ▌    ○ Open the pull request · blocked"],
       });
       const natural = plan([s()], 150, 200).heights[0];
       const seen = { listed: 0, named: 0 };
@@ -3006,7 +3022,7 @@ describe("the detail view", () => {
         if (list.length) {
           expect(row.slice(0, 22)).toBe(" ▌  ✓ ✓ ◐ ○ ○ ○  2/6");
           expect(row.slice(22).trim()).not.toContain("Fixing");
-          expect(list[0]).toBe(" ▌  ◐ Fixing the clock-dependent tests");
+          expect(list[0]).toBe(" ▌    ◐ Fixing the clock-dependent tests");
           seen.listed++;
         } else {
           expect(row.slice(0, 56)).toBe(" ▌  ✓ ✓ ◐ ○ ○ ○  2/6  Fixing the clock-dependent tests");
@@ -3015,6 +3031,44 @@ describe("the detail view", () => {
       }
       expect(seen.listed).toBeGreaterThan(0);
       expect(seen.named).toBeGreaterThan(0);
+    });
+  });
+
+  test("a list that would be the task in progress alone is not drawn: the tasks row names it, at no cost of a row", () => {
+    quietly(() => {
+      // Nothing else open: one row, as before there was a list.
+      expect(taskRowsOf(draw([withTasks(busy(NOW), tasksOf("ddr"))], 150, 60))).toEqual({ strip: " ▌  ✓ ✓ ◐  2/3  Working on Task 3", list: [] });
+      // Squeezed to the tasks in progress, a list with one of them gives its rows up whole; the session keeps what it kept before
+      // there was a list: its reply line, its main-thread row, its agents.
+      const natural = plan([listed(busy(NOW))], 150, 200).heights[0];
+      let gone = 0;
+      for (let avail = natural; avail >= 2; avail--) {
+        const { list } = taskRowsOf(draw([listed(busy(NOW))], 150, avail));
+        expect([avail, list.length > 0 && list.every((r) => /^ ▌    ◐ /.test(r))]).toEqual([avail, false]);
+        const k = plan([listed(busy(NOW))], 150, avail).blocks[0].keep;
+        if (k.taskScope !== "doing" && k.taskList > 0) continue;
+        gone++;
+        expect([avail, draw([listed(busy(NOW))], 150, avail)]).toEqual([avail, draw([busy(NOW)], 150, avail)]);
+      }
+      expect(gone).toBeGreaterThan(5);
+      // Two tasks in progress: both are listed, and the tasks row names neither.
+      const two = taskRowsOf(draw([withTasks(busy(NOW), tasksOf("drrp"))], 150, 60));
+      expect(two).toEqual({ strip: " ▌  ✓ ◐ ◐ ○  1/4", list: [" ▌    ◐ Working on Task 2", " ▌    ◐ Working on Task 3", " ▌    ○ Task 4"] });
+    });
+  });
+
+  test("with no now-line the subheading names the task in progress, and the list leaves it out rather than give it a second row", () => {
+    quietly(() => {
+      const rows = draw([noNowLine(listed(busy(NOW)))], 150, 60);
+      expect(rows[1]).toMatch(/^ ██ Fixing the clock-dependent tests /);
+      expect(taskRowsOf(rows)).toEqual({
+        strip: " ▌  ✓ ✓ ◐ ○ ○ ○  2/6  Fixing the clock-dependent tests", // as before there was a list
+        list: [" ▌    ○ Fix retry test", " ▌    ○ Verify under load", " ▌    ○ Open the pull request · blocked"],
+      });
+      // Only the first task in progress is the subheading; a second one is listed.
+      expect(taskRowsOf(draw([noNowLine(withTasks(busy(NOW), tasksOf("drrp")))], 150, 60)).list).toEqual([" ▌    ◐ Working on Task 3", " ▌    ○ Task 4"]);
+      // In focus every task is listed, that one too.
+      expect(taskRowsOf(draw([noNowLine(listed(busy(NOW)))], 150, 60, NOW, true)).list).toContain(" ▌    ◐ Fixing the clock-dependent tests");
     });
   });
 
@@ -3032,27 +3086,27 @@ describe("the detail view", () => {
         else {
           cut++;
           expect(list.length).toBe(k.taskList);
-          expect(list[list.length - 1]).toBe(` ▌  … ${open - (k.taskList - 1)} more tasks`);
-          expect(list.slice(0, -1).every((r) => /^ ▌  [◐○] /.test(r))).toBe(true);
+          expect(list[list.length - 1]).toBe(` ▌    … ${open - (k.taskList - 1)} more tasks`);
+          expect(list.slice(0, -1).every((r) => /^ ▌    [◐○] /.test(r))).toBe(true);
         }
-        if (k.taskList === 5) expect(list).toEqual([" ▌  ◐ Working on Task 4", " ▌  ◐ Working on Task 5", " ▌  ○ Task 6", " ▌  ○ Task 7 · blocked", " ▌  … 7 more tasks"]);
+        if (k.taskList === 5) expect(list).toEqual([" ▌    ◐ Working on Task 4", " ▌    ◐ Working on Task 5", " ▌    ○ Task 6", " ▌    ○ Task 7 · blocked", " ▌    … 7 more tasks"]);
       }
       expect(cut).toBeGreaterThan(0);
-      // The count is drawn in dim, from the icon column.
+      // The count is drawn in dim, 2 cells in, where the list's glyphs are.
       const raw = F.detailView(viewsOf([s()], NOW), 150, natural - 8, NOW, 0, false);
       const more = raw.find((r) => / more tasks/.test(strip(r)))!;
       expect(more).toContain(F.fg(F.C.dim, "… 7 more tasks"));
-      expect(strip(more).indexOf("…")).toBe(4);
+      expect(strip(more).indexOf("…")).toBe(6);
     });
   });
 
   test("in focus every task is listed, done ones first as receded-green ✓; when rows run out they are the first of the list to go", () => {
     quietly(() => {
-      const s = () => withTasks(busy(NOW), demoTasks());
+      const s = () => listed(busy(NOW));
       const raw = F.detailView(viewsOf([s()], NOW), 150, 60, NOW, 0, true);
       const { strip: row, list } = taskRowsOf(plain(raw));
       expect(row).toBe(" ▌  ✓ ✓ ◐ ○ ○ ○  2/6");
-      expect(list).toEqual([" ▌  ✓ Reproduce each failure", " ▌  ✓ Find the shared cause", " ▌  ◐ Fixing the clock-dependent tests", " ▌  ○ Fix retry test", " ▌  ○ Verify under load", " ▌  ○ Open the pull request · blocked"]);
+      expect(list).toEqual([" ▌    ✓ Reproduce each failure", " ▌    ✓ Find the shared cause", " ▌    ◐ Fixing the clock-dependent tests", " ▌    ○ Fix retry test", " ▌    ○ Verify under load", " ▌    ○ Open the pull request · blocked"]);
       const done = raw.find((r) => strip(r).includes("Reproduce each failure"))!;
       expect(done).toContain(F.fg(F.C.done, "✓"));
       expect(done).toContain(F.fg(F.C.dim, "Reproduce each failure"));
@@ -3063,6 +3117,77 @@ describe("the detail view", () => {
       for (const short of [1, 2]) {
         const k = plan([s()], 150, whole.heights[0] - short, NOW, true).blocks[0].keep;
         expect([k.taskScope, k.taskList, k.earlier, k.reply]).toEqual(["open", Infinity, whole.blocks[0].keep.earlier, Infinity]);
+      }
+    });
+  });
+
+  test("in focus a list cut short never shows done tasks in place of open ones: they come back only to a list that is whole", () => {
+    quietly(() => {
+      const s = () => withTasks(busy(NOW), manyTasks());
+      const whole = plan([s()], 150, 200, NOW, true).heights[0];
+      const seen = { done: 0, cut: 0 };
+      for (let avail = whole; avail >= 2; avail--) {
+        const { list } = taskRowsOf(draw([s()], 150, avail, NOW, true));
+        const cut = list.some((r) => / more tasks?$/.test(r));
+        if (cut) seen.cut++;
+        if (!list.some((r) => /^ ▌    ✓ /.test(r))) continue;
+        seen.done++;
+        // A ✓ row on the screen: then every open task is listed too, and nothing is counted away.
+        expect([avail, list.filter((r) => /^ ▌    [◐○] /.test(r)).length, cut]).toEqual([avail, 11, false]);
+      }
+      expect(seen.done).toBeGreaterThan(0);
+      expect(seen.cut).toBeGreaterThan(0);
+    });
+  });
+
+  test("in focus a task's whole text is shown, wrapped under itself; short of rows each goes back to one row before the done tasks leave, and wraps again only in a whole list", () => {
+    quietly(() => {
+      const LONG = "Make the clock injectable in every payments service that reads the time, including the ledger export and the nightly reconciliation job";
+      const s = () => withTasks(busy(NOW), tasksOf("drpb", ["Reproduce", LONG, LONG, LONG]));
+      const room = F.grid(150).measure - 2;
+      const hang = (glyph: string, lines: string[], mark = "") => lines.map((l, i) => (i ? " ▌      " : ` ▌    ${glyph} `) + l + (i === lines.length - 1 ? mark : ""));
+      const wrapped = [...hang("✓", ["Reproduce"]), ...hang("◐", F.wrap(`Working on ${LONG}`, room)), ...hang("○", F.wrap(LONG, room)), ...hang("○", F.wrap(LONG, room - 10), " · blocked")];
+      expect(wrapped.length).toBeGreaterThanOrEqual(7);
+      expect(taskRowsOf(draw([s()], 150, 60, NOW, true)).list).toEqual(wrapped);
+      // Outside focus, one row each.
+      expect(taskRowsOf(draw([s()], 150, 60)).list.length).toBe(3);
+      // A row short: every task stays listed, on one row each; the done one is still there.
+      const whole = plan([s()], 150, 200, NOW, true).heights[0];
+      const k = plan([s()], 150, whole - 1, NOW, true).blocks[0].keep;
+      expect([k.taskWrap, k.taskScope, k.taskList]).toEqual([false, "all", Infinity]);
+      expect(taskRowsOf(draw([s()], 150, whole - 1, NOW, true)).list.length).toBe(4);
+      // Further down, a wrapped row is only ever drawn in a list that is whole.
+      for (let avail = whole; avail >= 2; avail--) {
+        const { list } = taskRowsOf(draw([s()], 150, avail, NOW, true));
+        if (list.some((r) => r.startsWith(" ▌      "))) expect([avail, list.some((r) => / more tasks?$/.test(r)), list.filter((r) => /^ ▌    [✓◐○] /.test(r)).length]).toEqual([avail, false, 4]);
+      }
+    });
+  });
+
+  test("34 rows with the task list: it is cut to three rows before any reply is, so the waiting session keeps its question, its prompt and four reply lines with the final one", () => {
+    quietly(() => {
+      const sessions = () => [waiting(NOW), withAgents(NOW), listed(busy(NOW))];
+      const p = plan(sessions(), 150, 30);
+      expect(p.rows).toBe(30);
+      expect(p.blocks.map((b) => b.keep.earlier)).toEqual([[0], [], [0]]);
+      expect(p.blocks.map((b) => b.keep.done)).toEqual([false, false, false]);
+      expect(p.blocks.map((b) => b.keep.prompt)).toEqual([1, 0, 1]);
+      expect(p.blocks.map((b) => b.keep.reply)).toEqual([4, 10, 2]);
+      expect([p.blocks[2].keep.taskList, p.blocks[2].keep.taskScope]).toEqual([3, "open"]);
+      for (const b of p.blocks) expect([b.keep.main || !b.v.showMain, b.keep.fold, b.keep.agents, b.keep.roster]).toEqual([true, false, Infinity, true]);
+      const rows = draw(sessions(), 150, 30);
+      expect(rows.slice(3, 7).map((r) => r.slice(0, 98).trimEnd())).toEqual([
+        " ▌  ◆ The migration that drops coupon_code is written and has run cleanly against a copy of the",
+        " ▌    data.",
+        " ▌    • 41,208 rows were copied to promotions                                            … +1 line",
+        " ▌    I have not run it for real, because dropping a column cannot be undone.",
+      ]);
+      expect(taskRowsOf(rows).list).toEqual([" ▌    ◐ Fixing the clock-dependent tests", " ▌    ○ Fix retry test", " ▌    … 2 more tasks"]);
+      // On every screen: while the waiting session's reply is cut, no list has more than three rows.
+      const natural = plan(sessions(), 150, 200).rows;
+      for (let avail = natural; avail >= 20; avail--) {
+        const q = plan(sessions(), 150, avail);
+        if (q.blocks[0].keep.reply < 5) expect([avail, taskRowsOf(draw(sessions(), 150, avail)).list.length <= 3]).toEqual([avail, true]);
       }
     });
   });
@@ -3082,6 +3207,7 @@ describe("the detail view", () => {
           const list = taskRowsOf(draw([make()], 150, avail)).list;
           const now: Record<string, boolean> = {
             "earlier replies": k.earlier.every((n) => n === 0),
+            "finished line": !k.done,
             "reply to 4": k.reply <= 4,
             "reply to 2": k.reply <= 2,
             prompt: k.prompt === 0,
@@ -3098,29 +3224,69 @@ describe("the detail view", () => {
           for (const [what, cut] of Object.entries(now)) if (cut && at[what] === undefined) at[what] = avail;
           // What each stage draws.
           if (k.tasks && k.taskList === 0) expect([avail, list]).toEqual([avail, []]);
-          if (k.tasks && k.taskScope === "doing" && k.taskList > 0) expect([avail, list.every((r) => r.startsWith(" ▌  ◐ "))]).toEqual([avail, true]);
-          if (k.tasks && k.taskScope === "open" && k.taskList <= 5) expect([avail, list.length <= k.taskList, list[list.length - 1]]).toEqual([avail, true, ` ▌  … ${11 - (k.taskList - 1)} more tasks`]);
+          if (k.tasks && k.taskScope === "doing" && k.taskList > 0) expect([avail, list.every((r) => r.startsWith(" ▌    ◐ "))]).toEqual([avail, true]);
+          if (k.tasks && k.taskScope === "open" && k.taskList <= 5) expect([avail, list.length <= k.taskList, list[list.length - 1]]).toEqual([avail, true, ` ▌    … ${11 - (k.taskList - 1)} more tasks`]);
         }
         return at;
       };
       const before = (at: Record<string, number>, first: string, then: string) => expect([first, then, at[first] > at[then]]).toEqual([first, then, true]);
-      const busyAt = firstCut(() => withTasks(busy(NOW), manyTasks()));
+      /** With a finished agent, so the finished-agents line is there to give up. */
+      const finished = (s: F.Session) => ((s.agents = [agentOf("x1", tailOf(calls(6, NOW - 9 * MIN, 31)), { label: "List the flaky tests", done: true })]), s);
+      const busyAt = firstCut(() => finished(withTasks(busy(NOW), manyTasks())));
       // The list's own four steps, in order, each one firing on some screen…
       for (const [a, b] of [["list to 5", "list to 3"], ["list to 3", "list in progress only"], ["list in progress only", "no list"], ["no list", "no tasks row"]]) before(busyAt, a, b);
-      // …each after the rung the design puts before it, and before the one after it.
-      before(busyAt, "earlier replies", "list to 5");
-      before(busyAt, "list to 5", "reply to 2");
-      before(busyAt, "reply to 2", "list to 3");
-      before(busyAt, "list to 3", "prompt");
-      before(busyAt, "reply to 1", "list in progress only");
-      before(busyAt, "list in progress only", "main thread");
+      // …and the order the README gives, which is the order the ladder takes them in.
+      const ORDER: [phrase: string, cut: string][] = [
+        ["earlier replies", "earlier replies"],
+        ["each task list down to five rows", "list to 5"],
+        ["the finished-agents line", "finished line"],
+        ["each task list down to three", "list to 3"],
+        ["most of each newest reply", "reply to 2"],
+        ["prompts", "prompt"],
+        ["the tasks still to start", "list in progress only"],
+        ["main-thread rows", "main thread"],
+        ["per-agent rows", "fold"],
+      ];
+      for (let i = 1; i < ORDER.length; i++) before(busyAt, ORDER[i - 1][1], ORDER[i][1]);
       before(busyAt, "reply gone", "no list");
-      // A session that needs you skips steps 8, 9 and 13, and keeps two lines of its reply; its list goes the same way.
+      const readme = fs.readFileSync(path.join(here, "README.md"), "utf8");
+      const sentence = /sessions give rows up in a fixed order, from the bottom session upward: ([^.]+)\./.exec(readme)?.[1] ?? "";
+      const where = ORDER.map(([phrase]) => sentence.indexOf(phrase));
+      expect(where.every((n, i) => n >= 0 && (i === 0 || n > where[i - 1]))).toBe(true);
+      // A session that needs you skips steps 8, 9 and 13, and keeps two lines of its reply; its list goes the same way, down to
+      // three rows before its reply is touched.
       const waitAt = firstCut(() => withTasks(waiting(NOW), manyTasks()));
       for (const [a, b] of [["list to 5", "list to 3"], ["list to 3", "list in progress only"], ["list in progress only", "no list"], ["no list", "no tasks row"]]) before(waitAt, a, b);
       before(waitAt, "earlier replies", "list to 5");
+      before(waitAt, "list to 3", "reply to 4");
       before(waitAt, "list in progress only", "prompt"); // step 12, after 9.5
       expect(waitAt["reply gone"] ?? 0).toBeLessThan(waitAt["no tasks row"]); // only past the design's ladder, after the tasks row
+    });
+  });
+
+  test("laying the list out does not cost more with longer task text: each task is cut once per width, not once per try of the ladder", () => {
+    quietly(() => {
+      const sessions = (len: number) =>
+        six(NOW).map((s) => {
+          if (s.job?.state !== "working") return s;
+          const t = tasksOf("dd" + "rr" + "pb".repeat(98), [("Task " + "words of a long subject ".repeat(20)).slice(0, len)]);
+          return withTasks(s, t);
+        });
+      /** The quickest of five renders: what the work costs, not what else the machine was doing. */
+      const cost = (len: number) => {
+        const s = sessions(len);
+        F.render(s, 150, 44, NOW);
+        let best = Infinity;
+        for (let i = 0; i < 5; i++) {
+          const t0 = performance.now();
+          F.render(s, 150, 44, NOW);
+          best = Math.min(best, performance.now() - t0);
+        }
+        return best;
+      };
+      const short = cost(20);
+      const long = cost(300);
+      expect(long).toBeLessThan(short * 2.5 + 5);
     });
   });
 
@@ -3136,8 +3302,8 @@ describe("the detail view", () => {
       expect(lists.map(([, make]) => make()!.total)).toEqual([0, 1, 6, 40]);
       for (const [count, make] of lists)
         for (const [W, H] of [[80, 24], [110, 34], [150, 44], [200, 60]])
-          for (const [name, sessions] of [["one", [withTasks(busy(NOW), make())]], ["six", six(NOW).map((s) => withTasks(s, s.job?.state === "working" ? make() : undefined))]] as [string, F.Session[]][])
-            for (const focus of name === "one" ? [false, true] : [false]) {
+          for (const [name, sessions] of [["one", [withTasks(busy(NOW), make())]], ["one with no now-line", [noNowLine(withTasks(busy(NOW), make()))]], ["six", six(NOW).map((s) => withTasks(s, s.job?.state === "working" ? make() : undefined))]] as [string, F.Session[]][])
+            for (const focus of name === "six" ? [false] : [false, true]) {
               // The whole frame at that size: exactly its rows, none wider than the screen.
               const frame = F.render(sessions, W, H, NOW).map(strip);
               if (frame.length !== H || frame.some((r) => Bun.stringWidth(r) > W)) throw new Error(`${count}, ${name} at ${W}x${H}: the frame does not fit`);
@@ -3147,7 +3313,7 @@ describe("the detail view", () => {
                 const blocks = views.map((v) => F.blockOf(v, g, NOW, F.laneWindow(NOW, W), focus));
                 const fit = F.fitBlocks(blocks, g, avail, NOW);
                 const rows = plain(F.detailView(views, W, avail, NOW, 0, focus));
-                const where = `${count}, ${name} session${name === "one" ? "" : "s"} at ${W}x${avail}${focus ? " in focus" : ""}`;
+                const where = `${count}, ${name} at ${W}x${avail}${focus ? " in focus" : ""}`;
                 if (rows.length > avail) throw new Error(`${where}: ${rows.length} rows`);
                 if (avail > 0 && rows.length !== fit.rows) throw new Error(`${where}: drew ${rows.length} rows but planned ${fit.rows}`);
                 for (const r of rows) {
@@ -3157,7 +3323,7 @@ describe("the detail view", () => {
                 // A count of hidden tasks always has a task above it, and never stands for just one.
                 rows.forEach((r, i) => {
                   const more = / … (\d+) more tasks?$/.exec(r);
-                  if (more && (Number(more[1]) < 2 || !/^ ▌  [✓◐○] /.test(rows[i - 1] ?? ""))) throw new Error(`${where}: ${rows[i - 1]} / ${r}`);
+                  if (more && (Number(more[1]) < 2 || !/^ ▌    ([✓◐○] |  \S)/.test(rows[i - 1] ?? ""))) throw new Error(`${where}: ${rows[i - 1]} / ${r}`);
                 });
               }
             }
@@ -3207,6 +3373,30 @@ describe("the task list, as scan() reads it", () => {
     expect(s.tasks!.items[1].activeForm).toBe("Finding the cause");
     // The counts are as before: the deleted task is not one of them, and the current task is the first in progress in task order.
     expect([s.tasks!.done, s.tasks!.doing, s.tasks!.total, s.tasks!.active]).toEqual([1, 2, 9, "Finding the cause"]);
+  });
+
+  test("a file that is not a JSON object is not a task; a task with no text is listed by its id; a long subject is kept only as long as focus can show", () => {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.mkdirSync(path.join(home, "sessions"), { recursive: true });
+    fs.writeFileSync(path.join(home, "sessions", "1.json"), JSON.stringify({ pid: process.pid, sessionId: sid, name: "tasks", kind: "bg", status: "busy", cwd: "/work/shop", startedAt: NOW - 30 * MIN }));
+    fs.mkdirSync(path.join(home, "projects", "-tasks"), { recursive: true });
+    fs.writeFileSync(path.join(home, "projects", "-tasks", sid + ".jsonl"), JSON.stringify(prompt(NOW - 20 * MIN, "fix the parser")) + "\n");
+    task("1.json", { id: "1", subject: "Fix the parser", activeForm: "Fixing the parser", status: "in_progress" });
+    for (const [file, body] of [["2.json", "[]"], ["3.json", "5"], ["4.json", '"a string"'], ["5.json", "null"]]) fs.writeFileSync(path.join(home, "tasks", sid, file), body);
+    task("6.json", { id: "6", status: "pending" }); // no subject at all
+    task("7.json", { id: "7", subject: 42, activeForm: ["x"], status: "pending" }); // neither is text
+    task("8.json", { id: "8", subject: "Write the docs " + "and more ".repeat(200), status: "pending" });
+    const s = F.scan(NOW).find((x) => x.sid === sid)!;
+    expect(s.tasks!.items.map((t) => t.id)).toEqual(["1", "6", "7", "8"]);
+    expect([s.tasks!.done, s.tasks!.doing, s.tasks!.total]).toEqual([0, 1, 4]);
+    expect(s.tasks!.items[3].subject.length).toBeLessThanOrEqual(301);
+    expect(s.tasks!.items[3].subject.endsWith("…")).toBe(true);
+    F.seen.at = NOW + MIN;
+    const rows = F.detailView(F.buildViews([s], NOW), 150, 40, NOW, 0, false).map((r) => strip(r).trimEnd());
+    // With no now-line the subheading and the tasks row name the task in progress; the list has the rest.
+    expect(rows.find((r) => r.startsWith(" ▌  ◐ ○ ○ ○"))!.slice(0, 40).trimEnd()).toBe(" ▌  ◐ ○ ○ ○  0/4  Fixing the parser");
+    const list = rows.filter((r) => /^ ▌    [◐○] /.test(r)).map((r) => r.slice(0, 22).trimEnd());
+    expect(list).toEqual([" ▌    ○ Task 6", " ▌    ○ Task 7", " ▌    ○ Write the docs"]);
   });
 });
 
