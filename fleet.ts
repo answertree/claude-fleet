@@ -1969,12 +1969,12 @@ export function paceCell(tick: number, pct: number, w: number): { cell: number; 
 }
 /**
  * Milliseconds until a limit reaches 100% at the pace it has kept so far, but only when that comes
- * before the reset. Says nothing in the first 15% of a window or under 5% used, where the pace means little.
+ * before the reset. Says nothing in the first 15% of a window or under 5% used, where the pace means
+ * little, nor once the limit is full: then there is nothing left to forecast, and the reset time is what matters.
  */
 export function paceForecast(pct: number, resetsAt: number, windowMs: number, now: number): number | undefined {
   const tick = paceTick(resetsAt, windowMs, now);
-  if (tick === undefined || tick < 0.15 || pct < 5) return undefined;
-  if (pct >= 100) return 0;
+  if (tick === undefined || tick < 0.15 || pct < 5 || pct >= 100) return undefined;
   const toFull = ((100 - pct) / pct) * tick * windowMs;
   return now + toFull < resetsAt ? toFull : undefined;
 }

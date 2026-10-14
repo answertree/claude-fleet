@@ -849,7 +849,7 @@ describe("runway", () => {
     const fullIn = F.paceForecast(86, NOW + 85 * MIN, 5 * H, NOW)!;
     expect(fullIn / MIN).toBeCloseTo(35, 9);
     expect(F.fullInText(fullIn / MIN)).toBe("full in ~35m");
-    expect(F.paceForecast(100, NOW + 85 * MIN, 5 * H, NOW)).toBe(0);
+    expect(F.paceForecast(100, NOW + 85 * MIN, 5 * H, NOW)).toBeUndefined(); // already full: see "runway and pace, worked by hand"
     expect(F.paceForecast(50, NOW - MIN, 5 * H, NOW)).toBeUndefined();
   });
 
@@ -1738,5 +1738,59 @@ describe("graphs hold still, checked independently", () => {
     } finally {
       Object.assign(F.opt, before);
     }
+  });
+});
+
+describe("runway and pace, worked by hand", () => {
+  const H = 60 * MIN;
+  const view = (pct: number, resetsInMs: number) => F.accountViewOf({ kind: "current", data: { five_hour: { utilization: pct, resets_at: iso(NOW + resetsInMs) } }, asOf: NOW, failing: "" }, { nextTry: 0, busy: false }, NOW).limits[0];
+
+  test("a limit that is already full has no forecast: what matters then is when it resets", () => {
+    // 100% used with 1h25 to go. "full in ~1m" would be a forecast of something that has happened, shown until the reset.
+    expect(F.paceForecast(100, NOW + 85 * MIN, 5 * H, NOW)).toBeUndefined();
+    expect(F.paceForecast(104, NOW + 85 * MIN, 5 * H, NOW)).toBeUndefined();
+    expect(view(100, 85 * MIN)).toMatchObject({ pct: 100, fullIn: undefined });
+    expect(F.resetText(view(100, 85 * MIN).resetsAt, NOW)).toBe("resets in 1h25");
+    expect(F.limitTone(100)).toEqual(F.C.red);
+    // One point short of full, at the same moment: 3h35 gone at 99%, so 215/99 minutes for the last point.
+    expect(F.paceForecast(99, NOW + 85 * MIN, 5 * H, NOW)! / MIN).toBeCloseTo(215 / 99, 9);
+    expect(F.fullInText(215 / 99)).toBe("full in ~2m");
+  });
+
+  test("a window that has just reset, nothing used, and a reset time already past", () => {
+    // Just reset: the whole 5 hours lie ahead. The tick is at the very start and nothing is forecast, however much is used.
+    expect(view(0, 5 * H)).toMatchObject({ pct: 0, tick: 0, fullIn: undefined });
+    expect(view(60, 5 * H - 1000)).toMatchObject({ fullIn: undefined }); // a second in: 60% already would be alarming, but one second is no pace
+    expect(F.paceCell(0, 0, 12)).toEqual({ cell: 0, glyph: "┼" });
+    // 0% used at any point in the window: nothing to forecast.
+    expect(F.paceForecast(0, NOW + 2 * H, 5 * H, NOW)).toBeUndefined();
+    expect(view(0, 2 * H).tick).toBeCloseTo(0.6, 9); // 3 of 5 hours gone
+    // The reset time is in the past: the figures belong to a window that has rolled over. No tick, no forecast, no "resets in".
+    expect(view(97, -5 * MIN)).toMatchObject({ pct: 97, tick: undefined, fullIn: undefined });
+    expect(F.resetText(NOW - 5 * MIN, NOW)).toBe("");
+    // By hand, mid-window: 2h30 of 5h gone at 51% used. 49 points to go at 51 points per 150 minutes = 144.1 minutes, and 150 remain.
+    expect(F.paceForecast(51, NOW + 2.5 * H, 5 * H, NOW)! / MIN).toBeCloseTo((49 / 51) * 150, 9);
+    expect(F.paceForecast(50, NOW + 2.5 * H, 5 * H, NOW)).toBeUndefined(); // exactly on pace: full at the reset, not before it
+    // The week: 6 days gone at 90%. 10 points at 15 points a day = 16 hours, and 24 remain.
+    expect(F.paceForecast(90, NOW + 24 * H, 7 * 24 * H, NOW)! / H).toBeCloseTo(16, 9);
+    expect(F.fullInText(16 * 60)).toBe("full in ~16h00");
+  });
+
+  test("context that shrinks: a compaction starts the history again, a slow decline says nothing", () => {
+    const at = (min: number, used: number): [number, number] => [NOW - min * MIN, used];
+    // 880k, 900k, 920k, then compacted to 200k six minutes ago and growing 20k a minute: 320k now, 680k to go, 34 minutes.
+    const compacted = [at(9, 880_000), at(8, 900_000), at(7, 920_000), ...[6, 5, 4, 3, 2, 1, 0].map((m) => at(m, 200_000 + (6 - m) * 20_000))];
+    expect(F.ctxRunway(compacted, 1_000_000, NOW)).toBeCloseTo(34, 9);
+    // The same, but compacted only four minutes ago: not yet five minutes of new history.
+    expect(F.ctxRunway([at(9, 880_000), at(7, 920_000), ...[4, 3, 2, 1, 0].map((m) => at(m, 200_000 + (4 - m) * 20_000))], 1_000_000, NOW)).toBeUndefined();
+    // Before the compaction it was 4 minutes from full; the forecast must not come from those readings.
+    expect(F.ctxRunway(compacted.slice(0, 3).map(([t, u]) => [t + 7 * MIN, u] as [number, number]), 1_000_000, NOW)).toBeUndefined(); // and three readings two minutes long are not enough either
+    // Shrinking a little at a time (no single drop big enough to be a compaction): no trend upward, so nothing.
+    expect(F.ctxRunway(Array.from({ length: 11 }, (_, i) => at(10 - i, 600_000 - i * 1_000)), 1_000_000, NOW)).toBeUndefined();
+    // Two compactions in the last ten minutes: only what follows the second counts (60k to 180k in six minutes: 20k a minute, 41 minutes to 1M).
+    const twice = [at(10, 900_000), at(9, 300_000), at(8, 320_000), at(7, 340_000), ...[6, 5, 4, 3, 2, 1, 0].map((m) => at(m, 60_000 + (6 - m) * 20_000))];
+    expect(F.ctxRunway(twice, 1_000_000, NOW)).toBeCloseTo(41, 9);
+    // A reading stamped later than now (clocks disagree) is left out rather than trusted.
+    expect(F.ctxRunway([...Array.from({ length: 11 }, (_, i) => at(10 - i, 600_000 + i * 10_000)), [NOW + 5 * MIN, 999_000]], 1_000_000, NOW)).toBeCloseTo(30, 9);
   });
 });
