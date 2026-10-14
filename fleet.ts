@@ -519,7 +519,9 @@ export function grid(W: number): Grid {
   const textEnd = lane - 3;
   const actionEnd = textEnd - (wide ? 17 : 0);
   const labelEnd = 7 + Math.min(42, Math.floor((actionEnd - 6) * 0.52)) - 1;
-  const account = wide ? 61 : 42;
+  // The header's wide blocks run to column 104, which the lane leaves free only from 150 columns up. From 130 to 149 the header keeps the narrow blocks.
+  const roomy = textEnd >= 104;
+  const account = roomy ? 61 : 42;
   return {
     W,
     wide,
@@ -544,8 +546,8 @@ export function grid(W: number): Grid {
     actionEnd,
     type: wide ? textEnd - 14 : 0,
     typeEnd: wide ? textEnd : 0,
-    gaugeW: wide ? 12 : 8,
-    histW: wide ? 20 : 12,
+    gaugeW: roomy ? 12 : 8,
+    histW: roomy ? 20 : 12,
     machine: 2,
     machineEnd: account - 4,
     account,
@@ -1326,10 +1328,15 @@ export const REASON = {
   network: (code: string) => `network: ${code}`,
   none: "no Claude Code login found",
 };
-/** What can be done about a reason, for the one dim line under the account block. Standard remedies, not tested here. */
-export function usageRemedy(reason: string): string {
-  if (reason === REASON.keychainRemote) return "run: security unlock-keychain ~/Library/Keychains/login.keychain-db  ·  or start fleet in a tmux begun on the Mac itself";
-  return "";
+/**
+ * What can be done about a reason, for the one dim line under the account block: the fullest wording
+ * that fits in `w` cells, so the command itself is never the part that is cut. Standard remedies, not tested here.
+ */
+export function usageRemedy(reason: string, w = Infinity): string {
+  if (reason !== REASON.keychainRemote) return "";
+  const unlock = "run: security unlock-keychain ~/Library/Keychains/login.keychain-db";
+  const wordings = [`${unlock}  ·  or start fleet in a tmux begun on the Mac itself`, `${unlock} · or use a tmux started on the Mac`, unlock];
+  return wordings.find((x) => width(x) <= w) ?? fit(unlock, w, "l", true).trimEnd();
 }
 
 /** What a stored login looked like when parsed: usable, JSON without a claude.ai login, not JSON, or nothing at all. */

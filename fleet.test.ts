@@ -255,6 +255,9 @@ describe("layout grid", () => {
     expect(F.grid(100).small).toBe(false);
     expect(F.grid(130)).toMatchObject({ laneW: 30, lane: 87, textEnd: 84, measure: 72, labelEnd: 37, action: 40, actionEnd: 67 });
     expect(F.grid(200)).toMatchObject({ laneW: 30, measure: 96, labelEnd: 48, action: 51, actionEnd: 137, figEnd: 199 });
+    // The header's wide blocks end at column 104, so they need 150 columns; from 130 to 149 the lane sits where they would end.
+    for (const W of [130, 140, 149]) expect(F.grid(W)).toMatchObject({ account: 42, machineEnd: 38, gaugeW: 8, histW: 12, accountEnd: W - 46 });
+    expect(F.grid(200)).toMatchObject({ account: 61, machineEnd: 57, gaugeW: 12, histW: 20, accountEnd: 154 });
   });
 
   test("at every width the columns are in order and stay on the screen", () => {
@@ -561,6 +564,12 @@ describe("usage read tells the truth", () => {
     expect(F.usageRemedy(F.REASON.keychainRemote)).toContain("security unlock-keychain ~/Library/Keychains/login.keychain-db");
     expect(F.usageRemedy(F.REASON.keychainRemote)).toContain("tmux");
     expect(F.usageRemedy(F.REASON.expired)).toBe("");
+    // The line is given the fullest wording that fits where it is drawn; the command is the last thing to be cut.
+    const command = "run: security unlock-keychain ~/Library/Keychains/login.keychain-db";
+    expect(F.usageRemedy(F.REASON.keychainRemote, 103)).toBe(`${command} · or use a tmux started on the Mac`);
+    expect(F.usageRemedy(F.REASON.keychainRemote, 76)).toBe(command);
+    expect(F.usageRemedy(F.REASON.keychainRemote, 40)).toBe("run: security unlock-keychain ~/Library…");
+    for (const w of [20, 40, 76, 103, 140]) expect(F.width(F.usageRemedy(F.REASON.keychainRemote, w))).toBeLessThanOrEqual(w);
   });
 
   test("'no Claude Code login found' only when the keychain and the file both said not found", () => {
