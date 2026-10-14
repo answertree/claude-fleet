@@ -15,12 +15,14 @@ import * as path from "node:path";
 const SIZES: [number, number][] = [[80, 24], [100, 30], [110, 44], [130, 40], [150, 34], [150, 44], [200, 60]];
 const MODES = ["detail", "compact", "far"];
 /** Demo option sets; each is rendered at every size in every mode. */
-const VARIANTS: { name: string; args: string[] }[] = [
+const VARIANTS: { name: string; args: string[]; shows?: RegExp }[] = [
   { name: "default", args: [] },
   { name: "all", args: ["--all"] }, // plus a finished, a your-turn and an idle session
   { name: "six", args: ["--six"] }, // six sessions sharing the screen
   { name: "surprise", args: ["--surprise"] }, // a stalled agent, a context forecast, the 5-hour limit running out, things new since you looked
   { name: "ended", args: ["--ended", "--all"] }, // a completed and a failed workflow
+  { name: "many-tasks", args: ["--many-tasks"] }, // a fourteen-task list that has to give way
+  { name: "focus", args: ["--focus", "--many-tasks"], shows: /bisect/i }, // one session, every task listed; the waiting one is not on the screen
   ...["current", "extra-off", "early", "stale", "none", "remote", "shared"].map((a) => ({ name: `account-${a}`, args: ["--account", a] })),
   { name: "plain-glyphs", args: ["--plain-glyphs", "--account", "none", "--stalled"] }, // the four fallbacks, on the header's no-reading gauges and a stalled thread
 ];
@@ -43,13 +45,14 @@ interface Job {
   cols: number;
   rows: number;
   args: string[];
+  shows: RegExp; // text that must be on the screen, so an empty frame cannot pass
 }
 const jobs: Job[] = [];
 for (const v of VARIANTS)
   for (const [cols, rows] of SIZES)
     for (const mode of MODES) {
       const name = `${v.name}-${mode}-${cols}x${rows}`;
-      if (!only || name.includes(only)) jobs.push({ name, cols, rows, args: ["--once", "--mode", mode, ...v.args] });
+      if (!only || name.includes(only)) jobs.push({ name, cols, rows, args: ["--once", "--mode", mode, ...v.args], shows: v.shows ?? /approve/i });
     }
 if (args.includes("--list")) {
   console.log(jobs.map((j) => j.name).join("\n"));
@@ -70,8 +73,8 @@ async function check(job: Job): Promise<string[]> {
   const lines = strip(stdout).replace(/\n$/, "").split("\n");
   if (saveDir) fs.writeFileSync(path.join(saveDir, job.name + ".txt"), lines.join("\n") + "\n");
   if (lines.length !== job.rows) problems.push(`${lines.length} rows, expected ${job.rows}`);
-  // Every variant has the session that needs you. If its question is missing, the frame is empty and would pass for the wrong reason.
-  if (!/approve/i.test(lines.join("\n"))) problems.push("the demo's sessions are not on the screen: the waiting session's question is missing");
+  // Every variant but focus has the session that needs you. If its question is missing, the frame is empty and would pass for the wrong reason.
+  if (!job.shows.test(lines.join("\n"))) problems.push(`the demo's sessions are not on the screen: nothing matches ${job.shows}`);
   lines.forEach((line, i) => {
     const w = Bun.stringWidth(line);
     if (w > job.cols) problems.push(`row ${i + 1} is ${w} cells wide (limit ${job.cols}): ${line.trim().slice(0, 70)}`);

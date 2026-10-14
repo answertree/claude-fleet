@@ -9,6 +9,8 @@
 //   --stalled         one agent has sat on a tool call for 14 minutes with its session idle
 //   --runway          one session's context grows steadily, so "full in ~40m" shows
 //   --ended           adds a completed workflow and a failed one
+//   --many-tasks      the flaky test hunt has a long task list: 14 tasks, two in progress
+//   --focus           start focused on the flaky test hunt, as a click on it would
 //   --account <name>  a made-up account (it turns usage on): current, extra-off, early (the
 //                     5-hour limit runs out before it resets), stale, none, remote, shared (this
 //                     dashboard's own read fails over ssh/mosh; another's figures, 3 minutes old,
@@ -43,6 +45,8 @@ const six = flag("--six");
 const stalled = flag("--stalled") || surprise;
 const runway = flag("--runway") || surprise;
 const ended = flag("--ended");
+const manyTasks = flag("--many-tasks");
+const focus = flag("--focus");
 const realMachine = flag("--real-machine");
 // --usage or FLEET_USAGE=1 on their own would have the dashboard read your real login: here they mean the made-up current account.
 const account = value("--account") ?? (surprise ? "early" : argv.includes("--usage") || process.env.FLEET_USAGE === "1" ? "current" : undefined);
@@ -141,7 +145,7 @@ session(1, {
 });
 
 /** A busy job running a workflow, with tasks: three agents fixing, two that have already reported. */
-function busyJob(n: number, o: { sid: string; name: string; cwd: string; branch: string; wfId: string; upMin: number; quietReviewer?: boolean; growing?: boolean }) {
+function busyJob(n: number, o: { sid: string; name: string; cwd: string; branch: string; wfId: string; upMin: number; quietReviewer?: boolean; growing?: boolean; manyTasks?: boolean }) {
   // With --runway the context has grown by about 12k tokens a minute for the last ten minutes: 389k left, so full in about 40.
   const used = o.growing ? (msAgo: number) => 611_000 - 12_200 * Math.max(0, Math.min(msAgo / MIN, 12) - 2) : 611_000;
   const dir = session(n, {
@@ -150,8 +154,32 @@ function busyJob(n: number, o: { sid: string; name: string; cwd: string; branch:
     main: [...loaded(118_000, 30_000), ...transcript({ calls: 30, endAgo: 2 * MIN, ask: "find out why the payment tests are flaky and fix them", used, pending: ["Workflow", { description: "Bisect and fix the flaky payment tests" }],
       says: ["Three tests fail intermittently, all in the payments suite. I'm running each two hundred times under load to find which ones share a cause.", "Two of the three share a cause: both read the clock twice and assume the same second. The third is separate. I've started a workflow with one agent per test, and a reviewer to confirm each fix."] })],
   });
-  ["Reproduce each failure", "Find the shared cause", "Fix clock-dependent tests", "Fix retry test"].forEach((subject, i) => write(path.join(home, "tasks", o.sid, `${i + 1}.json`), JSON.stringify({ id: String(i + 1), subject, status: i < 2 ? "completed" : i === 2 ? "in_progress" : "pending", activeForm: "Fixing the clock-dependent tests" })));
-  ["Verify under load", "Open the pull request"].forEach((subject, i) => write(path.join(home, "tasks", o.sid, `${i + 5}.json`), JSON.stringify({ id: String(i + 5), subject, status: "pending" })));
+  const task = (id: number, subject: string, status: string, more: Record<string, unknown> = {}) => write(path.join(home, "tasks", o.sid, `${id}.json`), JSON.stringify({ id: String(id), subject, status, description: "", blocks: [], blockedBy: [], ...more }));
+  if (!o.manyTasks) {
+    ["Reproduce each failure", "Find the shared cause", "Fix clock-dependent tests", "Fix retry test"].forEach((subject, i) => task(i + 1, subject, i < 2 ? "completed" : i === 2 ? "in_progress" : "pending", { activeForm: "Fixing the clock-dependent tests" }));
+    task(5, "Verify under load", "pending");
+    task(6, "Open the pull request", "pending", { blockedBy: ["5"] });
+  } else {
+    // With --many-tasks: a long list, two tasks in progress, long subjects, one in Russian, a chain of blocked ones, and a deleted one that is left out.
+    const list: [string, string, Record<string, unknown>?][] = [
+      ["Reproduce each failure under load on the build machine", "completed"],
+      ["Find the shared cause of the clock-dependent failures", "completed"],
+      ["Write a failing test that pins the clock", "completed"],
+      ["Fix the clock-dependent refund tests", "in_progress", { activeForm: "Fixing the clock-dependent refund tests so they read the time once and pass it down to every helper" }],
+      ["Fix the retry backoff test", "in_progress", { activeForm: "Fixing the retry backoff test, which sleeps on the real clock" }],
+      ["Make the clock injectable in every payments service that reads the time, including the ledger export and the nightly reconciliation job", "pending"],
+      ["Verify each fix two hundred times under load", "pending", { blockedBy: ["4", "5"] }],
+      ["Обновить тексты ошибок оплаты в русской версии сайта", "pending"],
+      ["Remove the retry wrapper that hid the flaky failures", "pending"],
+      ["Update the payments runbook with the new clock rule", "pending"],
+      ["Add a lint rule against reading the clock in payment code", "pending"],
+      ["Run the full suite on CI three times in a row", "pending", { blockedBy: ["7"] }],
+      ["Open the pull request and ask the payments team for a review", "pending", { blockedBy: ["12"] }],
+      ["Close the three flaky-test tickets", "pending", { blockedBy: ["13"] }],
+      ["Quarantine the flaky tests", "deleted"],
+    ];
+    list.forEach(([subject, status, more], i) => task(i + 1, subject, status, more));
+  }
   const wf = path.join(dir, "subagents", "workflows", o.wfId);
   write(path.join(dir, "workflows", "scripts", `bisect-and-fix-${o.wfId}.js`), "");
   const wfAgents: [string, string, string, boolean, number][] = [
@@ -168,7 +196,7 @@ function busyJob(n: number, o: { sid: string; name: string; cwd: string; branch:
 }
 
 // 2. A busy job running a workflow, with tasks.
-busyJob(2, { sid: "bbbbbbbb-0000-4000-8000-000000000002", name: "flaky test hunt", cwd: "/work/shop", branch: "fix/flaky-payments", wfId: "wf_demo0001", upMin: 64, quietReviewer: stalled, growing: runway });
+busyJob(2, { sid: "bbbbbbbb-0000-4000-8000-000000000002", name: "flaky test hunt", cwd: "/work/shop", branch: "fix/flaky-payments", wfId: "wf_demo0001", upMin: 64, quietReviewer: stalled, growing: runway, manyTasks });
 
 if (six) {
   // Five working sessions and the one that needs you: the squeezed layout. Each started a little earlier than the one before, so their order holds.
@@ -263,6 +291,7 @@ if (account) {
   if (!argv.includes("--usage")) argv.push("--usage");
 }
 if (seenMin) env.FLEET_SEEN = String(now - Number(seenMin) * MIN);
+if (focus) env.FLEET_FOCUS = "bbbbbbbb-0000-4000-8000-000000000002";
 
 const fleet = path.join(import.meta.dir, "fleet.ts");
 const r = spawnSync("bun", [fleet, ...argv], { stdio: "inherit", env });

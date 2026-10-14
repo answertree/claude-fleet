@@ -2917,6 +2917,297 @@ describe("the detail view", () => {
       for (const h of targets.slice(-6)) expect([h.x0, h.x1]).toEqual([1, 150]);
     });
   });
+  // ── the task list ──
+
+  /**
+   * A task list as scan() builds it, one letter a task in task order: d done, r in progress, p still to
+   * start, b still to start and blocked. Subjects come from `subjects` in turn, else "Task n".
+   */
+  function tasksOf(spec: string, subjects: string[] = []): F.Session["tasks"] {
+    const items = [...spec].map((c, i): F.TaskItem => {
+      const subject = subjects.length ? subjects[i % subjects.length] : `Task ${i + 1}`;
+      return { id: String(i + 1), subject, activeForm: c === "r" ? `Working on ${subject}` : "", status: c === "d" ? "completed" : c === "r" ? "in_progress" : "pending", blocked: c === "b" };
+    });
+    const current = items.find((t) => t.status === "in_progress");
+    return { done: items.filter((t) => t.status === "completed").length, doing: items.filter((t) => t.status === "in_progress").length, total: items.length, active: current ? current.activeForm || current.subject : "", items };
+  }
+  /** The demo's six tasks: two done, one in progress, three still to start, the last waiting on the one before it. */
+  function demoTasks(): F.Session["tasks"] {
+    const t = tasksOf("ddrppb", ["Reproduce each failure", "Find the shared cause", "Fix clock-dependent tests", "Fix retry test", "Verify under load", "Open the pull request"])!;
+    t.items[2].activeForm = t.active = "Fixing the clock-dependent tests";
+    return t;
+  }
+  /** Fourteen tasks as the demo's --many-tasks has them: three done, two in progress, nine to start, three of those blocked. */
+  const manyTasks = () => tasksOf("dddrrpbpppppbb");
+  const withTasks = (s: F.Session, tasks: F.Session["tasks"]) => ((s.tasks = tasks), s);
+  /** The tasks row and the task list under it, from drawn rows: [the tasks row, the list rows]. The tasks row is undefined when it is not drawn. */
+  function taskRowsOf(rows: string[]): { strip?: string; list: string[] } {
+    const at = rows.findIndex((r) => /^ ▌  ([✓◐○] ?)+  \d+\/\d+|^ ▌  ✓ \d+\/\d+ tasks done/.test(r));
+    if (at < 0) return { list: [] };
+    const list: string[] = [];
+    for (const r of rows.slice(at + 1)) {
+      if (!/^ ▌  ([✓◐○] (?!main thread)|… \d+ more task)/.test(r)) break;
+      list.push(r.slice(0, 104).trimEnd());
+    }
+    return { strip: rows[at].slice(0, 104).trimEnd(), list };
+  }
+
+  test("the task list: tasks in progress first, then those still to start, each in task order; done tasks are counted, not listed", () => {
+    quietly(() => {
+      const s = withTasks(busy(NOW), tasksOf("prdbrp", ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot"]));
+      s.tasks!.items[4].activeForm = ""; // no active form: the subject stands in
+      const raw = F.detailView(viewsOf([s], NOW), 150, 60, NOW, 0, false);
+      const { strip: row, list } = taskRowsOf(plain(raw));
+      expect(row).toBe(" ▌  ✓ ◐ ◐ ○ ○ ○  1/6");
+      expect(list).toEqual([" ▌  ◐ Working on Bravo", " ▌  ◐ Echo", " ▌  ○ Alpha", " ▌  ○ Delta · blocked", " ▌  ○ Foxtrot"]);
+      // In progress: a bold white ◐ and the text in the text colour. Still to start: a dim ○ and the subject in dim; "· blocked" in faint.
+      const rawOf = (text: string) => raw.find((r) => strip(r).includes(text))!;
+      expect(rawOf("Working on Bravo")).toContain(F.bold(F.fg(F.C.white, "◐")));
+      expect(rawOf("Working on Bravo")).toContain(F.fg(F.C.text, "Working on Bravo"));
+      expect(rawOf("○ Alpha")).toContain(F.fg(F.C.dim, "○"));
+      expect(rawOf("○ Alpha")).toContain(F.fg(F.C.dim, "Alpha"));
+      expect(rawOf("○ Delta")).toContain(F.fg(F.C.dim, "Delta"));
+      expect(rawOf("○ Delta")).toContain(F.fg(F.C.faint, " · blocked"));
+      // Glyph at the icon column, text at the text column, as every row of the conversation.
+      for (const r of list) expect([...r].slice(4, 7).map((ch) => (ch === " " ? "space" : /[◐○]/.test(ch) ? "glyph" : "text"))).toEqual(["glyph", "space", "text"]);
+      // Every task done: the tasks row says so, and there is nothing to list.
+      const done = taskRowsOf(draw([withTasks(busy(NOW), tasksOf("ddd"))], 150, 60));
+      expect([done.strip, done.list]).toEqual([" ▌  ✓ 3/3 tasks done", []]);
+      // No tasks in progress: the tasks row has no current task, and the list starts with what is still to start.
+      expect(taskRowsOf(draw([withTasks(busy(NOW), tasksOf("dpp"))], 150, 60)).list).toEqual([" ▌  ○ Task 2", " ▌  ○ Task 3"]);
+    });
+  });
+
+  test("a subject longer than the measure is cut with … where the conversation's text ends; a blocked one keeps its mark", () => {
+    quietly(() => {
+      const long = "A".repeat(200);
+      const s = withTasks(busy(NOW), tasksOf("rb", [long]));
+      s.tasks!.items[0].activeForm = "B".repeat(200);
+      for (const W of [150, 200, 110, 80]) {
+        const g = F.grid(W);
+        const { list } = taskRowsOf(draw([s], W, 60).map((r) => r.padEnd(W)));
+        expect(list).toEqual([" ▌  ◐ " + "B".repeat(g.measure - 1) + "…", " ▌  ○ " + "A".repeat(g.measure - 11) + "… · blocked"].map((r) => r.slice(0, 104)));
+      }
+    });
+  });
+
+  test("while the list shows, the tasks row is the strip and the count; once the list is cut to nothing it names the task in progress again", () => {
+    quietly(() => {
+      const s = () => withTasks(busy(NOW), demoTasks());
+      expect(taskRowsOf(draw([s()], 150, 60))).toEqual({
+        strip: " ▌  ✓ ✓ ◐ ○ ○ ○  2/6",
+        list: [" ▌  ◐ Fixing the clock-dependent tests", " ▌  ○ Fix retry test", " ▌  ○ Verify under load", " ▌  ○ Open the pull request · blocked"],
+      });
+      const natural = plan([s()], 150, 200).heights[0];
+      const seen = { listed: 0, named: 0 };
+      for (let avail = natural; avail >= 2; avail--) {
+        const { strip: row, list } = taskRowsOf(draw([s()], 150, avail));
+        if (row === undefined) continue;
+        if (list.length) {
+          expect(row.slice(0, 22)).toBe(" ▌  ✓ ✓ ◐ ○ ○ ○  2/6");
+          expect(row.slice(22).trim()).not.toContain("Fixing");
+          expect(list[0]).toBe(" ▌  ◐ Fixing the clock-dependent tests");
+          seen.listed++;
+        } else {
+          expect(row.slice(0, 56)).toBe(" ▌  ✓ ✓ ◐ ○ ○ ○  2/6  Fixing the clock-dependent tests");
+          seen.named++;
+        }
+      }
+      expect(seen.listed).toBeGreaterThan(0);
+      expect(seen.named).toBeGreaterThan(0);
+    });
+  });
+
+  test("a list cut short ends with \"… n more tasks\", and that row is one of the rows it was allowed", () => {
+    quietly(() => {
+      const s = () => withTasks(busy(NOW), manyTasks());
+      const natural = plan([s()], 150, 200).heights[0];
+      let cut = 0;
+      for (let avail = natural; avail >= 2; avail--) {
+        const k = plan([s()], 150, avail).blocks[0].keep;
+        const { list } = taskRowsOf(draw([s()], 150, avail));
+        const open = k.taskScope === "doing" ? 2 : 11;
+        if (!k.tasks || k.taskList === 0) expect(list).toEqual([]);
+        else if (k.taskList >= open) expect(list.length).toBe(open);
+        else {
+          cut++;
+          expect(list.length).toBe(k.taskList);
+          expect(list[list.length - 1]).toBe(` ▌  … ${open - (k.taskList - 1)} more tasks`);
+          expect(list.slice(0, -1).every((r) => /^ ▌  [◐○] /.test(r))).toBe(true);
+        }
+        if (k.taskList === 5) expect(list).toEqual([" ▌  ◐ Working on Task 4", " ▌  ◐ Working on Task 5", " ▌  ○ Task 6", " ▌  ○ Task 7 · blocked", " ▌  … 7 more tasks"]);
+      }
+      expect(cut).toBeGreaterThan(0);
+      // The count is drawn in dim, from the icon column.
+      const raw = F.detailView(viewsOf([s()], NOW), 150, natural - 8, NOW, 0, false);
+      const more = raw.find((r) => / more tasks/.test(strip(r)))!;
+      expect(more).toContain(F.fg(F.C.dim, "… 7 more tasks"));
+      expect(strip(more).indexOf("…")).toBe(4);
+    });
+  });
+
+  test("in focus every task is listed, done ones first as receded-green ✓; when rows run out they are the first of the list to go", () => {
+    quietly(() => {
+      const s = () => withTasks(busy(NOW), demoTasks());
+      const raw = F.detailView(viewsOf([s()], NOW), 150, 60, NOW, 0, true);
+      const { strip: row, list } = taskRowsOf(plain(raw));
+      expect(row).toBe(" ▌  ✓ ✓ ◐ ○ ○ ○  2/6");
+      expect(list).toEqual([" ▌  ✓ Reproduce each failure", " ▌  ✓ Find the shared cause", " ▌  ◐ Fixing the clock-dependent tests", " ▌  ○ Fix retry test", " ▌  ○ Verify under load", " ▌  ○ Open the pull request · blocked"]);
+      const done = raw.find((r) => strip(r).includes("Reproduce each failure"))!;
+      expect(done).toContain(F.fg(F.C.done, "✓"));
+      expect(done).toContain(F.fg(F.C.dim, "Reproduce each failure"));
+      // Outside focus they are only counted.
+      expect(taskRowsOf(draw([s()], 150, 60)).list.join("\n")).not.toContain("✓");
+      // A row or two short, focus gives up the done tasks (here its earlier reply is already what the dashboard shows) and nothing else.
+      const whole = plan([s()], 150, 200, NOW, true);
+      for (const short of [1, 2]) {
+        const k = plan([s()], 150, whole.heights[0] - short, NOW, true).blocks[0].keep;
+        expect([k.taskScope, k.taskList, k.earlier, k.reply]).toEqual(["open", Infinity, whole.blocks[0].keep.earlier, Infinity]);
+      }
+    });
+  });
+
+  test("the list gives way in four steps, each after the rung the design puts before it, and a session that needs you takes the same steps", () => {
+    quietly(() => {
+      /**
+       * The largest screen at which each thing is first given up, shrinking a row at a time. Rows left over
+       * are handed back, so a later cut can bring an earlier one back on a smaller screen; when each
+       * first happens is what the order of the ladder decides.
+       */
+      const firstCut = (make: () => F.Session) => {
+        const at: Record<string, number> = {};
+        const natural = plan([make()], 150, 200).heights[0];
+        for (let avail = natural; avail >= 2; avail--) {
+          const k = plan([make()], 150, avail).blocks[0].keep;
+          const list = taskRowsOf(draw([make()], 150, avail)).list;
+          const now: Record<string, boolean> = {
+            "earlier replies": k.earlier.every((n) => n === 0),
+            "reply to 4": k.reply <= 4,
+            "reply to 2": k.reply <= 2,
+            prompt: k.prompt === 0,
+            "reply to 1": k.reply <= 1,
+            "main thread": !k.main,
+            fold: k.fold,
+            "reply gone": k.reply === 0,
+            "list to 5": k.tasks && k.taskList <= 5,
+            "list to 3": k.tasks && k.taskList <= 3,
+            "list in progress only": k.tasks && k.taskScope === "doing",
+            "no list": k.taskList === 0,
+            "no tasks row": !k.tasks,
+          };
+          for (const [what, cut] of Object.entries(now)) if (cut && at[what] === undefined) at[what] = avail;
+          // What each stage draws.
+          if (k.tasks && k.taskList === 0) expect([avail, list]).toEqual([avail, []]);
+          if (k.tasks && k.taskScope === "doing" && k.taskList > 0) expect([avail, list.every((r) => r.startsWith(" ▌  ◐ "))]).toEqual([avail, true]);
+          if (k.tasks && k.taskScope === "open" && k.taskList <= 5) expect([avail, list.length <= k.taskList, list[list.length - 1]]).toEqual([avail, true, ` ▌  … ${11 - (k.taskList - 1)} more tasks`]);
+        }
+        return at;
+      };
+      const before = (at: Record<string, number>, first: string, then: string) => expect([first, then, at[first] > at[then]]).toEqual([first, then, true]);
+      const busyAt = firstCut(() => withTasks(busy(NOW), manyTasks()));
+      // The list's own four steps, in order, each one firing on some screen…
+      for (const [a, b] of [["list to 5", "list to 3"], ["list to 3", "list in progress only"], ["list in progress only", "no list"], ["no list", "no tasks row"]]) before(busyAt, a, b);
+      // …each after the rung the design puts before it, and before the one after it.
+      before(busyAt, "earlier replies", "list to 5");
+      before(busyAt, "list to 5", "reply to 2");
+      before(busyAt, "reply to 2", "list to 3");
+      before(busyAt, "list to 3", "prompt");
+      before(busyAt, "reply to 1", "list in progress only");
+      before(busyAt, "list in progress only", "main thread");
+      before(busyAt, "reply gone", "no list");
+      // A session that needs you skips steps 8, 9 and 13, and keeps two lines of its reply; its list goes the same way.
+      const waitAt = firstCut(() => withTasks(waiting(NOW), manyTasks()));
+      for (const [a, b] of [["list to 5", "list to 3"], ["list to 3", "list in progress only"], ["list in progress only", "no list"], ["no list", "no tasks row"]]) before(waitAt, a, b);
+      before(waitAt, "earlier replies", "list to 5");
+      before(waitAt, "list in progress only", "prompt"); // step 12, after 9.5
+      expect(waitAt["reply gone"] ?? 0).toBeLessThan(waitAt["no tasks row"]); // only past the design's ladder, after the tasks row
+    });
+  });
+
+  test("rows add up with 0, 1, 6 and 40 tasks, for one session and for six, at every size", () => {
+    quietly(() => {
+      const LONG = ["Make the clock injectable in every payments service that reads the time, including the ledger export", "Обновить тексты ошибок оплаты в русской версии сайта", "Verify each fix"];
+      const lists: [string, () => F.Session["tasks"]][] = [
+        ["0 tasks", () => tasksOf("")],
+        ["1 task", () => tasksOf("r")],
+        ["6 tasks", demoTasks],
+        ["40 tasks", () => tasksOf("d".repeat(10) + "rrr" + "ppb".repeat(9), LONG)],
+      ];
+      expect(lists.map(([, make]) => make()!.total)).toEqual([0, 1, 6, 40]);
+      for (const [count, make] of lists)
+        for (const [W, H] of [[80, 24], [110, 34], [150, 44], [200, 60]])
+          for (const [name, sessions] of [["one", [withTasks(busy(NOW), make())]], ["six", six(NOW).map((s) => withTasks(s, s.job?.state === "working" ? make() : undefined))]] as [string, F.Session[]][])
+            for (const focus of name === "one" ? [false, true] : [false]) {
+              // The whole frame at that size: exactly its rows, none wider than the screen.
+              const frame = F.render(sessions, W, H, NOW).map(strip);
+              if (frame.length !== H || frame.some((r) => Bun.stringWidth(r) > W)) throw new Error(`${count}, ${name} at ${W}x${H}: the frame does not fit`);
+              for (let avail = 0; avail <= H; avail++) {
+                const views = viewsOf(sessions, NOW);
+                const g = F.grid(W);
+                const blocks = views.map((v) => F.blockOf(v, g, NOW, F.laneWindow(NOW, W), focus));
+                const fit = F.fitBlocks(blocks, g, avail, NOW);
+                const rows = plain(F.detailView(views, W, avail, NOW, 0, focus));
+                const where = `${count}, ${name} session${name === "one" ? "" : "s"} at ${W}x${avail}${focus ? " in focus" : ""}`;
+                if (rows.length > avail) throw new Error(`${where}: ${rows.length} rows`);
+                if (avail > 0 && rows.length !== fit.rows) throw new Error(`${where}: drew ${rows.length} rows but planned ${fit.rows}`);
+                for (const r of rows) {
+                  if (Bun.stringWidth(r) > W) throw new Error(`${where}: a row ${Bun.stringWidth(r)} cells wide: ${r}`);
+                  if (/undefined|NaN/.test(r)) throw new Error(`${where}: ${r}`);
+                }
+                // A count of hidden tasks always has a task above it, and never stands for just one.
+                rows.forEach((r, i) => {
+                  const more = / … (\d+) more tasks?$/.exec(r);
+                  if (more && (Number(more[1]) < 2 || !/^ ▌  [✓◐○] /.test(rows[i - 1] ?? ""))) throw new Error(`${where}: ${rows[i - 1]} / ${r}`);
+                });
+              }
+            }
+    });
+  });
+});
+
+describe("the task list, as scan() reads it", () => {
+  const home = path.join(SCRATCH, "task-list");
+  const sid = "tasks000-0000-4000-8000-000000000001";
+  const saved = { home: process.env.FLEET_HOME };
+  beforeAll(() => (process.env.FLEET_HOME = home));
+  afterAll(() => (process.env.FLEET_HOME = saved.home));
+  const task = (file: string, o: object) => {
+    fs.mkdirSync(path.join(home, "tasks", sid), { recursive: true });
+    fs.writeFileSync(path.join(home, "tasks", sid, file), JSON.stringify(o));
+  };
+
+  test("every task not deleted, in task order, its text made safe, and blocked only while something it waits on is unfinished", () => {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.mkdirSync(path.join(home, "sessions"), { recursive: true });
+    fs.writeFileSync(path.join(home, "sessions", "1.json"), JSON.stringify({ pid: process.pid, sessionId: sid, name: "tasks", kind: "bg", status: "busy", cwd: "/work/shop", startedAt: NOW - 30 * MIN }));
+    fs.mkdirSync(path.join(home, "projects", "-tasks"), { recursive: true });
+    fs.writeFileSync(path.join(home, "projects", "-tasks", sid + ".jsonl"), JSON.stringify(prompt(NOW - 20 * MIN, "fix the tests")) + "\n");
+    task("10.json", { id: "10", subject: "Ship it", status: "pending", blockedBy: ["9"] }); // 9 is still to do: blocked
+    task("9.json", { id: "9", subject: "Verify", status: "pending", blockedBy: ["1"] }); // 1 is done: not blocked
+    task("1.json", { id: "1", subject: "Reproduce", status: "completed" });
+    task("2.json", { id: "2", subject: "Find the cause", activeForm: "Finding the cause", status: "in_progress" });
+    task("3.json", { id: "3", subject: "Dropped", status: "deleted" });
+    task("4.json", { id: "4", subject: "Tidy up", status: "pending", blockedBy: ["3", "77"] }); // deleted, and never made: not blocked
+    task("5.json", { id: 5, subject: "Fix\tthe \x1b[31mtests\x1b[0m ✅", status: "in_progress", blockedBy: [2] }); // a number for an id; 2 is in progress: blocked
+    task("b.json", { id: "b", subject: "Beta", status: "someday" }); // a status it does not know counts as still to start
+    task("a.json", { id: "a", subject: "Alpha", status: "pending" });
+    task("notes.json", { subject: "Write it up", status: "pending" }); // no id: the file's name stands in
+    const s = F.scan(NOW).find((x) => x.sid === sid)!;
+    expect(s.tasks!.items.map((t) => [t.id, t.status, t.blocked, t.subject])).toEqual([
+      ["1", "completed", false, "Reproduce"],
+      ["2", "in_progress", false, "Find the cause"],
+      ["4", "pending", false, "Tidy up"],
+      ["5", "in_progress", true, "Fix the tests ✓"],
+      ["9", "pending", false, "Verify"],
+      ["10", "pending", true, "Ship it"],
+      ["a", "pending", false, "Alpha"],
+      ["b", "pending", false, "Beta"],
+      ["notes", "pending", false, "Write it up"],
+    ]);
+    expect(s.tasks!.items[1].activeForm).toBe("Finding the cause");
+    // The counts are as before: the deleted task is not one of them, and the current task is the first in progress in task order.
+    expect([s.tasks!.done, s.tasks!.doing, s.tasks!.total, s.tasks!.active]).toEqual([1, 2, 9, "Finding the cause"]);
+  });
 });
 
 describe("one program: the header, the sessions and the buttons agree", () => {
@@ -3148,6 +3439,21 @@ describe("demo", () => {
     expect(frame.remote).toContain("keychain:closedtoremote");
     expect(frame.remote).toContain("uretryusage");
     expect(frame.remote).toContain("securityunlock-keychain~/library/keychains/login.keychain-db"); // the remedy
+  }, SLOW);
+
+  test("the demo lists the flaky test hunt's open tasks; --many-tasks cuts a long list short; --focus lists every task", () => {
+    const frame = strip(demo([], 150, 44));
+    expect(frame).toContain("◐ Fixing the clock-dependent tests");
+    expect(frame).toContain("○ Open the pull request · blocked");
+    const many = strip(demo(["--many-tasks"], 150, 44));
+    expect(many).toContain("3/14");
+    expect(many).toMatch(/… \d+ more tasks/);
+    expect(many).not.toContain("Quarantine the flaky tests"); // deleted
+    expect(strip(demo(["--many-tasks"], 200, 60))).toContain("○ Обновить тексты ошибок оплаты в русской версии сайта");
+    const focus = strip(demo(["--focus", "--many-tasks"], 150, 44));
+    expect(focus).toContain("✓ Reproduce each failure under load on the build machine");
+    expect(focus).toContain("○ Close the three flaky-test tickets · blocked");
+    expect(focus).not.toContain("C H E C K O U T");
   }, SLOW);
 });
 

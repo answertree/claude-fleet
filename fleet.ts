@@ -1043,6 +1043,20 @@ export interface Workflow {
   lastT: number;
   tokens?: number;
 }
+/** One task from the session's task list. Its text has been through safeLine(). */
+export interface TaskItem {
+  id: string;
+  subject: string;
+  activeForm: string; // what it says while it is in progress ("Fixing the tests"); may be empty
+  status: "pending" | "in_progress" | "completed";
+  blocked: boolean; // it waits on a task that is not completed yet
+}
+const TASK_KEEP = 1_000; // a task's subject or active form: one row at most is ever drawn
+/** Task order: by number when the id is one, then by the id's text. */
+const taskOrder = (a: TaskItem, b: TaskItem): number => {
+  const n = (id: string) => (/^\d+$/.test(id) ? Number(id) : Infinity);
+  return n(a.id) - n(b.id) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+};
 export interface Session {
   sid: string;
   pid: number;
@@ -1054,7 +1068,7 @@ export interface Session {
   mains: Tail[];
   agents: Agent[];
   workflows: Workflow[];
-  tasks?: { done: number; doing: number; total: number; active: string };
+  tasks?: { done: number; doing: number; total: number; active: string; items: TaskItem[] }; // items: every task not deleted, in task order
   job?: { state: string; detail: string; needs: string; since?: number }; // since: when a blocked job began waiting
   jobId?: string;
 }
@@ -1326,14 +1340,28 @@ export function scan(now: number): Session[] {
       let tasks: Session["tasks"];
       const taskFiles = ls(path.join(CLAUDE, "tasks", sid)).filter((n) => n.endsWith(".json"));
       if (taskFiles.length) {
-        const all = taskFiles.map((n) => readJson(path.join(CLAUDE, "tasks", sid, n))).filter(Boolean);
-        const open = all.filter((t) => t.status !== "deleted");
-        const current = open.find((t) => t.status === "in_progress");
+        const all = taskFiles.map((n) => ({ file: n.slice(0, -5), t: readJson(path.join(CLAUDE, "tasks", sid, n)) })).filter((x) => x.t);
+        const open = all.filter((x) => x.t.status !== "deleted");
+        const text = (v: unknown) => (typeof v === "string" ? safeLine(capText(v, TASK_KEEP)) : "");
+        const idOf = (x: { file: string; t: any }) => safeLine(typeof x.t.id === "string" || typeof x.t.id === "number" ? String(x.t.id) : x.file);
+        // A task is blocked while something it waits on is still to finish. A blocker that is not on the list (never made, or deleted) holds nothing up.
+        const unfinished = new Set(open.filter((x) => x.t.status !== "completed").map(idOf));
+        const items: TaskItem[] = open
+          .map((x) => ({
+            id: idOf(x),
+            subject: text(x.t.subject),
+            activeForm: text(x.t.activeForm),
+            status: x.t.status === "completed" || x.t.status === "in_progress" ? x.t.status : "pending",
+            blocked: Array.isArray(x.t.blockedBy) && x.t.blockedBy.some((id: unknown) => (typeof id === "string" || typeof id === "number") && unfinished.has(safeLine(String(id)))),
+          }))
+          .sort(taskOrder);
+        const current = items.find((t) => t.status === "in_progress"); // the first in task order, as the list shows it
         tasks = {
-          done: open.filter((t) => t.status === "completed").length,
-          doing: open.filter((t) => t.status === "in_progress").length,
+          done: open.filter((x) => x.t.status === "completed").length,
+          doing: open.filter((x) => x.t.status === "in_progress").length,
           total: open.length,
-          active: safeLine(current?.activeForm || current?.subject),
+          active: current ? current.activeForm || current.subject : "",
+          items,
         };
       }
 
@@ -3041,7 +3069,9 @@ export interface Keep {
   prompt: number; // lines of your prompt: 0, 1 or 2
   earlier: number[]; // lines of each earlier reply, oldest first; 0 removes it
   reply: number; // lines of the newest reply
-  tasks: boolean;
+  tasks: boolean; // the tasks row: the strip and the count
+  taskList: number; // rows of the task list under it, the last of them "… n more tasks" when it is cut short; 0: no list
+  taskScope: "all" | "open" | "doing"; // the tasks it lists: every one (focus), those not done, or only those in progress
   ctx: boolean; // the context row, where it has a row to itself
   main: boolean; // the main-thread row
   done: boolean; // the "n agents finished" line
@@ -3111,6 +3141,8 @@ export function blockOf(v: View, g: Grid, now: number, win: Win, focus = false):
       earlier: earlier.map(() => (focus ? Infinity : 2)),
       reply: focus ? Infinity : 10,
       tasks: body && v.showTasks,
+      taskList: Infinity,
+      taskScope: focus ? "all" : "open",
       ctx: body,
       main: body && v.showMain && !!m,
       done: body && v.doneCount > 0,
@@ -3170,15 +3202,51 @@ function stackOf(b: Block, g: Grid, now: number): StackRow[] {
   for (const item of said.sort((x, y) => x.t - y.t)) rows.push(...item.rows);
   const tasks = b.v.s.tasks;
   if (k.tasks && tasks) {
+    const end = g.wide ? g.textEnd : g.figEnd;
+    const list = taskListOf(b);
+    // The task in progress is named once: on its own row while the list shows it, else after the count.
+    const named = list.shown.some((t) => t.status === "in_progress");
     const count = `${tasks.done}/${tasks.total}`;
     const segs: Seg[] =
       tasks.done >= tasks.total
         ? [[ICON.done + " ", C.done], [`${count} tasks done`, C.dim]]
-        : [...stepStrip(tasks.done, tasks.doing, tasks.total), [`  ${count}`, C.text], ...(tasks.active ? [[`  ${tasks.active}`, C.dim] as Seg] : [])];
-    rows.push({ at: g.icon, segs: fitSegs(segs, (g.wide ? g.textEnd : g.figEnd) - g.icon + 1) });
+        : [...stepStrip(tasks.done, tasks.doing, tasks.total), [`  ${count}`, C.text], ...(tasks.active && !named ? [[`  ${tasks.active}`, C.dim] as Seg] : [])];
+    rows.push({ at: g.icon, segs: fitSegs(segs, end - g.icon + 1) });
+    const room = g.measure; // the list's text ends where the conversation's does
+    for (const t of list.shown) {
+      if (t.status === "in_progress") rows.push({ icon: [ICON.progress, C.white, true], segs: [[cutTo(t.activeForm || t.subject, room), C.text]] });
+      else if (t.status === "completed") rows.push({ icon: [ICON.done, C.done], segs: [[cutTo(t.subject, room), C.dim]] });
+      else {
+        // A blocked task keeps its " · blocked" when the subject is cut.
+        const mark: Seg[] = t.blocked ? [[` ${ICON.sep} blocked`, C.faint]] : [];
+        rows.push({ icon: [ICON.idle, C.dim], segs: [[cutTo(t.subject, room - segsWidth(mark)), C.dim], ...mark] });
+      }
+    }
+    if (list.more) rows.push({ at: g.icon, segs: [[`${ICON.cut} ${list.more} more task${list.more === 1 ? "" : "s"}`, C.dim]] });
   }
   return rows;
 }
+
+/**
+ * The task list under the tasks row, as the block stands: the tasks it shows, in order (done ones first
+ * in focus, then those in progress, then those still to start, each in task order), and how many more
+ * there are, which its last row counts when it is cut short.
+ */
+function taskListOf(b: Block): { shown: TaskItem[]; more: number } {
+  const k = b.keep;
+  const items = b.v.s.tasks?.items ?? [];
+  if (!k.tasks || k.taskList <= 0 || !items.length) return { shown: [], more: 0 };
+  const of = (status: TaskItem["status"]) => items.filter((t) => t.status === status);
+  const pool = [...(k.taskScope === "all" ? of("completed") : []), ...of("in_progress"), ...(k.taskScope === "doing" ? [] : of("pending"))];
+  if (pool.length <= k.taskList) return { shown: pool, more: 0 };
+  const shown = pool.slice(0, Math.max(0, k.taskList - 1));
+  return { shown, more: pool.length - shown.length };
+}
+/** Rows the task list takes as the block stands. */
+const taskListRows = (b: Block): number => {
+  const list = taskListOf(b);
+  return list.shown.length + (list.more ? 1 : 0);
+};
 
 type Instrument = "ctx" | "key" | "figs";
 /**
@@ -3310,33 +3378,66 @@ function questionTo(b: Block, rows: number): Change | undefined {
   });
 }
 
+/** Cap the task list at `rows` rows, the last of them "… n more tasks", when it takes more. It comes back a row at a time, never as a count alone. */
+function taskListTo(b: Block, rows: number): Change | undefined {
+  const from = b.keep.taskList;
+  const whole = taskListRows(b);
+  if (whole <= rows) return undefined;
+  return change(() => (b.keep.taskList = rows), () => (b.keep.taskList = from), () => b.keep.taskList === rows, {
+    ease: (fits, spare) => {
+      for (let n = Math.min(whole, rows + spare + 1); n > rows; n--) {
+        if (n === 1 && whole > 1) break; // one row would be "… n more tasks" with no task above it
+        b.keep.taskList = n === whole ? from : n;
+        if (fits()) return true;
+      }
+      return false;
+    },
+  });
+}
+/** List fewer kinds of task: the done ones leave a focused list ("open"), then those still to start ("doing"). The strip above still counts them. */
+function taskScopeTo(b: Block, scope: "open" | "doing"): Change | undefined {
+  const from = b.keep.taskScope;
+  const before = taskListRows(b);
+  b.keep.taskScope = scope;
+  const after = taskListRows(b);
+  b.keep.taskScope = from;
+  if (after >= before) return undefined;
+  return change(() => (b.keep.taskScope = scope), () => (b.keep.taskScope = from), () => b.keep.taskScope === scope && b.keep.taskList > 0);
+}
+
 /**
  * The ladder: what the blocks give up, in this order, when they do not all fit. Each rung is taken from
  * the bottom session upward, one block at a time, and the climb stops the moment everything fits. The
- * numbers are the design's. A session that needs you skips the second half of 4 and all of 8, 9 and 13:
- * its title, its whole question and two lines of the reply always stay. "gaps" is the one rung that is
- * not a block's own.
+ * whole numbers are the design's; the half steps between them are the task list's, which gives way in
+ * four stages (5 rows, 3 rows, the tasks in progress, none) so the tasks row is never the first to go. A
+ * session that needs you skips the second half of 4 and all of 8, 9 and 13: its title, its whole
+ * question and two lines of the reply always stay. "gaps" is the one rung that is not a block's own.
  */
 const LADDER: { step: number; cut: "gaps" | ((b: Block) => Change | undefined) }[] = [
-  // In focus every stored reply starts out in full. These two bring the earlier ones back to what the dashboard shows.
+  // In focus every stored reply starts out in full, and every task is listed. These three bring them back to what the dashboard shows.
   { step: 0, cut: (b) => (b.focus ? earlierTo(b, 0, b.earlier.length - 2) : undefined) },
   { step: 0, cut: (b) => (b.focus ? earlierTo(b, 2) : undefined) },
+  { step: 0, cut: (b) => (b.focus ? taskScopeTo(b, "open") : undefined) }, // the done tasks leave the list; the strip still counts them
   { step: 1, cut: (b) => earlierTo(b, 1) }, // earlier replies shrink to one line each
   { step: 2, cut: (b) => earlierTo(b, 0) }, // …and are removed, oldest first
+  { step: 2.5, cut: (b) => taskListTo(b, 5) }, // the task list is cut to 5 rows, the last "… n more tasks"
   { step: 3, cut: (b) => turnOff(b, "done") }, // the "n agents finished" line
   { step: 4, cut: (b) => (b.focus ? replyTo(b, 10) : undefined) },
   { step: 4, cut: (b) => replyTo(b, 4) }, // the newest reply is capped at 4 lines,
   { step: 4, cut: (b) => (needsYou(b) ? undefined : replyTo(b, 2)) }, // then 2
+  { step: 4.5, cut: (b) => taskListTo(b, 3) }, // the task list is cut to 3 rows
   { step: 5, cut: (b) => agentsTo(b, 3) }, // agent groups longer than 3: the 3 most active and "… n more agents"
   { step: 6, cut: (b) => turnOff(b, "now") }, // the dim now-line under a question
   { step: 7, cut: "gaps" }, // the blank rows between sessions
   { step: 8, cut: (b) => (needsYou(b) ? undefined : promptOff(b)) }, // your prompt
   { step: 9, cut: (b) => (needsYou(b) ? undefined : replyTo(b, 1)) }, // the newest reply shrinks to one line
+  { step: 9.5, cut: (b) => taskScopeTo(b, "doing") }, // the task list keeps only the tasks in progress
   { step: 10, cut: (b) => turnOff(b, "main") }, // the main-thread row
   { step: 11, cut: (b) => (b.groups.some((x) => (x.wf ? x.rows.length > 0 : x.rows.length > 1)) ? foldAgents(b) : undefined) }, // agents fold: a workflow's into its own row, standalone ones into one line
   { step: 12, cut: (b) => (needsYou(b) ? promptOff(b) : undefined) }, // sessions that need you: the prompt,
   { step: 12, cut: (b) => (needsYou(b) ? replyTo(b, 2) : undefined) }, // then the reply down to 2 lines, and no further
   { step: 13, cut: (b) => (needsYou(b) ? undefined : replyTo(b, 0)) }, // the newest reply is removed
+  { step: 13.5, cut: (b) => taskListTo(b, 0) }, // the task list goes, and the tasks row names the task in progress again
   { step: 14, cut: (b) => turnOff(b, "tasks") }, // the tasks row,
   { step: 14, cut: (b) => turnOff(b, "ctx") }, // then the context row
   { step: 15, cut: (b) => turnOff(b, "roster") }, // workflow rows and the folded agents line: now a small far card
@@ -4777,6 +4878,7 @@ if (import.meta.main) {
   }
 
   seen.at = Number(process.env.FLEET_SEEN) || clock(); // FLEET_SEEN (test only) starts the mark in the past
+  focusSid = process.env.FLEET_FOCUS || null; // FLEET_FOCUS (demo only): start focused on this session, as a click on it would
   if (!process.stdout.isTTY) opt.once = true; // output to a file or a pipe: one frame, not screen codes for ever
   if (opt.once) {
     sampleMachine();

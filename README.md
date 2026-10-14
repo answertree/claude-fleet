@@ -40,10 +40,10 @@ The header is five rows on a terminal of 40 rows or more and three rows below th
 - **Two head rows:** a rail in the colour of the session's state, its name, its folder and branch, and the state with how long it has been so: `▲ NEEDS YOU`, `◐ STALLED?`, `● WORKING`, `▸ YOUR TURN`, `○ IDLE` or `✓ FINISHED`. Under that, one line saying what it is doing, a sparkline of its tool calls and their count. When the session needs you the line is the question itself, on up to three rows of an amber band (all of it when you focus the session); those sessions sort to the top.
 - **Conversation:** `▸` your prompt, `◇` Claude's earlier replies (dimmed) and `◆` its newest reply with its bullets, code and tables kept, each with its age in a column of its own. A long reply is cut in the middle, never at the end: its closing paragraph stays (up to three rows of it) and `… +5 lines` says how much is hidden.
 - **Beside the conversation:** the context window split by category (system prompt, tools, MCP tools, agents, memory files, skills, messages), then output tokens and the CPU and memory of the session's processes. Below 130 columns these become one row under the head.
-- **Tasks:** one glyph per task (`✓` done, `◐` in progress, `○` not started) and the one in progress.
+- **Tasks:** one glyph per task (`✓` done, `◐` in progress, `○` not started) and how many are done, then the open tasks listed one a row under it: those in progress first (`◐`, what each is doing), then the ones still to start (`○`, dimmed, `· blocked` after any that wait on an unfinished task). Done tasks are counted, not listed. When rows run short the list shortens in stages, to five rows, then three, ending `… 5 more tasks`, then only the tasks in progress, then none, and the strip names the task in progress again. Focus a session to list every task, done ones included.
 - **Threads:** the main thread, each workflow (`≡`, the phases it has been through in order, a phase it comes back to listed again, with a `…` in front when the earliest do not fit; then one glyph per agent) and each agent: a spinner if it wrote in the last minute, `◐` with the tool and what it is for if it is waiting on one, `○` if it is quiet.
 
-When the screen is too short for all of that, sessions give rows up in a fixed order, from the bottom session upward: earlier replies, the finished-agents line, most of each newest reply, the blank rows between sessions, prompts, main-thread rows, then per-agent rows. A session that needs you always keeps its question (up to three rows) and two lines of the reply. Sessions that still do not fit become one line, `… 2 more: name, name`. Rows left over are handed back in the reverse order, top session first.
+When the screen is too short for all of that, sessions give rows up in a fixed order, from the bottom session upward: earlier replies, the finished-agents line, most of each newest reply and of each task list, the blank rows between sessions, prompts, the tasks still to start, main-thread rows, then per-agent rows. A session that needs you always keeps its question (up to three rows) and two lines of the reply. Sessions that still do not fit become one line, `… 2 more: name, name`. Rows left over are handed back in the reverse order, top session first.
 
 Only sessions that are working or waiting on you are shown. Idle and finished ones are counted on the top row and on the `a` button (`a All · 1 idle`); press `a` to bring them back (in detail mode, as two rows each).
 
@@ -201,6 +201,8 @@ The demo has options of its own, so every state can be seen without waiting for 
 | `--stalled` | An agent that has sat on a tool call for 14 minutes while its session is idle. |
 | `--runway` | A session whose context is growing steadily, so its forecast appears. |
 | `--ended` | A completed workflow and a failed one. |
+| `--many-tasks` | A long task list: fourteen tasks, two in progress, long subjects, one in Russian, some blocked. |
+| `--focus` | Start focused on the flaky test hunt, as clicking it would. |
 | `--account <state>` | A made-up account (it turns `--usage` on): `current`, `extra-off`, `early` (the 5-hour limit runs out before it resets), `stale`, `none`, `remote`, `shared` (this dashboard's own read fails over ssh or mosh while another's figures, three minutes old, fill the block). |
 | `--seen <minutes>` | The screen as if you last looked that many minutes ago. |
 | `--surprise` | `--stalled --runway --account early --seen 18` together. |
@@ -217,6 +219,7 @@ These environment variables exist for tests and screenshots only:
 | `FLEET_MACHINE_FIXTURE` | Take CPU, memory, load and the process list from this JSON file instead of sampling the machine. Processes listed in it count as alive. |
 | `FLEET_USAGE_FIXTURE` | Take the usage figures from this JSON file instead of reading the login and asking Anthropic. A `fetchedAt` in the file sets their age. Figures from a fixture are never saved to the shared file. |
 | `FLEET_SEEN` | Start the "seen" mark at this time (milliseconds since 1970) instead of at launch, so a single frame can show things as new. |
+| `FLEET_FOCUS` | Start focused on the session with this id, so a single frame can show focus (the demo's `--focus`). |
 | `FLEET_USAGE_FAIL` | Make the usage read fail with this reason. With `FLEET_USAGE_FIXTURE` also set, the fixture stands in for the shared file, which shows the "as of" state. |
 
 ## Licence
