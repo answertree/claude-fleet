@@ -5385,3 +5385,46 @@ describe("every machine", () => {
     expect(F.tgLeader(undefined, [{ ip: "100.64.0.5", tgReady: true, at: now }], now)).toBe(true); // no tailnet: just this machine
   });
 });
+
+describe("key i: in the background", () => {
+  test("each system gets its own way of starting fleet at login, as you", () => {
+    expect(F.svcPlace(F.SVC_LABEL, "darwin")!.file).toEndWith("Library/LaunchAgents/com.answertree.claude-fleet.plist");
+    expect(F.svcPlace(F.SVC_LABEL, "linux")!.file).toEndWith("systemd/user/claude-fleet.service");
+    expect(F.svcPlace(F.SVC_LABEL, "win32")!.file).toEndWith(path.join("Startup", "Claude Fleet.vbs"));
+    expect(F.svcPlace(F.SVC_LABEL, "aix" as any)).toBeUndefined();
+  });
+
+  test("the launchd agent runs the supervisor, keeps it alive, and passes PATH", () => {
+    const plist = F.svcFile("launchd", F.SVC_LABEL, "/opt/bun", "/Users/me/claude fleet/fleet.ts", { PATH: "/opt/homebrew/bin:/usr/bin" });
+    expect(plist).toContain("<array><string>/opt/bun</string><string>/Users/me/claude fleet/fleet.ts</string><string>--serve</string></array>");
+    expect(plist).toContain("<key>KeepAlive</key><true/>");
+    expect(plist).toContain("<key>RunAtLoad</key><true/>");
+    expect(plist).toContain("<key>PATH</key><string>/opt/homebrew/bin:/usr/bin</string>");
+    expect(F.svcFile("launchd", "a&b", "/b", "/f<x>", {})).toContain("<string>a&amp;b</string>");
+  });
+
+  test("the systemd unit quotes its paths and restarts always; the Windows script runs hidden, its quotes doubled", () => {
+    const unit = F.svcFile("systemd", F.SVC_LABEL, "/home/me/.bun/bin/bun", "/home/me/my fleet/fleet.ts", { PATH: "/usr/bin" });
+    expect(unit).toContain('ExecStart="/home/me/.bun/bin/bun" "/home/me/my fleet/fleet.ts" --serve');
+    expect(unit).toContain("Restart=always");
+    expect(unit).toContain('Environment="PATH=/usr/bin"');
+    const vbs = F.svcFile("startup", F.SVC_LABEL, "C:\\Users\\me\\.bun\\bin\\bun.exe", 'C:\\Users\\me\\odd "name"\\fleet.ts', {});
+    expect(vbs).toContain('.Run """C:\\Users\\me\\.bun\\bin\\bun.exe"" ""C:\\Users\\me\\odd ""name""\\fleet.ts"" --serve", 0, False');
+  });
+
+  test("the service log keeps itself under a megabyte", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-svc-"));
+    const was = process.env.XDG_CACHE_HOME;
+    process.env.XDG_CACHE_HOME = dir;
+    try {
+      fs.mkdirSync(path.join(dir, "claude-fleet"), { recursive: true });
+      fs.writeFileSync(F.svcLogPath(), "x".repeat(1_100_000));
+      F.svcLog("after the cap");
+      expect(fs.readFileSync(F.svcLogPath(), "utf8")).toEndWith("after the cap\n");
+      expect(fs.statSync(F.svcLogPath() + ".1").size).toBe(1_100_000);
+    } finally {
+      if (was === undefined) delete process.env.XDG_CACHE_HOME;
+      else process.env.XDG_CACHE_HOME = was;
+    }
+  });
+});
