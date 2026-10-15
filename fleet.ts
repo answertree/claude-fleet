@@ -6835,39 +6835,91 @@ export function tgRelease() {
     if (Number(fs.readFileSync(tgLockPath(), "utf8")) === process.pid) fs.unlinkSync(tgLockPath());
   } catch {}
 }
-/** A pull request's state, in the few words a message needs: "failing", "green", "merged", "live on staging", or "". */
+/**
+ * A pull request's state, in the few words a message needs: "failing", "green", "merged", "live on staging", or ""
+ * when it is not known yet (GitHub or the deploy check has not answered since launch), which is never news.
+ */
 function prWord(pr: PrLink, cwd: string): string {
   const st = prState.get(`${pr.repo}#${pr.number}`)?.state;
   if (!st) return "";
   if (st.state === "MERGED") {
     const d = deploys().find((x) => x.repo === pr.repo);
-    return d && st.mergeSha && mergeLive(st.mergeSha, deployState.get(d.url)?.revision, cwd, pr.repo) ? `live on ${d.name}` : "merged";
+    if (!d || !st.mergeSha) return "merged";
+    const live = mergeLive(st.mergeSha, deployState.get(d.url)?.revision, cwd, pr.repo);
+    return live === undefined ? "" : live ? `live on ${d.name}` : "merged";
   }
   return st.state !== "OPEN" ? "" : st.fail ? "failing" : !st.pending && st.pass ? "green" : "";
 }
 /** The messages for what changed in this scan. Called with what the bell rang for, so both agree on what is new. */
-export function tgEvents(sessions: Session[], asked: string[], stalled: string[]): [text: string, sid: string, asking?: boolean][] {
-  const out: [string, string, boolean?][] = [];
+export function tgEvents(sessions: Session[], asked: string[], stalled: string[], now = Date.now()): [text: string, sid: string, asking: boolean, key: string][] {
+  const out: [string, string, boolean, string][] = [];
   const bySid = new Map(sessions.map((s) => [s.sid, s]));
   for (const sid of asked) {
     const s = bySid.get(sid);
     const q = s && factsOf(s).needs;
-    if (s) out.push([`🟡 ${tgName(s)} needs you${q ? `\n\n${capText(flatReply(q), 1500)}` : ""}`, sid, true]);
+    if (s) out.push([`🟡 ${tgName(s)} needs you${q ? `\n\n${capText(flatReply(q), 1500)}` : ""}`, sid, true, `ask:${sid}:${Bun.hash(q || "").toString(36)}`]);
   }
   for (const sid of new Set(stalled.map((k) => k.split("/")[0]))) {
     const s = bySid.get(sid);
-    if (s) out.push([`⏳ ${tgName(s)} looks stuck: nothing new for a while.\n\n↩ Reply to nudge it.`, sid]);
+    if (s) out.push([`⏳ ${tgName(s)} looks stuck: nothing new for a while.\n\n↩ Reply to nudge it.`, sid, false, `stall:${sid}:${Math.floor(now / 3600_000)}`]);
   }
+  // A pull request is news when it moves from one known state to another. The states are kept on disk, so after a
+  // restart fleet starts from what it knew: what changed while it was off is news, and nothing else is.
+  loadPrWas();
+  let changed = false;
   for (const s of sessions)
     for (const pr of s.side?.prs.slice(0, PR_SHOWN) ?? []) {
       const key = `${pr.repo}#${pr.number}`;
       const word = prWord(pr, s.side?.cwd ?? s.cwd);
+      if (!word) continue; // not known yet: neither news nor a state to compare with
       const was = tg.was.pr.get(key);
-      if (tg.was.ready && word && was !== undefined && word !== was) out.push([`${word === "failing" ? "❌" : word.startsWith("live") ? "🚀" : "✅"} ${tgName(s)}: #${pr.number} ${word === "green" ? "CI green" : word === "failing" ? "CI failing" : word}`, s.sid]);
-      if (word || was === undefined) tg.was.pr.set(key, word);
+      if (was === word) continue;
+      if (was !== undefined) out.push([`${word === "failing" ? "❌" : word.startsWith("live") ? "🚀" : "✅"} ${tgName(s)}: #${pr.number} ${word === "green" ? "CI green" : word === "failing" ? "CI failing" : word}`, s.sid, false, `pr:${key}:${word}`]);
+      tg.was.pr.set(key, word);
+      changed = true;
     }
+  if (changed) savePrWas();
   tg.was.ready = true;
   return out;
+}
+// The pull request states told about, and what the bot has said lately, kept beside the Telegram pairing.
+const tgPrWasPath = () => path.join(path.dirname(tgConfigPath()), "telegram-prs.json");
+const tgToldPath = () => path.join(path.dirname(tgConfigPath()), "telegram-told.json");
+let prWasLoaded = "";
+/** Forget what this run has seen, as a restart does (tests). */
+export function tgForgetRun() {
+  prWasLoaded = "";
+  tg.was.pr.clear();
+  tg.was.ready = false;
+}
+function loadPrWas() {
+  if (prWasLoaded === tgPrWasPath()) return;
+  prWasLoaded = tgPrWasPath();
+  tg.was.pr.clear();
+  try {
+    for (const [k, v] of Object.entries(JSON.parse(fs.readFileSync(tgPrWasPath(), "utf8")))) if (typeof v === "string") tg.was.pr.set(k, v);
+  } catch {}
+}
+function savePrWas() {
+  try {
+    fs.mkdirSync(path.dirname(tgPrWasPath()), { recursive: true });
+    fs.writeFileSync(tgPrWasPath(), JSON.stringify(Object.fromEntries([...tg.was.pr].slice(-500))), { mode: 0o600 });
+  } catch {}
+}
+/** Whether the bot has said this lately (two days), so nothing is said twice, a restart or a change of machine included. Records it if not. */
+export function tgToldBefore(key: string, now = Date.now()): boolean {
+  let told: Record<string, number> = {};
+  try {
+    told = JSON.parse(fs.readFileSync(tgToldPath(), "utf8"));
+  } catch {}
+  if ((told[key] ?? 0) > now - 48 * 3600_000) return true;
+  told[key] = now;
+  for (const [k, t] of Object.entries(told)) if (t < now - 48 * 3600_000) delete told[k];
+  try {
+    fs.mkdirSync(path.dirname(tgToldPath()), { recursive: true });
+    fs.writeFileSync(tgToldPath(), JSON.stringify(told), { mode: 0o600 });
+  } catch {}
+  return false;
 }
 
 let tgOn = false; // key t: the Telegram screen is showing
@@ -7851,7 +7903,8 @@ function refresh() {
     const c = readTg();
     const muted = c.muted ?? {};
     const quiet = inQuiet(c.quiet);
-    for (const [text, sid, asking] of told) {
+    for (const [text, sid, asking, key] of told) {
+      if (tgToldBefore(key)) continue; // said already: before a restart, or by this fleet a moment ago
       // Muted, or quiet hours and not a question: kept for the digest, not sent.
       const held = (muted[sid] ?? 0) > Date.now() || (quiet && !asking);
       tgLog(text + (held ? " (held)" : ""));

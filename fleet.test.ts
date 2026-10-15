@@ -5250,6 +5250,30 @@ describe("key t: Telegram", () => {
     expect(F.readTg().live).toBeUndefined();
   });
 
+  test("a restart repeats nothing: a pull request's state is news only when it moves from one known state to another", () => {
+    F.writeTg({ token: TOKEN, chat: 42, user: 7, bot: "my_fleet_bot" });
+    F.tgForgetRun();
+    const pr = { repo: "o/claude-fleet", number: 4, url: "https://github.com/o/claude-fleet/pull/4", t: 1 };
+    const s = { ...session, side: { prs: [pr], bg: [], fails: [], edits: [], compactions: 0, cwd: "/x" } } as any;
+    const key = "o/claude-fleet#4";
+    const words = () => F.tgEvents([s], [], []).map(([text]) => text);
+    F.prState.delete(key);
+    expect(words()).toEqual([]); // just launched: GitHub has not answered yet
+    F.prState.set(key, { at: Date.now(), state: { state: "OPEN", draft: false, pass: 3, fail: 1, pending: 0 } });
+    expect(words()).toEqual([]); // the first state it learns is not news
+    F.tgForgetRun(); // fleet restarts…
+    F.prState.delete(key);
+    expect(words()).toEqual([]); // …GitHub has not answered yet…
+    F.prState.set(key, { at: Date.now(), state: { state: "OPEN", draft: false, pass: 3, fail: 1, pending: 0 } });
+    expect(words()).toEqual([]); // …and it is as it was: nothing to say
+    F.prState.set(key, { at: Date.now(), state: { state: "OPEN", draft: false, pass: 4, fail: 0, pending: 0 } });
+    const [[text, , , told]] = F.tgEvents([s], [], []);
+    expect(text).toBe("✅ checkout flow: #4 CI green");
+    // Said once; asked to say it again (another restart, another machine), it does not.
+    expect([F.tgToldBefore(told), F.tgToldBefore(told)]).toEqual([false, true]);
+    F.prState.delete(key);
+  });
+
   test("the t screen never draws the token, even while it is being pasted", () => {
     F.writeTg({});
     F.tg.entry = "";
