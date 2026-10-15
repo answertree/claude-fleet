@@ -10,7 +10,7 @@ Every live Claude Code session, on every one of your machines, on one screen: wh
 
 - **Every machine.** Run fleet on each of your computers and each one shows the sessions on all of them, found through [Tailscale](https://tailscale.com) with nothing to set up. See [Every machine](#every-machine).
 - **Your phone.** Fleet serves a page for your phone, over Tailscale, from the moment it starts: press `w` and scan the QR code. Add it to your home screen and it opens like an app, and you can answer a session from it. See [On your phone](#on-your-phone).
-- **Telegram.** Pair your own bot with `t` and fleet messages you, on every device, when a session needs you, gets stuck, or a pull request changes. Tap ↩ Reply to answer, 📺 Screen to see the session's own terminal and tap a choice on it, or ask for anything the detail view shows: `/status`, `/menu`, `/tasks`, `/prs`, `/usage`, `/screen`, `/new` to start a session, a morning digest, quiet hours and a live pinned overview. See [On Telegram](#on-telegram).
+- **Telegram.** Pair your own bot with `t` and fleet messages you, on every device, when a session needs you, gets stuck, or a pull request changes. Tap ↩ Reply to answer, 📺 Screen to see the session's own terminal and tap a choice on it, or ask for anything the detail view shows: `/status`, `/menu`, `/tasks`, `/prs`, `/usage`, `/screen`, `/new` to start a session, a morning digest, quiet hours and a live pinned picture of the fleet that redraws itself. See [On Telegram](#on-telegram).
 
 <p align="center">
   <img src="docs/phone.png" width="300" alt="The phone page: a session waiting on you, with its question and an answer box">
@@ -208,7 +208,7 @@ More, from the same bot:
 - **⎋ Interrupt** on a session's card presses Esc in it (after you confirm), which stops what it is doing.
 - `/new <what to do>` starts a background Claude session: pick a folder (any your sessions run in, on any machine) and it runs `claude --bg` there. Another machine only starts one in a folder where it already has a session.
 - **Usage alerts**: a message when any machine's Claude account passes 80% and 95% of a limit, once per limit window.
-- `/live` pins an overview that updates itself every minute; `/live` again takes it away.
+- `/live` pins a picture of the fleet that redraws itself: Telegram lets fleet swap the photo in place, so it is always the latest frame, with the counts in its caption and a button for each session under it. It is redrawn when anything about the sessions changes (looked at every minute) and every five minutes regardless, so it is not uploading a picture a minute. `/live text` pins the overview as words instead; `/live` again takes either away.
 - **Morning digest** at 08:00: what merged, went live, finished, failed or got stuck since the last one, what is waiting now, and usage. `/digest` sends one now; `/digest 7:30` moves it; `/digest off`.
 - `/quiet 23:00-07:00` holds everything but “needs you” during those hours; it shows in the digest instead. `/quiet off` ends it. Mutes, quiet hours, the digest time and the live message are shared by all your machines, like the pairing.
 

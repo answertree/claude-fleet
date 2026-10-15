@@ -6338,7 +6338,7 @@ export interface TgConfig {
   muted?: Record<string, number>; // sessions you silenced, until when
   quiet?: { from: string; to: string }; // quiet hours: only "needs you" comes through
   digest?: { at: string; last?: number }; // the digest's time ("08:00", or "off") and when it was last sent
-  live?: { id: number }; // the pinned overview that keeps itself up to date
+  live?: { id: number; text?: boolean }; // the pinned view that keeps itself up to date: a picture, or the overview as text
 }
 const fleetConfigDir = () => path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "claude-fleet");
 export const tgConfigPath = () => process.env.FLEET_TELEGRAM_FILE || path.join(fleetConfigDir(), "telegram.json");
@@ -6464,7 +6464,7 @@ export async function tgHandle(update: any): Promise<void> {
   if (cmd === "menu") return void (await tgSend(c, { text: "◆ <b>Claude Fleet</b> — what would you like to see?", markup: tgMenuMarkup() }, undefined, true));
   if (sectionKeys.has(cmd)) return void (await tgSend(c, tgSection(cmd, arg), undefined, true));
   if (cmd === "usage") return void (await tgUsage(c));
-  if (cmd === "live") return void (await tgLive(c));
+  if (cmd === "live") return void (await tgLive(c, arg));
   if (cmd === "new") return void (await tgSend(c, tgNew(c, arg), undefined, true));
   if (cmd === "digest") {
     if (!arg) return void (await tgSend(c, { text: tgDigest(Math.min(readTg().digest?.last || Infinity, clock() - 16 * 3600_000)) }, undefined, true));
@@ -6512,7 +6512,7 @@ export const TG_COMMANDS = [
   ].map((x) => ({ command: x.key, description: x.about })),
   { command: "session", description: "everything about one session: /session <name>" },
   { command: "new", description: "start a session: /new <what to do>, then pick where" },
-  { command: "live", description: "pin an overview that keeps itself up to date" },
+  { command: "live", description: "pin a picture of the fleet that redraws itself (/live text for words)" },
   { command: "digest", description: "what happened lately; /digest 7:30 sets the morning time" },
   { command: "quiet", description: "quiet hours: /quiet 23:00-07:00, or off" },
   { command: "usage", description: "your Claude usage on each machine" },
@@ -7293,30 +7293,74 @@ export function usageAlerts(now = clock()): string[] {
 }
 
 // ── the live message ──
+// /live pins a picture of the fleet that redraws itself: Telegram lets a bot swap the photo in a message it sent.
+// It is looked at every minute and redrawn when anything about the sessions has changed, or every five minutes
+// regardless, so the clock and graphs move without uploading a picture a minute. /live text pins the overview as
+// text instead.
 const LIVE_EVERY_MS = 60_000;
+const LIVE_REDRAW_MS = 5 * 60_000;
 let liveAt = 0;
-/** Turn the pinned live overview on or off. */
-async function tgLive(c: TgConfig) {
+let liveDrawn = { at: 0, key: "" };
+const liveText = (text: string) => `${text}\n\n<i>📌 live · updated ${hhmm(Date.now())} · /live to stop</i>`;
+/** The picture's caption: the counts, and when it was drawn. */
+function liveCaption(now = clock()): string {
+  const c = webState(tg.getSessions(), now).counts;
+  const counts = [c.needs && `🟡 ${c.needs} need${c.needs === 1 ? "s" : ""} you`, c.stalled && `⏳ ${c.stalled} stuck`, c.working && `🟢 ${c.working} working`, c.agents && `🤖 ${c.agents} agent${c.agents === 1 ? "" : "s"}`].filter(Boolean);
+  return `${counts.length ? counts.join(" · ") : "All quiet"}\n<i>📌 live · updated ${hhmm(Date.now())} · /live to stop</i>`;
+}
+/** What the picture shows, in a few words per session: when this changes, it is redrawn. */
+function liveKey(now = clock()): string {
+  return JSON.stringify(webState(tg.getSessions(), now).sessions.map((s) => [s.sid, s.state, s.sub.text, s.tasks?.done, s.ctx?.pct, s.agents.length, s.fails?.n, s.prs.map(segText)]));
+}
+/** The photo upload for sending or swapping: the picture, its caption and the session buttons. */
+function livePhoto(c: TgConfig, extra: Record<string, string>, now = clock()): FormData {
+  const form = new FormData();
+  form.append("chat_id", String(c.chat));
+  for (const [k, v] of Object.entries(extra)) form.append(k, v);
+  form.append("reply_markup", JSON.stringify(tgOverview(now).markup));
+  form.append("pic", new Blob([fleetPicture(tg.getSessions(), now)], { type: "image/png" }), "fleet.png");
+  return form;
+}
+/** Turn the pinned live view on or off. */
+async function tgLive(c: TgConfig, arg = "") {
   if (c.live?.id) {
     await tgCall(c.token!, "unpinChatMessage", { chat_id: c.chat, message_id: c.live.id });
     await tgCall(c.token!, "deleteMessage", { chat_id: c.chat, message_id: c.live.id });
     writeTg({ ...readTg(), live: undefined });
-    return void (await tgSend(c, { text: "Live overview off." }));
+    return void (await tgSend(c, { text: "Live view off." }));
   }
-  const v = tgOverview();
-  const r = await tgCall(c.token!, "sendMessage", { chat_id: c.chat, text: liveText(v.text), parse_mode: "HTML", reply_markup: v.markup });
+  const asText = /^text$/i.test(arg.trim());
+  const now = clock();
+  let r;
+  if (asText) {
+    const v = tgOverview(now);
+    r = await tgCall(c.token!, "sendMessage", { chat_id: c.chat, text: liveText(v.text), parse_mode: "HTML", reply_markup: v.markup });
+  } else {
+    const form = livePhoto(c, { caption: liveCaption(now), parse_mode: "HTML" }, now);
+    form.append("photo", form.get("pic") as Blob, "fleet.png");
+    form.delete("pic");
+    r = await tgCall(c.token!, "sendPhoto", form, 60_000);
+  }
   if (!r.ok || typeof r.result?.message_id !== "number") return void (await tgSend(c, { text: `Could not start it: ${esc(r.error ?? "")}` }));
   await tgCall(c.token!, "pinChatMessage", { chat_id: c.chat, message_id: r.result.message_id, disable_notification: true });
-  writeTg({ ...readTg(), live: { id: r.result.message_id } });
+  writeTg({ ...readTg(), live: { id: r.result.message_id, text: asText || undefined } });
   liveAt = Date.now();
+  liveDrawn = { at: Date.now(), key: liveKey(now) };
 }
-const liveText = (text: string) => `${text}\n\n<i>📌 live · updated ${new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })} · /live to stop</i>`;
-async function tgLiveTick(c: TgConfig, now: number) {
+export async function tgLiveTick(c: TgConfig, now: number) {
   if (!c.live?.id || now - liveAt < LIVE_EVERY_MS) return;
   liveAt = now;
-  const v = tgOverview();
-  const r = await tgCall(c.token!, "editMessageText", { chat_id: c.chat, message_id: c.live.id, text: liveText(v.text), parse_mode: "HTML", reply_markup: v.markup });
-  if (!r.ok && /not found|can't be edited/i.test(r.error ?? "")) writeTg({ ...readTg(), live: undefined }); // you deleted it: it stops
+  let r;
+  if (c.live.text) {
+    const v = tgOverview(now);
+    r = await tgCall(c.token!, "editMessageText", { chat_id: c.chat, message_id: c.live.id, text: liveText(v.text), parse_mode: "HTML", reply_markup: v.markup });
+  } else {
+    const key = liveKey(now);
+    if (key === liveDrawn.key && now - liveDrawn.at < LIVE_REDRAW_MS) return; // nothing new to draw yet
+    liveDrawn = { at: now, key };
+    r = await tgCall(c.token!, "editMessageMedia", livePhoto(c, { message_id: String(c.live.id), media: JSON.stringify({ type: "photo", media: "attach://pic", caption: liveCaption(now), parse_mode: "HTML" }) }, now), 60_000);
+  }
+  if (!r.ok && /not found|can't be edited|message to edit/i.test(r.error ?? "")) writeTg({ ...readTg(), live: undefined }); // you deleted it: it stops
 }
 
 // ── new sessions ──
