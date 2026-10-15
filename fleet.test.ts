@@ -5047,7 +5047,7 @@ describe("key t: Telegram", () => {
       async fetch(req) {
         const [, bot, method] = new URL(req.url).pathname.split("/");
         if (bot !== `bot${TOKEN}`) return Response.json({ ok: false, description: "Unauthorized" }, { status: 401 });
-        const body = await req.json();
+        const body = req.headers.get("content-type")?.startsWith("multipart/") ? Object.fromEntries((await req.formData()).entries()) : await req.json();
         calls.push([method, body]);
         if (method === "getMe") return Response.json({ ok: true, result: { username: "my_fleet_bot" } });
         return Response.json({ ok: true, result: { message_id: 100 + calls.length } });
@@ -5090,9 +5090,9 @@ describe("key t: Telegram", () => {
       expect([method, body.chat_id, body.reply_markup.inline_keyboard[0][0].text]).toEqual(["sendMessage", 42, "↩ Reply"]);
       const askId = 101;
       // A tap from someone else's chat is ignored.
-      await F.tgHandle({ callback_query: { id: "q0", from: { id: 666 }, message: { message_id: askId, chat: { id: 666 } } } });
+      await F.tgHandle({ callback_query: { id: "q0", data: "reply", from: { id: 666 }, message: { message_id: askId, chat: { id: 666 } } } });
       expect(calls.length).toBe(1);
-      await F.tgHandle({ callback_query: { id: "q1", from: { id: 7 }, message: { message_id: askId, chat: { id: 42 } } } });
+      await F.tgHandle({ callback_query: { id: "q1", data: "reply", from: { id: 7 }, message: { message_id: askId, chat: { id: 42 } } } });
       expect(calls.map(([m]) => m)).toEqual(["sendMessage", "answerCallbackQuery", "sendMessage"]);
       expect(calls[2][1].reply_markup.force_reply).toBe(true);
       const promptId = 103;
@@ -5109,6 +5109,53 @@ describe("key t: Telegram", () => {
     } finally {
       delete F.web.send;
     }
+  });
+
+  test("everything in the detail view is a command or a menu away, and menus tidy themselves away", async () => {
+    F.writeTg({ token: TOKEN, chat: 42, user: 7, bot: "my_fleet_bot" });
+    F.tg.getSessions = () => [session];
+    const msg = (text: string, id = 50) => F.tgHandle({ message: { message_id: id, text, chat: { id: 42 }, from: { id: 7 } } });
+    calls.length = 0;
+    await msg("/tasks checkout");
+    expect(calls[0][0]).toBe("sendMessage");
+    expect(calls[0][1].text).toContain("<b>📋 Tasks</b> · “checkout”");
+    expect(calls[0][1].parse_mode).toBe("HTML");
+    const menuId = 101; // what the stand-in Telegram numbered that reply
+    // The menu: a section's button shows it in place of the message it is on, marked as the one showing.
+    calls.length = 0;
+    await F.tgHandle({ callback_query: { id: "q2", data: "v:prs", from: { id: 7 }, message: { message_id: menuId, chat: { id: 42 } } } });
+    const edit = calls.find(([m]) => m === "editMessageText")!;
+    expect(edit[1].message_id).toBe(menuId);
+    expect(JSON.stringify(edit[1].reply_markup)).toContain("• ⇡ PRs");
+    // Every command has its place in Telegram's menu, and /help lists them.
+    for (const x of F.TG_SECTIONS) expect(F.TG_COMMANDS.some((c) => c.command === x.key)).toBe(true);
+    // Ten minutes on, the menu and the command that asked for it are deleted; notifications are not.
+    calls.length = 0;
+    await F.tgSay("🟡 checkout flow needs you", "s1", true);
+    F.tgSweep(Date.now() + 11 * 60_000);
+    await Bun.sleep(50);
+    const deleted = calls.filter(([m]) => m === "deleteMessage").map(([, b]) => b.message_id);
+    expect(deleted).toContain(50); // the /tasks command
+    expect(deleted).toContain(menuId); // the reply, since turned into the PRs menu
+    expect(deleted).not.toContain(calls.find(([m]) => m === "sendMessage")![1].message_id);
+  });
+
+  test("a picture of the fleet is drawn by fleet itself and sent as a photo", async () => {
+    F.writeTg({ token: TOKEN, chat: 42, user: 7, bot: "my_fleet_bot" });
+    F.tg.getSessions = () => [session];
+    calls.length = 0;
+    await F.tgHandle({ callback_query: { id: "q3", data: "P", from: { id: 7 }, message: { message_id: 78, chat: { id: 42 } } } });
+    const [, body] = calls.find(([m]) => m === "sendPhoto")!;
+    const png = new Uint8Array(await (body.photo as Blob).arrayBuffer());
+    expect([...png.slice(1, 4)].map((b) => String.fromCharCode(b)).join("")).toBe("PNG");
+    expect(body.chat_id).toBe("42");
+  });
+
+  test("the picture's font draws every character the screen uses, with true shapes for the state marks", () => {
+    const png = F.pictureOf([F.fg([255, 0, 0], "▲ ● ○ ◐ ◆ ✓ ✗ ⠋ ▁▂▃█ ━ │ #412")], 30);
+    expect(png.readUInt32BE(16)).toBe(30 * 16); // width: 30 characters of 8 pixels, doubled
+    const cells = F.cellsOf(F.fg([1, 2, 3], "a") + F.bold("b") + "c");
+    expect(cells.map((x) => [x.ch, x.fg, x.bold])).toEqual([["a", [1, 2, 3], false], ["b", F.C.text, true], ["c", F.C.text, false]]);
   });
 
   test("the t screen never draws the token, even while it is being pasted", () => {

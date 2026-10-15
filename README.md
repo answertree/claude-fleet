@@ -175,7 +175,17 @@ Press `t` to pair fleet with a Telegram bot of your own; then it messages you on
 - ⏳ when a session looks stuck (reply to nudge it);
 - ❌ ✅ 🚀 when a pull request's CI fails or goes green, when it merges, and when it is live on a deploy target.
 
-Reply to any of its messages to send your text to that session, and send `/status` for what is waiting. Replies reach a session the same way the phone page's messages do (see above).
+Reply to any of its messages to send your text to that session. Replies reach a session the same way the phone page's messages do (see above). Each notification also has **ℹ️ Details** (everything about that session) and **🔕 Mute** (no more notifications from it for 24 hours, on every machine).
+
+Everything the detail view shows is a command away, and Telegram lists them in its menu:
+
+- `/status`: every machine (CPU, memory, sessions), the counts, usage at a glance, and a button for each session. A session's button opens its card: question or what it is doing, folder and machine, context with its forecast, activity sparkline, workflows, pull requests with CI and deploys, failures, background commands, changes, tasks and agents, and its last reply. The card's buttons answer it, draw it, show the conversation, mute it, refresh it, or go back.
+- `/menu`: the same in sections, one button each, and the message changes in place: `/needs`, `/tasks`, `/agents`, `/workflows`, `/prs`, `/fails`, `/bg`, `/changes`, `/context`, `/activity`, `/machines`. Each also works as a command, narrowed by a session name: `/tasks checkout`.
+- `/session <name>`: one session's card.
+- `/usage`: each machine's Claude limits as bars, and a picture of this machine's gauges.
+- `/screen`, or `/screen <name>`: a picture of the fleet, or of one session, as the detail view draws it. Fleet draws the picture itself (in the public-domain unscii font), so it needs nothing installed, on any machine.
+
+Menus, cards, pictures and confirmations delete themselves ten minutes after you last used them, with the command that asked for them, so the chat stays tidy; notifications stay. The pairing is kept in `~/.config/claude-fleet/telegram.json`, so the bot carries on by itself after fleet restarts.
 
 Setting it up: in Telegram, open @BotFather, send `/newbot` and follow it; it gives you a token. Press `t` in fleet, paste the token and press Enter (it is shown as dots, and kept in `~/.config/claude-fleet/telegram.json`, readable only by you). Fleet then shows a QR code: scan it with your phone, or open the link, and tap Start. Only the chat that opens that link is paired; the bot ignores everyone else. On the `t` screen afterwards, `s` sends a test message and `x` unpairs and forgets the token.
 

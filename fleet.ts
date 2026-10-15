@@ -15,7 +15,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { StringDecoder } from "node:string_decoder";
-import { deflateSync } from "node:zlib";
+import { deflateSync, inflateSync } from "node:zlib";
 import { spawn, spawnSync } from "node:child_process";
 
 /**
@@ -6262,6 +6262,7 @@ export interface TgConfig {
   user?: number;
   pairCode?: string; // the one-time code in the pairing link, until a chat uses it
   at?: number; // when it last changed: the newest wins across your machines
+  muted?: Record<string, number>; // sessions you silenced, until when
 }
 const fleetConfigDir = () => path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "claude-fleet");
 export const tgConfigPath = () => process.env.FLEET_TELEGRAM_FILE || path.join(fleetConfigDir(), "telegram.json");
@@ -6284,9 +6285,10 @@ export function writeTg(c: TgConfig, changed = true) {
 }
 export const TG_TOKEN = /^\d{5,}:[A-Za-z0-9_-]{30,}$/;
 /** One call to the bot API. Failures say what went wrong in words, never with the address, which holds the token. */
-export async function tgCall(token: string, method: string, params: Record<string, unknown> = {}, timeoutMs = 15_000): Promise<{ ok: boolean; result?: any; error?: string }> {
+export async function tgCall(token: string, method: string, params: Record<string, unknown> | FormData = {}, timeoutMs = 15_000): Promise<{ ok: boolean; result?: any; error?: string }> {
   try {
-    const r = await fetch(`${tgApiBase()}/bot${token}/${method}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(params), signal: AbortSignal.timeout(timeoutMs) });
+    const form = params instanceof FormData;
+    const r = await fetch(`${tgApiBase()}/bot${token}/${method}`, { method: "POST", headers: form ? {} : { "content-type": "application/json" }, body: form ? params : JSON.stringify(params), signal: AbortSignal.timeout(timeoutMs) });
     const j: any = await r.json().catch(() => ({}));
     if (j?.ok) return { ok: true, result: j.result };
     return { ok: false, error: r.status === 401 || r.status === 404 ? "Telegram does not know that token" : r.status === 409 ? "another program is reading this bot" : `Telegram said ${typeof j?.description === "string" ? safeLine(j.description).slice(0, 80) : r.status}` };
@@ -6324,7 +6326,7 @@ export async function tgSay(text: string, sid?: string, asking = false): Promise
   const c = readTg();
   if (!c.token || !c.chat) return false;
   // A question carries a Reply button; it is taken off again once the session stops waiting.
-  const markup = asking && sid ? { reply_markup: { inline_keyboard: [[{ text: "↩ Reply", callback_data: "reply" }]] } } : {};
+  const markup = sid ? { reply_markup: { inline_keyboard: [[...(asking ? [{ text: "↩ Reply", callback_data: "reply" }] : []), { text: "ℹ️ Details", callback_data: `d:${sid}` }, { text: "🔕 Mute", callback_data: `z:${sid}` }]] } } : {};
   const r = await tgCall(c.token, "sendMessage", { chat_id: c.chat, text: text.slice(0, 4000), disable_web_page_preview: true, ...markup });
   if (!r.ok) tg.status = r.error ?? "";
   if (r.ok && sid && typeof r.result?.message_id === "number") {
@@ -6351,16 +6353,8 @@ export async function tgHandle(update: any): Promise<void> {
   const q = update?.callback_query;
   if (q && typeof q.id === "string") {
     const c = readTg();
-    if (!c.token) return;
-    const from = q.message?.chat?.id;
-    if (!c.chat || from !== c.chat || (c.user && q.from?.id !== c.user)) return;
-    const sid = typeof q.message?.message_id === "number" ? tgSent.get(q.message.message_id) : undefined;
-    const s = sid ? tg.getSessions().find((x) => x.sid === sid) : undefined;
-    await tgCall(c.token, "answerCallbackQuery", { callback_query_id: q.id, text: s ? undefined : "That session has finished." });
-    if (!s) return;
-    // Telegram's own reply box, opened on whichever device was tapped; the answer is a reply to this prompt.
-    const r = await tgCall(c.token, "sendMessage", { chat_id: c.chat, text: `✍️ Your answer to ${tgName(s)}:`, reply_markup: { force_reply: true, input_field_placeholder: `answer ${tgName(s)}…`.slice(0, 64) } });
-    if (r.ok && typeof r.result?.message_id === "number") rememberTg(r.result.message_id, s.sid);
+    if (!c.token || !c.chat || q.message?.chat?.id !== c.chat || (c.user && q.from?.id !== c.user)) return;
+    await tgButton(c, q);
     return;
   }
   const m = update?.message;
@@ -6372,7 +6366,7 @@ export async function tgHandle(update: any): Promise<void> {
     // Only the chat that opens the pairing link (which carries the one-time code) is paired; anyone else is ignored.
     if (c.pairCode && m.chat.type === "private" && m.text.trim() === `/start ${c.pairCode}`) {
       writeTg({ ...c, chat: m.chat.id, user: m.from?.id, pairCode: undefined });
-      await say("Paired with Claude Fleet ✓\n\nI'll message you when a session needs you, looks stuck, or a pull request changes. Reply to one of my messages to send your reply to that session. /status lists what's waiting.");
+      await say("Paired with Claude Fleet ✓\n\nI'll message you when a session needs you, looks stuck, or a pull request changes. Reply to one of my messages to answer that session.\n\n/status shows everything, with a button for each session.");
     }
     return;
   }
@@ -6383,23 +6377,293 @@ export async function tgHandle(update: any): Promise<void> {
     const s = tg.getSessions().find((x) => x.sid === target);
     if (!s) return void (await say("That session has finished, so I can't send to it."));
     const r = await (web.send ?? sendToSession)(s, text);
-    await say(r.ok ? `✓ sent to ${tgName(s)}` : `✗ not sent: ${r.error}`);
+    const ack = await say(r.ok ? `✓ sent to ${tgName(s)}` : `✗ not sent: ${r.error}`);
+    if (r.ok) tgExpire(ack.result?.message_id, 60_000);
     return;
   }
-  if (text === "/status" || text === "/start") {
-    const views = buildViews(tg.getSessions(), clock()).filter((v) => !isHidden(v));
-    const lines = views.map((v) => `${v.state === "needs" ? "🟡" : v.state === "stalled" ? "⏳" : v.state === "working" ? "🟢" : "⚪"} ${tgName(v.s)} — ${STATE[v.state].word}${v.facts.needs ? `: ${capText(flatReply(v.facts.needs), 200)}` : ""}`);
-    await say(lines.length ? lines.join("\n") : "Nothing is working and nothing is waiting on you.");
-    return;
+  const cmd = text.split(/[\s@]/)[0].toLowerCase().replace(/^\//, "");
+  const arg = text.replace(/^\S+\s*/, "").trim();
+  tgExpire(m.message_id); // the command goes with what it asked for
+  if (cmd === "status" || cmd === "start") return void (await tgSend(c, tgOverview(), undefined, true));
+  if (cmd === "menu") return void (await tgSend(c, { text: "◆ <b>Claude Fleet</b> — what would you like to see?", markup: tgMenuMarkup() }, undefined, true));
+  if (sectionKeys.has(cmd)) return void (await tgSend(c, tgSection(cmd, arg), undefined, true));
+  if (cmd === "usage") return void (await tgUsage(c));
+  if (cmd === "screen") {
+    const s = arg ? tg.getSessions().find((x) => x.name.toLowerCase().includes(arg.toLowerCase())) : undefined;
+    return void (await tgPicture(c, s?.sid));
   }
-  await say("Reply to one of my messages to send your text to that session. /status lists the sessions.");
+  if (cmd === "session" && arg) {
+    const s = tg.getSessions().find((x) => x.name.toLowerCase().includes(arg.toLowerCase()));
+    return void (await tgSend(c, (s && tgCard(s.sid)) || { text: `No session called “${esc(arg)}”.` }, s?.sid, true));
+  }
+  await tgSend(c, { text: TG_HELP }, undefined, true);
 }
+export const TG_COMMANDS = [
+  { command: "status", description: "every machine and session, a button for each" },
+  { command: "menu", description: "everything, a section at a time" },
+  ...[
+    { key: "needs", about: "what is waiting on you" },
+    { key: "tasks", about: "task lists (add a session name to narrow it)" },
+    { key: "agents", about: "the agents at work" },
+    { key: "workflows", about: "workflows and their phases" },
+    { key: "prs", about: "pull requests, CI and deploys" },
+    { key: "fails", about: "tool calls that failed" },
+    { key: "bg", about: "background commands running" },
+    { key: "changes", about: "files changed and git state" },
+    { key: "context", about: "context used and when it fills" },
+    { key: "activity", about: "tool calls over the window" },
+    { key: "machines", about: "each machine's load" },
+  ].map((x) => ({ command: x.key, description: x.about })),
+  { command: "session", description: "everything about one session: /session <name>" },
+  { command: "usage", description: "your Claude usage on each machine" },
+  { command: "screen", description: "a picture of the fleet, or /screen <session>" },
+  { command: "help", description: "what I can do" },
+];
+const TG_HELP = TG_COMMANDS.map((x) => `/${x.command} — ${x.description}`).join("\n") + "\n\nReply to any of my messages to send your reply to that session. Menus and pictures tidy themselves away after ten minutes.";
+
+type TgView = { text: string; markup?: unknown };
+// Everything the detail view shows, a section at a time: as commands, and as a menu that changes in place.
+export const TG_SECTIONS: { key: string; label: string; about: string }[] = [
+  { key: "needs", label: "🟡 Needs you", about: "what is waiting on you" },
+  { key: "tasks", label: "📋 Tasks", about: "every session's task list" },
+  { key: "agents", label: "🤖 Agents", about: "the agents at work" },
+  { key: "workflows", label: "≡ Workflows", about: "workflows and their phases" },
+  { key: "prs", label: "⇡ PRs", about: "pull requests, CI and deploys" },
+  { key: "fails", label: "✗ Failures", about: "tool calls that failed" },
+  { key: "bg", label: "↻ Background", about: "background commands running" },
+  { key: "changes", label: "± Changes", about: "files changed and git state" },
+  { key: "context", label: "🧠 Context", about: "context used and when it fills" },
+  { key: "activity", label: "🔧 Activity", about: "tool calls over the window" },
+  { key: "machines", label: "💻 Machines", about: "each machine's load" },
+];
+const sectionKeys = new Set(TG_SECTIONS.map((x) => x.key));
+/** The menu: a button for each section, the sessions, a picture and usage. */
+function tgMenuMarkup(current?: string) {
+  const btn = (x: { key: string; label: string }) => ({ text: (x.key === current ? "• " : "") + x.label, callback_data: `v:${x.key}` });
+  const rows: { text: string; callback_data: string }[][] = [];
+  for (let i = 0; i < TG_SECTIONS.length; i += 3) rows.push(TG_SECTIONS.slice(i, i + 3).map(btn));
+  rows.push([{ text: "◆ Sessions", callback_data: "L" }, { text: "🖼 Picture", callback_data: "P" }, { text: "📊 Usage", callback_data: "U" }]);
+  return { inline_keyboard: rows };
+}
+/** One section across every session (or those whose name has `filter` in it). */
+export function tgSection(key: string, filter = "", now = clock()): TgView {
+  const st = webState(tg.getSessions(), now);
+  const f = filter.toLowerCase();
+  const list = st.sessions.filter((s) => !f || s.name.toLowerCase().includes(f) || s.place.toLowerCase().includes(f));
+  const head = (s: WebSession) => `${STATE_EMOJI[s.state] ?? "•"} <b>${esc(s.name)}</b>${s.place ? ` <i>${esc(s.place)}</i>` : ""}`;
+  const sec = TG_SECTIONS.find((x) => x.key === key)!;
+  const out: string[] = [`<b>${esc(sec.label)}</b>${f ? ` · “${esc(filter)}”` : ""}`];
+  const block = (s: WebSession, rows: string[]) => rows.length && out.push("", head(s), ...rows);
+  for (const s of list) {
+    if (key === "needs" && s.needs) block(s, [`❓ ${esc(capText(flatReply(s.needs), 900))}`]);
+    if (key === "tasks" && s.tasks?.total) block(s, [`${s.tasks.done}/${s.tasks.total} done`, ...s.tasks.open.slice(0, 12).map((t) => `${t.status === "in_progress" ? "◐" : "○"} ${esc(capText(t.text, 110))}${t.since ? " · " + t.since : ""}${t.blocked ? " · blocked" : ""}`)]);
+    if (key === "agents" && s.agents.length) block(s, s.agents.slice(0, 12).map((a) => `• ${esc(capText(a.label, 60))} — ${esc(capText(a.doing, 80))} · ${a.ago}`));
+    if (key === "workflows" && s.workflows.length) block(s, s.workflows.map((w) => `≡ ${esc(w.name)} · ${esc(w.phase)} · ${w.done}/${w.total} agents`));
+    if (key === "prs" && s.prs.length) block(s, s.prs.map((p) => `⇡ ${esc(segText(p))}`));
+    if (key === "fails" && s.fails) block(s, [`✗ ${s.fails.n} failed · ${esc(capText(s.fails.last, 300))} · ${s.fails.ago}`]);
+    if (key === "bg" && s.bg.length) block(s, s.bg.map((b) => `↻ ${esc(capText(b.desc, 140))} · ${b.ago}`));
+    if (key === "changes" && s.changes) block(s, [`± ${esc(segText(s.changes))}`]);
+    if (key === "context" && s.ctx) block(s, [`${bar10(s.ctx.pct)} ${s.ctx.pct}% of ${s.ctx.max}${s.ctx.runway ? " · " + esc(s.ctx.runway) : ""}`, ...(s.ctx.split.length ? [s.ctx.split.map((p) => `${esc(p.name)} ${human(p.tokens)}`).join(" · ")] : [])]);
+    if (key === "activity") block(s, [`<code>${esc(sparkText(s.spark, 30)) || " "}</code> ${s.tools} tool calls / ${opt.windowMin}m`]);
+  }
+  if (key === "machines") {
+    out.push("", `💻 <b>${esc(selfHost())}</b>${peers.size ? " (this one)" : ""} · cpu ${st.machine.cpu}% · mem ${st.machine.mem}% (${esc(st.machine.memText)}) · load ${st.machine.load}`);
+    for (const p of peers.values()) if (p.at && now - p.at <= PEER_GONE_MS) out.push(`💻 <b>${esc(p.host)}</b> · ${p.sessions.length} session${p.sessions.length === 1 ? "" : "s"}${p.machine ? ` · cpu ${p.machine.cpu}% · mem ${p.machine.mem}%` : ""}`);
+  }
+  if (out.length === 1) out.push("", "Nothing here right now.");
+  let text = out.join("\n");
+  if (text.length > 4000) text = text.slice(0, 3990) + "…";
+  return { text, markup: tgMenuMarkup(key) };
+}
+
+// Menus, views and pictures tidy themselves away: each is deleted ten minutes after it was last used, with the
+// command that asked for it; a confirmation goes after a minute. Notifications stay.
+const TG_KEEP_MS = 10 * 60_000;
+const tgTemp = new Map<number, number>(); // message id → when to delete it
+export const tgExpire = (id: unknown, ms = TG_KEEP_MS) => typeof id === "number" && tgTemp.set(id, Date.now() + ms);
+/** Delete the messages whose time is up; called on every scan by the fleet talking to the bot. */
+export function tgSweep(now = Date.now()) {
+  const c = readTg();
+  if (!c.token || !c.chat) return;
+  for (const [id, at] of tgTemp)
+    if (at <= now) {
+      tgTemp.delete(id);
+      void tgCall(c.token, "deleteMessage", { chat_id: c.chat, message_id: id });
+    }
+}
+
+
+const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const STATE_EMOJI: Record<string, string> = { needs: "🟡", stalled: "⏳", working: "🟢", yours: "🔵", idle: "⚪", done: "✅" };
+const BLOCKS = "▁▂▃▄▅▆▇█";
+/** A sparkline in text, `n` wide. */
+export function sparkText(values: number[], n = 24): string {
+  if (!values.length) return "";
+  const step = values.length / n;
+  const cols = Array.from({ length: n }, (_, i) => sum(values.slice(Math.floor(i * step), Math.floor((i + 1) * step))));
+  const max = Math.max(1, ...cols);
+  return cols.map((v) => (v ? BLOCKS[Math.min(7, Math.floor((v / max) * 7.999))] : " ")).join("").replace(/\s+$/, "");
+}
+const bar10 = (pct: number) => "▰".repeat(Math.round(Math.min(100, pct) / 10)) + "▱".repeat(10 - Math.round(Math.min(100, pct) / 10));
+const segText = (segs: { t: string }[]) => segs.map((x) => x.t).join("");
+type WebSession = ReturnType<typeof webState>["sessions"][number];
+
+/** /status: every machine, the counts, usage at a glance, and a button for each session. */
+export function tgOverview(now = clock()): TgView {
+  const st = webState(tg.getSessions(), now);
+  const c = st.counts;
+  const lines = [`◆ <b>Claude Fleet</b> · ${new Date(now).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}`, ""];
+  const machines = [{ host: selfHost(), here: true, cpu: st.machine.cpu, mem: st.machine.mem, n: tg.getSessions().filter((s) => !s.remote).length }, ...[...peers.values()].filter((p) => p.at && now - p.at <= PEER_GONE_MS).map((p) => ({ host: p.host, here: false, cpu: p.machine?.cpu, mem: p.machine?.mem, n: p.sessions.length }))];
+  for (const m of machines) lines.push(`💻 <b>${esc(m.host)}</b>${m.here && machines.length > 1 ? " (this one)" : ""} · ${m.n} session${m.n === 1 ? "" : "s"}${m.cpu !== undefined ? ` · cpu ${m.cpu}% · mem ${m.mem}%` : ""}`);
+  lines.push("");
+  const counts = [c.needs && `🟡 ${c.needs} need${c.needs === 1 ? "s" : ""} you`, c.stalled && `⏳ ${c.stalled} stuck`, c.working && `🟢 ${c.working} working`, c.agents && `🤖 ${c.agents} agent${c.agents === 1 ? "" : "s"}`, c.workflows && `≡ ${c.workflows} workflow${c.workflows === 1 ? "" : "s"}`].filter(Boolean);
+  lines.push(counts.length ? counts.join(" · ") : "Nothing working and nothing waiting on you.");
+  const usage = [...(st.account?.limits.length ? [{ host: selfHost(), limits: st.account.limits }] : []), ...[...peers.values()].filter((p) => p.usage?.length).map((p) => ({ host: p.host, limits: p.usage! }))];
+  if (usage.length) lines.push("", ...usage.map((u) => `📊 ${machines.length > 1 ? esc(u.host) + ": " : ""}${u.limits.map((l) => `${esc(l.label)} ${l.pct}%`).join(" · ")}`));
+  if (st.hidden) lines.push("", `<i>${st.hidden} idle or finished not shown</i>`);
+  const order = ["needs", "stalled", "working", "yours", "idle", "done"];
+  const rows = [...st.sessions]
+    .sort((a, b) => order.indexOf(a.state) - order.indexOf(b.state))
+    .slice(0, 24)
+    .map((s) => [{ text: `${STATE_EMOJI[s.state] ?? "•"} ${s.name}${machines.length > 1 ? ` · ${tg.getSessions().find((x) => x.sid === s.sid)?.remote?.host ?? selfHost()}` : ""}`.slice(0, 60), callback_data: `s:${s.sid}` }]);
+  rows.push([{ text: "☰ Menu", callback_data: "v:needs" }, { text: "🖼 Picture", callback_data: "P" }, { text: "📊 Usage", callback_data: "U" }, { text: "🔄", callback_data: "L" }]);
+  return { text: lines.join("\n"), markup: { inline_keyboard: rows } };
+}
+
+/** Everything about one session, with what you can do about it. */
+export function tgCard(sid: string, now = clock()): TgView | undefined {
+  const s = webState(tg.getSessions(), now).sessions.find((x) => x.sid === sid);
+  if (!s) return undefined;
+  const lines = [`${STATE_EMOJI[s.state] ?? "•"} <b>${esc(s.name)}</b> — ${esc(s.word)}${s.time ? " · " + esc(s.time) : ""}`];
+  if (s.place) lines.push(`📁 ${esc(s.place)}`);
+  lines.push("");
+  if (s.needs) lines.push(`❓ <b>${esc(capText(flatReply(s.needs), 900))}</b>`, "");
+  else if (s.sub.text) lines.push(`${s.sub.source === "prompt" ? "▸" : "◆"} ${esc(capText(s.sub.text, 400))}`, "");
+  if (s.party) lines.push(`🎉 ${esc(s.party)}`);
+  if (s.ctx) lines.push(`🧠 context ${s.ctx.pct}% of ${s.ctx.max} ${bar10(s.ctx.pct)}${s.ctx.runway ? " · " + esc(s.ctx.runway) : ""}`);
+  if (s.tools) lines.push(`🔧 ${s.tools} tool calls / ${opt.windowMin}m <code>${esc(sparkText(s.spark))}</code>`);
+  for (const w of s.workflows) lines.push(`≡ ${esc(w.name)} · ${esc(w.phase)} · ${w.done}/${w.total} agents`);
+  for (const p of s.prs) lines.push(`⇡ ${esc(segText(p))}`);
+  if (s.fails) lines.push(`✗ ${s.fails.n} failed · ${esc(capText(s.fails.last, 160))} · ${s.fails.ago}`);
+  for (const b of s.bg) lines.push(`↻ ${esc(capText(b.desc, 120))} · ${b.ago}`);
+  if (s.changes) lines.push(`± ${esc(segText(s.changes))}`);
+  if (s.tasks?.total) {
+    lines.push("", `📋 <b>tasks ${s.tasks.done}/${s.tasks.total}</b>`);
+    for (const t of s.tasks.open.slice(0, 8)) lines.push(`${t.status === "in_progress" ? "◐" : "○"} ${esc(capText(t.text, 120))}${t.since ? " · " + t.since : ""}${t.blocked ? " · blocked" : ""}`);
+    if (s.tasks.open.length > 8) lines.push(`… and ${s.tasks.open.length - 8} more`);
+  }
+  if (s.agents.length) {
+    lines.push("", `🤖 <b>${s.agents.length} agent${s.agents.length === 1 ? "" : "s"}</b>`);
+    for (const a of s.agents.slice(0, 6)) lines.push(`• ${esc(capText(a.label, 60))} — ${esc(capText(a.doing, 80))} · ${a.ago}`);
+    if (s.agents.length > 6) lines.push(`… and ${s.agents.length - 6} more`);
+  }
+  const said = s.talk.filter((t) => t.who === "claude").at(-1);
+  if (said && !s.needs) lines.push("", `💬 ${esc(capText(said.text, 700))} <i>${said.ago}</i>`);
+  const muted = (readTg().muted?.[sid] ?? 0) > Date.now();
+  const markup = {
+    inline_keyboard: [
+      [{ text: s.state === "needs" ? "↩ Answer" : "✍️ Message", callback_data: `r:${sid}` }, { text: "🖼 Picture", callback_data: `p:${sid}` }, { text: "💬 Chat", callback_data: `m:${sid}` }],
+      [{ text: muted ? "🔔 Unmute" : "🔕 Mute 24h", callback_data: `z:${sid}` }, { text: "🔄 Refresh", callback_data: `x:${sid}` }, { text: "⬅ All", callback_data: "L" }],
+    ],
+  };
+  let text = lines.join("\n").replace(/\n{3,}/g, "\n\n");
+  if (text.length > 4000) text = text.slice(0, 3990) + "…";
+  return { text, markup };
+}
+
+/** Send a view as a new message. */
+async function tgSend(c: TgConfig, v: TgView, sid?: string, temporary = true) {
+  const r = await tgCall(c.token!, "sendMessage", { chat_id: c.chat, text: v.text, parse_mode: "HTML", disable_web_page_preview: true, ...(v.markup ? { reply_markup: v.markup } : {}) });
+  if (r.ok && sid && typeof r.result?.message_id === "number") rememberTg(r.result.message_id, sid);
+  if (r.ok && temporary) tgExpire(r.result?.message_id);
+  return r;
+}
+/** Show a view in place of the message a button was on, so the chat does not fill up with menus. */
+async function tgEdit(c: TgConfig, messageId: number, v: TgView) {
+  const r = await tgCall(c.token!, "editMessageText", { chat_id: c.chat, message_id: messageId, text: v.text, parse_mode: "HTML", disable_web_page_preview: true, ...(v.markup ? { reply_markup: v.markup } : {}) });
+  // A notification's text cannot always be edited into a menu (or nothing changed): then send it new.
+  if (!r.ok && !/not modified/i.test(r.error ?? "")) await tgSend(c, v);
+  else if (tgTemp.has(messageId)) tgExpire(messageId); // in use: its ten minutes start again
+}
+/** /usage: each machine's Claude account, as bars, and this machine's gauges as a picture. */
+async function tgUsage(c: TgConfig) {
+  const now = clock();
+  const st = webState(tg.getSessions(), now);
+  const blocks = [...(st.account ? [{ host: selfHost(), limits: st.account.limits, reason: st.account.reason }] : []), ...[...peers.values()].filter((p) => p.at && p.usage).map((p) => ({ host: p.host, limits: p.usage!, reason: undefined }))];
+  const lines = ["📊 <b>Claude usage</b>"];
+  for (const b of blocks) {
+    lines.push("", `<b>${esc(b.host)}</b>`);
+    if (!b.limits.length) lines.push(`<i>${esc(b.reason || "no figures")}</i>`);
+    for (const l of b.limits) lines.push(`<code>${esc(l.label.padEnd(8))} ${bar10(l.pct)} ${String(l.pct).padStart(3)}%</code>${l.resets ? " · " + esc(l.resets) : ""}`);
+  }
+  if (!blocks.length) lines.push("", "No usage figures: fleet reads them only where usage is on.");
+  await tgSend(c, { text: lines.join("\n") });
+  await tgPhotoSend(c, headerPicture(now), `${selfHost()}: machine, usage and activity`);
+}
+/** A picture of the fleet, or of one session. */
+async function tgPicture(c: TgConfig, sid?: string) {
+  const sessions = tg.getSessions();
+  const s = sid ? sessions.find((x) => x.sid === sid) : undefined;
+  if (sid && !s) return void (await tgSend(c, { text: "That session has finished." }));
+  await tgPhotoSend(c, fleetPicture(sessions, clock(), sid), s ? tgName(s) : "Claude Fleet", sid);
+}
+async function tgPhotoSend(c: TgConfig, png: Buffer, caption: string, sid?: string) {
+  const form = new FormData();
+  form.append("chat_id", String(c.chat));
+  form.append("caption", caption.slice(0, 1000));
+  form.append("photo", new Blob([png], { type: "image/png" }), "fleet.png");
+  const r = await tgCall(c.token!, "sendPhoto", form, 60_000);
+  if (r.ok && sid && typeof r.result?.message_id === "number") rememberTg(r.result.message_id, sid);
+  if (r.ok) tgExpire(r.result?.message_id);
+  if (!r.ok) tg.status = r.error ?? "";
+}
+/** A button was tapped. */
+async function tgButton(c: TgConfig, q: any) {
+  const data = typeof q.data === "string" ? q.data : "";
+  const msgId = q.message?.message_id;
+  const [act, sid = typeof msgId === "number" ? tgSent.get(msgId) ?? "" : ""] = data === "reply" ? ["r"] : data.split(":");
+  const session = sid ? tg.getSessions().find((x) => x.sid === sid) : undefined;
+  const gone = !!sid && !session && act !== "L" && act !== "v";
+  await tgCall(c.token!, "answerCallbackQuery", { callback_query_id: q.id, text: gone ? "That session has finished." : act === "p" || act === "P" ? "Drawing…" : undefined });
+  if (gone) return;
+  if (act === "L") return tgEdit(c, msgId, tgOverview());
+  if (act === "v" && sectionKeys.has(sid)) return tgEdit(c, msgId, tgSection(sid));
+  if (act === "s" || act === "x") return tgEdit(c, msgId, tgCard(sid) ?? { text: "That session has finished." });
+  if (act === "d") return void (await tgSend(c, tgCard(sid) ?? { text: "That session has finished." }));
+  if (act === "P") return tgPicture(c);
+  if (act === "p") return tgPicture(c, sid);
+  if (act === "U") return tgUsage(c);
+  if (act === "m") {
+    const s = webState(tg.getSessions(), clock()).sessions.find((x) => x.sid === sid);
+    const talk = s?.talk ?? [];
+    const text = talk.length ? talk.map((t) => `${t.who === "you" ? "▸ <b>you</b>" : "◆ <b>claude</b>"} <i>${t.ago}</i>\n${esc(capText(t.text, 1200))}`).join("\n\n") : "Nothing said yet.";
+    return void (await tgSend(c, { text: `💬 <b>${esc(tgName(session!))}</b>\n\n${text}`.slice(0, 4000) }, sid));
+  }
+  if (act === "z") {
+    const now = Date.now();
+    const muted = { ...(readTg().muted ?? {}) };
+    for (const [k, until] of Object.entries(muted)) if (until <= now) delete muted[k];
+    if ((muted[sid] ?? 0) > now) delete muted[sid];
+    else muted[sid] = now + 24 * 3600_000;
+    writeTg({ ...readTg(), muted });
+    return tgEdit(c, msgId, tgCard(sid) ?? { text: "That session has finished." });
+  }
+  if (act === "r") {
+    // Telegram's own reply box, opened on whichever device was tapped; the answer is a reply to this prompt.
+    const r = await tgCall(c.token!, "sendMessage", { chat_id: c.chat, text: `✍️ Your ${factsOf(session!).needs ? "answer" : "message"} to ${tgName(session!)}:`, reply_markup: { force_reply: true, input_field_placeholder: `to ${tgName(session!)}…`.slice(0, 64) } });
+    if (r.ok && typeof r.result?.message_id === "number") rememberTg(r.result.message_id, session!.sid);
+    tgExpire(r.result?.message_id);
+  }
+}
+
 let tgPolling = false;
 /** Read the bot's messages for as long as this fleet is the one talking to it. */
 async function tgPoll() {
   if (tgPolling) return;
   tgPolling = true;
   let offset = 0;
+  const first = readTg();
+  if (first.token) void tgCall(first.token, "setMyCommands", { commands: TG_COMMANDS }); // the menu Telegram shows by the message box
   try {
     while (tg.on) {
       const c = readTg();
@@ -6601,6 +6865,8 @@ export interface Peer {
   tg?: TgConfig;
   tgReady?: boolean; // it can talk to the bot
   tag?: string; // what it last sent, so it can answer "unchanged"
+  machine?: { cpu: number; mem: number }; // its CPU and memory, for Telegram's overview
+  usage?: { label: string; pct: number; resets: string }[]; // its Claude account's limits
 }
 export const peers = new Map<string, Peer>(); // by address
 /** This machine on the tailnet: its name, address and Tailscale user. */
@@ -6706,7 +6972,8 @@ export function peerState(local: Session[], now: number): { body: Uint8Array; ta
     if (st) prs[`${pr.repo}#${pr.number}`] = st;
   }
   const tgc = readTg();
-  const text = `{"proto":${PEER_PROTO},"host":${JSON.stringify(selfHost())},"tgReady":${!!tgc.token && tgWanted},"tg":${JSON.stringify(tgc.at ? tgc : null)},"prs":${JSON.stringify(prs)},"sessions":${encodeSessions(local, now)}}`;
+  const ws = webState([], now);
+  const text = `{"proto":${PEER_PROTO},"host":${JSON.stringify(selfHost())},"machine":${JSON.stringify({ cpu: ws.machine.cpu, mem: ws.machine.mem })},"usage":${JSON.stringify(ws.account?.limits ?? null)},"tgReady":${!!tgc.token && tgWanted},"tg":${JSON.stringify(tgc.at ? tgc : null)},"prs":${JSON.stringify(prs)},"sessions":${encodeSessions(local, now)}}`;
   peerPayload = { at: now, body: Bun.gzipSync(new TextEncoder().encode(text)), tag: `"${Bun.hash(text).toString(36)}"` };
   return peerPayload;
 }
@@ -6755,6 +7022,8 @@ async function fetchPeer(p: Peer) {
     p.sessions = sessions;
     p.tg = j.tg && typeof j.tg === "object" ? j.tg : undefined;
     p.tgReady = j.tgReady === true;
+    p.machine = j.machine && typeof j.machine.cpu === "number" ? { cpu: j.machine.cpu, mem: Number(j.machine.mem) || 0 } : undefined;
+    p.usage = Array.isArray(j.usage) ? j.usage.filter((l: any) => typeof l?.label === "string" && typeof l?.pct === "number").map((l: any) => ({ label: safeLine(l.label).slice(0, 20), pct: l.pct, resets: typeof l.resets === "string" ? safeLine(l.resets).slice(0, 40) : "" })) : undefined;
     // Their pull requests' states, for the rows; this machine's own reads win for a PR both have.
     for (const [key, st] of Object.entries(j.prs ?? {})) if (!prState.get(key)?.state || prState.get(key)!.at < Date.now() - 60_000) prState.set(key, { at: Date.now() - 30_000, state: st as PrState });
     // The newest Telegram pairing wins, so pairing (or unpairing) on any machine reaches all of them.
@@ -6799,6 +7068,185 @@ async function sendToPeer(s: Session, text: string): Promise<{ ok: boolean; via?
   } catch {
     return { ok: false, error: `could not reach fleet on ${s.remote!.host}` };
   }
+}
+
+// ───────────────────────── pictures ─────────────────────────
+// Fleet can draw its own screen as a PNG, for Telegram: the frame it would show, in the unscii-16 bitmap font
+// (8 by 16 pixels, by viznut, public domain: http://viznut.fi/unscii/), each pixel doubled so it stays sharp.
+
+const FONT_B64 = "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";
+let font: Map<number, Uint8Array> | undefined;
+// Characters the screen uses that unscii has no glyph for, drawn as the nearest one it has.
+const FONT_STANDINS: Record<string, string> = { "↻": "o", "⇡": "↑", "⏳": "◐", "✗": "×", "✦": "◆", "❯": ">", "␣": "_", "⎇": "Y", "↩": "<" };
+/** The state marks drawn as true shapes: the font's circles and diamonds are too narrow at this size to tell from a 0. */
+const SHAPES: Record<string, (dx: number, dy: number, d: number) => boolean> = {
+  "●": (_x, _y, d) => d <= 3.7,
+  "○": (_x, _y, d) => d <= 3.7 && d >= 2.4,
+  "◐": (dx, _y, d) => d <= 3.7 && (d >= 2.4 || dx < 0),
+  "◑": (dx, _y, d) => d <= 3.7 && (d >= 2.4 || dx > 0),
+  "◆": (dx, dy) => Math.abs(dx) + Math.abs(dy) <= 4,
+  "◇": (dx, dy) => Math.abs(dx) + Math.abs(dy) <= 4 && Math.abs(dx) + Math.abs(dy) >= 2.6,
+  "▲": (dx, dy) => dy >= -3.5 && dy <= 3.5 && Math.abs(dx) <= (dy + 3.5) / 2 + 0.3,
+};
+const shapeGlyphs = new Map<string, Uint8Array>();
+function shapeOf(ch: string): Uint8Array | undefined {
+  const test = SHAPES[ch];
+  if (!test) return undefined;
+  let g = shapeGlyphs.get(ch);
+  if (!g) {
+    g = new Uint8Array(16);
+    for (let y = 0; y < 16; y++)
+      for (let x = 0; x < 8; x++) {
+        const dx = x + 0.5 - 4;
+        const dy = y + 0.5 - 8.5;
+        if (test(dx, dy, Math.hypot(dx, dy))) g[y] |= 0x80 >> x;
+      }
+    shapeGlyphs.set(ch, g);
+  }
+  return g;
+}
+function glyphOf(ch: string): Uint8Array | undefined {
+  const shape = shapeOf(ch);
+  if (shape) return shape;
+  if (!font) {
+    font = new Map();
+    const raw = inflateSync(Buffer.from(FONT_B64, "base64"));
+    for (let i = 0; i + 19 <= raw.length; i += 19) font.set((raw[i] << 16) | (raw[i + 1] << 8) | raw[i + 2], raw.subarray(i + 3, i + 19));
+  }
+  return font.get((FONT_STANDINS[ch] ?? ch).codePointAt(0)!) ?? font.get(0x3f);
+}
+/** A PNG of `w` by `h` pixels from RGB bytes, row by row. */
+export function pngOf(w: number, h: number, rgb: Uint8Array): Buffer {
+  const raw = Buffer.alloc((w * 3 + 1) * h);
+  for (let y = 0; y < h; y++) raw.set(rgb.subarray(y * w * 3, (y + 1) * w * 3), y * (w * 3 + 1) + 1);
+  const table = Array.from({ length: 256 }, (_, k) => {
+    let c = k;
+    for (let i = 0; i < 8; i++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  });
+  const crc = (b: Buffer) => {
+    let c = 0xffffffff;
+    for (const x of b) c = table[(c ^ x) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type: string, data: Buffer) => {
+    const body = Buffer.concat([Buffer.from(type), data]);
+    const out = Buffer.alloc(body.length + 8);
+    out.writeUInt32BE(data.length, 0);
+    body.copy(out, 4);
+    out.writeUInt32BE(crc(body), body.length + 4);
+    return out;
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0);
+  ihdr.writeUInt32BE(h, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 2;
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(raw, { level: 6 })), chunk("IEND", Buffer.alloc(0))]);
+}
+export interface Cell {
+  ch: string;
+  fg: RGB;
+  bg?: RGB;
+  bold: boolean;
+}
+const PICTURE_BG: RGB = [13, 17, 23];
+/** One screen row's characters with their colours, from the escape codes fleet writes. */
+export function cellsOf(line: string): Cell[] {
+  const cells: Cell[] = [];
+  const cps = [...line];
+  let fgc: RGB = C.text;
+  let bgc: RGB | undefined;
+  let b = false;
+  for (let i = 0; i < cps.length; i++) {
+    const ch = cps[i];
+    if (ch !== "\x1b") {
+      cells.push({ ch, fg: fgc, bg: bgc, bold: b });
+      continue;
+    }
+    if (cps[i + 1] === "]") {
+      // A link or a title: skipped to its end (BEL, or ESC \).
+      let j = i + 2;
+      while (j < cps.length && cps[j] !== "\x07" && !(cps[j] === "\x1b" && cps[j + 1] === "\\")) j++;
+      i = cps[j] === "\x07" ? j : j + 1;
+      continue;
+    }
+    if (cps[i + 1] !== "[") {
+      i++;
+      continue;
+    }
+    let j = i + 2;
+    while (j < cps.length && !/[A-Za-z]/.test(cps[j])) j++;
+    if (cps[j] === "m") {
+      const p = cps.slice(i + 2, j).join("").split(";").map((x) => Number(x) || 0);
+      for (let k = 0; k < p.length; k++) {
+        const v = p[k];
+        if (v === 0) [fgc, bgc, b] = [C.text, undefined, false];
+        else if (v === 1) b = true;
+        else if (v === 22) b = false;
+        else if (v === 39) fgc = C.text;
+        else if (v === 49) bgc = undefined;
+        else if ((v === 38 || v === 48) && p[k + 1] === 2) {
+          const c: RGB = [p[k + 2], p[k + 3], p[k + 4]];
+          if (v === 38) fgc = c;
+          else bgc = c;
+          k += 4;
+        }
+      }
+    }
+    i = j;
+  }
+  return cells;
+}
+/** Screen rows drawn as a PNG, `cols` characters wide. */
+export function pictureOf(lines: string[], cols: number, scale = 2): Buffer {
+  const CW = 8 * scale;
+  const CH = 16 * scale;
+  const W = cols * CW;
+  const H = Math.max(1, lines.length) * CH;
+  const px = new Uint8Array(W * H * 3);
+  for (let i = 0; i < W * H; i++) px.set(PICTURE_BG, i * 3);
+  const fill = (x0: number, y0: number, w: number, h: number, c: RGB) => {
+    for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) px.set(c, (y * W + x) * 3);
+  };
+  lines.forEach((line, row) => {
+    cellsOf(line)
+      .slice(0, cols)
+      .forEach((cell, col) => {
+        const x0 = col * CW;
+        const y0 = row * CH;
+        if (cell.bg) fill(x0, y0, CW, CH, cell.bg);
+        if (cell.ch === " ") return;
+        const g = glyphOf(cell.ch);
+        if (!g) return;
+        for (let y = 0; y < 16; y++)
+          for (let x = 0; x < 8; x++) {
+            const on = (g[y] & (0x80 >> x)) !== 0 || (cell.bold && x > 0 && (g[y] & (0x80 >> (x - 1))) !== 0);
+            if (on) fill(x0 + x * scale, y0 + y * scale, scale, scale, cell.fg);
+          }
+      });
+  });
+  return pngOf(W, H, px);
+}
+/** The fleet as a picture: every session, or one focused as a click on it would, in the detail view. */
+export function fleetPicture(sessions: Session[], now: number, focus?: string, cols = 110, rows = 44): Buffer {
+  const was = { focusSid, mode: opt.mode };
+  focusSid = focus ?? null;
+  opt.mode = "detail";
+  try {
+    const lines = render(sessions, cols, rows, now);
+    while (lines.length > 1 && !lines[lines.length - 2]?.replace(/\x1b\[[0-9;]*m/g, "").trim()) lines.splice(lines.length - 2, 1); // no empty rows above the buttons
+    return pictureOf(lines.slice(0, -1), cols); // and no buttons
+  } finally {
+    focusSid = was.focusSid;
+    opt.mode = was.mode;
+  }
+}
+/** Just the top of the screen: this machine, its usage and the fleet's activity, as a picture. */
+export function headerPicture(now: number, cols = 110): Buffer {
+  const lines = render([], cols, 14, now);
+  const end = lines.findIndex((l, i) => i > 2 && /─{6}/.test(l.replace(/\x1b\[[0-9;]*m/g, "")));
+  return pictureOf(lines.slice(0, end > 0 ? end + 1 : 8), cols);
 }
 
 // ───────────────────────── legend ─────────────────────────
@@ -7010,8 +7458,10 @@ function refresh() {
     const told = tgEvents(sessions, asked, stalled); // always, so what changed while another fleet held the bot is not news later
     tg.paired = !!readTg().chat;
     if (tg.on && tg.paired) {
-      for (const [text, sid, asking] of told) void tgSay(text, sid, asking);
+      const muted = readTg().muted ?? {};
+      for (const [text, sid, asking] of told) if (!((muted[sid] ?? 0) > Date.now())) void tgSay(text, sid, asking);
       tgSettle(new Set(asks.map(([sid]) => sid)));
+      tgSweep();
     }
   }
   if (opt.bell && !opt.once) process.stdout.write("\x07".repeat(rings));
