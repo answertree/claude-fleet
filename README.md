@@ -185,6 +185,16 @@ Everything the detail view shows is a command away, and Telegram lists them in i
 - `/usage`: each machine's Claude limits as bars, and a picture of this machine's gauges.
 - `/screen`, or `/screen <name>`: a picture of the fleet, or of one session, as the detail view draws it. Fleet draws the picture itself (in the public-domain unscii font), so it needs nothing installed, on any machine.
 
+More, from the same bot:
+
+- **📺 Screen** (on a question, and on every session's card): a picture of what the session's own terminal shows right now, with a button for each numbered choice on it (`1. Yes`, `2. …`, `3. No`), plus Enter and Esc. Tapping one presses that key in the session, so you can answer a permission prompt or a multiple-choice question from your phone. Like messages, it needs the session to be a background session or in tmux.
+- **⎋ Interrupt** on a session's card presses Esc in it (after you confirm), which stops what it is doing.
+- `/new <what to do>` starts a background Claude session: pick a folder (any your sessions run in, on any machine) and it runs `claude --bg` there. Another machine only starts one in a folder where it already has a session.
+- **Usage alerts**: a message when any machine's Claude account passes 80% and 95% of a limit, once per limit window.
+- `/live` pins an overview that updates itself every minute; `/live` again takes it away.
+- **Morning digest** at 08:00: what merged, went live, finished, failed or got stuck since the last one, what is waiting now, and usage. `/digest` sends one now; `/digest 7:30` moves it; `/digest off`.
+- `/quiet 23:00-07:00` holds everything but “needs you” during those hours; it shows in the digest instead. `/quiet off` ends it. Mutes, quiet hours, the digest time and the live message are shared by all your machines, like the pairing.
+
 Menus, cards, pictures and confirmations delete themselves ten minutes after you last used them, with the command that asked for them, so the chat stays tidy; notifications stay. The pairing is kept in `~/.config/claude-fleet/telegram.json`, so the bot carries on by itself after fleet restarts.
 
 Setting it up: in Telegram, open @BotFather, send `/newbot` and follow it; it gives you a token. Press `t` in fleet, paste the token and press Enter (it is shown as dots, and kept in `~/.config/claude-fleet/telegram.json`, readable only by you). Fleet then shows a QR code: scan it with your phone, or open the link, and tap Start. Only the chat that opens that link is paired; the bot ignores everyone else. On the `t` screen afterwards, `s` sends a test message and `x` unpairs and forgets the token.

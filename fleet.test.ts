@@ -5158,6 +5158,72 @@ describe("key t: Telegram", () => {
     expect(cells.map((x) => [x.ch, x.fg, x.bold])).toEqual([["a", [1, 2, 3], false], ["b", F.C.text, true], ["c", F.C.text, false]]);
   });
 
+  test("quiet hours wrap past midnight, and a prompt's numbered choices become buttons", () => {
+    const at = (h: number, m = 0) => new Date(2026, 9, 15, h, m).getTime();
+    const q = { from: "23:00", to: "07:00" };
+    expect([F.inQuiet(q, at(23, 30)), F.inQuiet(q, at(3)), F.inQuiet(q, at(7)), F.inQuiet(q, at(12)), F.inQuiet(undefined, at(3))]).toEqual([true, true, false, false, false]);
+    expect(F.inQuiet({ from: "13:00", to: "14:00" }, at(13, 30))).toBe(true);
+    const screen = ["Bash command", "  npm test", "", " Do you want to proceed?", " ❯ 1. Yes", "   2. Yes, and don't ask again for npm test", "   3. No, and tell Claude what to do differently (esc)", ""].join("\n");
+    expect(F.screenOptions(screen).map((o) => o.key + " " + o.label)).toEqual(["1 Yes", "2 Yes, and don't ask again for npm test", "3 No, and tell Claude what to do differently (esc)"]);
+    expect(F.screenOptions("❯ ")).toEqual([]);
+  });
+
+  test("a tapped choice is pressed in the session, and /new starts one where you pick", async () => {
+    F.writeTg({ token: TOKEN, chat: 42, user: 7, bot: "my_fleet_bot" });
+    F.tg.getSessions = () => [session];
+    const pressed: [string, string][] = [];
+    const started: [string, string][] = [];
+    F.web.keys = async (s, key) => (pressed.push([s.sid, key]), { ok: true });
+    F.web.start = async (cwd, prompt) => (started.push([cwd, prompt]), { ok: true, id: "abc12345" });
+    try {
+      calls.length = 0;
+      await F.tgHandle({ callback_query: { id: "q4", data: "k:s1:1", from: { id: 7 }, message: { message_id: 90, chat: { id: 42 } } } });
+      expect(pressed).toEqual([["s1", "1"]]);
+      expect(calls.find(([m]) => m === "answerCallbackQuery")![1].text).toBe("✓ pressed 1 in checkout flow");
+      calls.length = 0;
+      await F.tgHandle({ message: { message_id: 91, text: "/new fix the refund test", chat: { id: 42 }, from: { id: 7 } } });
+      const picker = calls.find(([m]) => m === "sendMessage")![1];
+      const pick = picker.reply_markup.inline_keyboard[0][0];
+      expect(pick.text).toBe("📁 x");
+      await F.tgHandle({ callback_query: { id: "q5", data: pick.callback_data, from: { id: 7 }, message: { message_id: 92, chat: { id: 42 } } } });
+      expect(started).toEqual([["/x", "fix the refund test"]]);
+      expect(calls.filter(([m]) => m === "editMessageText").at(-1)![1].text).toContain("Started <code>abc12345</code>");
+      // A pick is used once.
+      await F.tgHandle({ callback_query: { id: "q6", data: pick.callback_data, from: { id: 7 }, message: { message_id: 92, chat: { id: 42 } } } });
+      expect(started.length).toBe(1);
+    } finally {
+      delete F.web.keys;
+      delete F.web.start;
+    }
+  });
+
+  test("the digest comes once at its time, and usage alerts once per limit, never for what was already high", async () => {
+    const now = Date.now();
+    const hhmm = new Date(now - 60_000).toTimeString().slice(0, 5);
+    F.writeTg({ token: TOKEN, chat: 42, user: 7, bot: "my_fleet_bot", digest: { at: hhmm } });
+    F.tg.getSessions = () => [];
+    F.tgLog("🎉 shop: #412 merged", now - 3600_000);
+    calls.length = 0;
+    await F.tgTick([], now, []);
+    await Bun.sleep(50);
+    const digest = calls.filter(([m, b]) => m === "sendMessage" && String(b.text).includes("☀️"));
+    expect(digest.length).toBe(1);
+    expect(digest[0][1].text).toContain("🎉 1 merged");
+    await F.tgTick([], now + 1000, []);
+    await Bun.sleep(50);
+    expect(calls.filter(([m, b]) => m === "sendMessage" && String(b.text).includes("☀️")).length).toBe(1);
+
+    F.peers.set("box", { host: "box", ip: "1.2.3.4", addr: "1.2.3.4:4777", sessions: [], at: now, fresh: false, busy: false, usage: [{ label: "5-hour", pct: 90, resets: "in 1h", resetsAt: now + 3600_000 }] });
+    try {
+      expect(F.usageAlerts(now)).toEqual([]); // already high when first seen
+      F.peers.get("box")!.usage = [{ label: "weekly", pct: 82, resets: "Mon", resetsAt: now + 86_400_000 }];
+      expect(F.usageAlerts(now)).toEqual(["🟠 box: weekly usage at 82% · Mon"]);
+      expect(F.usageAlerts(now)).toEqual([]);
+    } finally {
+      F.peers.clear();
+    }
+  });
+
   test("the t screen never draws the token, even while it is being pasted", () => {
     F.writeTg({});
     F.tg.entry = "";
@@ -5224,6 +5290,8 @@ describe("every machine", () => {
       expect((await fetch("http://127.0.0.1:5077/peer/state", { headers: { "if-none-match": first.headers.get("etag")! } })).status).toBe(304);
       expect([j.proto, j.sessions.map((s: any) => s.name)]).toEqual([F.PEER_PROTO, ["shop"]]); // never the sessions it got from others
       expect((await fetch("http://127.0.0.1:5077/peer/send", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sid: elsewhere.sid, text: "x" }) })).status).toBe(404);
+      // A new session only in a folder where one already runs on this machine, never anywhere a request names.
+      expect((await fetch("http://127.0.0.1:5077/peer/new", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: "/etc", prompt: "x" }) })).status).toBe(404);
 
       // This fleet, seen from another: it finds the machine, reads its sessions, and says which machine each is on.
       F.tailnet.ip = "100.64.0.9";

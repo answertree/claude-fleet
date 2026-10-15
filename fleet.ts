@@ -5783,7 +5783,7 @@ export function webState(sessions: Session[], now: number) {
     counts,
     hidden: all.length - shown.length,
     machine: { cpu: Math.round(machine.cpu), mem: Math.round((machine.memUsed / machine.memTotal) * 100), memText: `${gb(machine.memUsed)} of ${gb(machine.memTotal)}`, load: Number(machine.load.toFixed(1)) },
-    account: acct ? { limits: acct.limits.map((l) => ({ label: l.label, pct: Math.round(l.pct), resets: l.resetsAt ? (l.resetsAt - now < 24 * 3600_000 ? `resets in ${ago(l.resetsAt - now)}` : `resets ${new Date(l.resetsAt).toLocaleString("en-GB", { weekday: "short", hour: "2-digit", minute: "2-digit" })}`) : "" })), reason: acct.reason || undefined } : undefined,
+    account: acct ? { limits: acct.limits.map((l) => ({ label: l.label, pct: Math.round(l.pct), resetsAt: l.resetsAt, resets: l.resetsAt ? (l.resetsAt - now < 24 * 3600_000 ? `resets in ${ago(l.resetsAt - now)}` : `resets ${new Date(l.resetsAt).toLocaleString("en-GB", { weekday: "short", hour: "2-digit", minute: "2-digit" })}`) : "" })), reason: acct.reason || undefined } : undefined,
     sessions: shown.map((v) => {
       const s = v.s;
       const f = v.facts;
@@ -5962,7 +5962,7 @@ tick(); setInterval(tick, 2000);
 </script></body></html>`;
 
 /** The web server, once key w has started it: where it listens and the link to open. */
-export const web: { url?: string; host?: string; onTailnet?: boolean; server?: { stop: () => void }; error?: string; send?: typeof sendToSession; shared?: boolean; retake?: () => void; older?: boolean } = {};
+export const web: { url?: string; host?: string; onTailnet?: boolean; server?: { stop: () => void }; error?: string; send?: typeof sendToSession; keys?: typeof keysToSession; peek?: typeof peekSession; start?: typeof startSession; shared?: boolean; retake?: () => void; older?: boolean } = {};
 const sameToken = (a: string, b: string) => a.length === b.length && crypto.timingSafeEqual ? (() => { try { return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b)); } catch { return false; } })() : a === b;
 /** This Mac's Tailscale IPv4 address, when it has one. */
 function tailnetAddress(): string | undefined {
@@ -6082,48 +6082,101 @@ function pasteInto(server: string[], pane: string, text: string): boolean {
   return paste && spawnSync(tmuxCmd(), [...server, "send-keys", "-t", pane, "Enter"], { timeout: 3000 }).status === 0;
 }
 let sendChain: Promise<unknown> = Promise.resolve();
+type Reach = { ok: boolean; via?: string; error?: string; screen?: string; id?: string };
 /**
- * Type a message into a session, as if you had typed it there. A background session is opened with `claude attach` in
- * a hidden tmux, the message pasted and sent, and the attach closed (the session keeps running). A session running in
- * a tmux pane gets it pasted into that pane. Anything else cannot be reached. One message at a time.
+ * Run `fn` with a session's terminal within reach, one session at a time. A background session is opened with
+ * `claude attach` in a hidden tmux (and closed after; the session keeps running); a session running in a tmux pane
+ * is reached in that pane. Anything else cannot be reached.
  */
-export function sendToSession(s: Session, raw: string): Promise<{ ok: boolean; via?: string; error?: string }> {
-  const text = cleanMessage(raw);
-  const run = async () => {
-    if (!text) return { ok: false, error: "nothing to send" };
-    if (s.remote) return sendToPeer(s, text); // its own machine's fleet types it in
-    if (process.platform === "win32") return { ok: false, error: "sending to a session needs tmux, so it does not work on Windows" };
-    if (spawnSync(tmuxCmd(), ["-V"], { timeout: 3000 }).status !== 0) return { ok: false, error: "sending needs tmux, which is not installed" };
+function withSession(s: Session, fn: (server: string[], pane: string, via: string) => Promise<Reach> | Reach): Promise<Reach> {
+  const run = async (): Promise<Reach> => {
+    if (process.platform === "win32") return { ok: false, error: "reaching a session needs tmux, so it does not work on Windows" };
+    if (spawnSync(tmuxCmd(), ["-V"], { timeout: 3000 }).status !== 0) return { ok: false, error: "reaching a session needs tmux, which is not installed" };
     if (s.jobId) {
       const server = ["-L", `fleet-send-${process.pid}`];
       spawnSync(tmuxCmd(), [...server, "kill-server"], { timeout: 3000 });
       const attach = process.env.FLEET_ATTACH_CMD || "claude";
       if (spawnSync(tmuxCmd(), [...server, "new-session", "-d", "-x", "120", "-y", "40", attach, "attach", s.jobId], { timeout: 5000 }).status !== 0) return { ok: false, error: "could not open the session" };
       try {
-        // Ready once the input line is drawn and the screen has stopped changing.
+        // Ready once it has drawn its prompt (the input line, or a choice) and the screen has stopped changing.
         let last = "";
         let ready = false;
         for (let i = 0; i < 60 && !ready; i++) {
           await pause(250);
           const screen = spawnSync(tmuxCmd(), [...server, "capture-pane", "-p"], { encoding: "utf8", timeout: 3000 }).stdout ?? "";
-          ready = /^❯/m.test(screen) && screen === last;
+          ready = screen.includes("❯") && screen === last;
           last = screen;
         }
         if (!ready) return { ok: false, error: "the session did not open in time" };
-        if (!pasteInto(server, "0", text)) return { ok: false, error: "could not type into the session" };
-        await pause(1000); // let it take the message before the attach closes
-        return { ok: true, via: "attach" };
+        return await fn(server, "0", "attach");
       } finally {
         spawnSync(tmuxCmd(), [...server, "kill-server"], { timeout: 3000 });
       }
     }
     const pane = paneOf(s.pid);
     if (!pane) return { ok: false, error: "this session is not a background session or in tmux, so it cannot be reached from here" };
-    return pasteInto([], pane, text) ? { ok: true, via: "pane" } : { ok: false, error: "could not type into its tmux pane" };
+    return fn([], pane, "pane");
   };
   const next = sendChain.then(run, run);
   sendChain = next.catch(() => {});
   return next;
+}
+/** Type a message into a session, as if you had typed it there, on whichever machine it is on. */
+export function sendToSession(s: Session, raw: string): Promise<Reach> {
+  const text = cleanMessage(raw);
+  if (!text) return Promise.resolve({ ok: false, error: "nothing to send" });
+  if (s.remote) return peerCall(s, "/peer/send", { sid: s.sid, text }); // its own machine's fleet types it in
+  return withSession(s, async (server, pane, via) => {
+    if (!pasteInto(server, pane, text)) return { ok: false, error: "could not type into the session" };
+    if (via === "attach") await pause(1000); // let it take the message before the attach closes
+    return { ok: true, via };
+  });
+}
+/** The keys a button can press in a session: a numbered choice, Enter, or Esc (which stops what it is doing). */
+export const SESSION_KEYS: Record<string, string> = { "1": "1", "2": "2", "3": "3", "4": "4", "5": "5", "6": "6", "7": "7", "8": "8", "9": "9", E: "Enter", X: "Escape" };
+export function keysToSession(s: Session, key: string): Promise<Reach> {
+  const k = SESSION_KEYS[key];
+  if (!k) return Promise.resolve({ ok: false, error: "not a key fleet presses" });
+  if (s.remote) return peerCall(s, "/peer/keys", { sid: s.sid, key });
+  return withSession(s, async (server, pane, via) => {
+    const ok = spawnSync(tmuxCmd(), [...server, "send-keys", "-t", pane, k], { timeout: 3000 }).status === 0;
+    if (via === "attach") await pause(800);
+    return ok ? { ok, via } : { ok, error: "could not press the key" };
+  });
+}
+/** What a session's own terminal shows right now, colours and all. */
+export function peekSession(s: Session): Promise<Reach> {
+  if (s.remote) return peerCall(s, "/peer/peek", { sid: s.sid });
+  return withSession(s, (server, pane, via) => {
+    const screen = spawnSync(tmuxCmd(), [...server, "capture-pane", "-p", "-e", "-t", pane], { encoding: "utf8", timeout: 3000 }).stdout ?? "";
+    return { ok: !!screen.trim(), via, screen: screen.slice(-60_000), error: screen.trim() ? undefined : "its screen was empty" };
+  });
+}
+/** The numbered choices a prompt on the screen offers ("1. Yes", "❯ 2. No"), for buttons. */
+export function screenOptions(screen: string): { key: string; label: string }[] {
+  const lines = screen.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").split("\n").slice(-30);
+  const out: { key: string; label: string }[] = [];
+  for (const line of lines) {
+    const m = /^[\s│┃|]*(?:[❯>›▶]\s*)?([1-9])[.)]\s+(\S.{0,58}?)\s*[│┃|]?\s*$/.exec(line);
+    if (m && !out.some((o) => o.key === m[1])) out.push({ key: m[1], label: safeLine(m[2]).trim() });
+  }
+  return out;
+}
+/** Start a background Claude session in `cwd`, as `claude --bg` does; its id, when it started. */
+export async function startSession(cwd: string, prompt: string): Promise<Reach> {
+  const text = cleanMessage(prompt);
+  if (!text) return { ok: false, error: "nothing to ask" };
+  try {
+    const p = Bun.spawn([process.env.FLEET_ATTACH_CMD || "claude", "--bg", text], { cwd, stdout: "pipe", stderr: "pipe" });
+    const timer = setTimeout(() => p.kill(), 30_000);
+    const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
+    clearTimeout(timer);
+    const id = /claude attach (\S+)/.exec(out)?.[1];
+    if ((await p.exited) === 0 && id) return { ok: true, id };
+    return { ok: false, error: safeLine((err || out).trim().split("\n")[0] || "claude --bg did not start").slice(0, 160) };
+  } catch {
+    return { ok: false, error: "could not run claude" };
+  }
 }
 
 /** Start serving the page (once). Every request must carry the secret; anything but the page and its data is a 404. */
@@ -6148,7 +6201,7 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
         async fetch(req, srv) {
           const url = new URL(req.url);
           // Another of your machines: allowed when Tailscale says the request comes from your own Tailscale user.
-          if (url.pathname === "/peer/state" || url.pathname === "/peer/send") {
+          if (url.pathname.startsWith("/peer/")) {
             const ip = (srv.requestIP(req)?.address ?? "").replace(/^::ffff:/, "");
             if (!ip || !(await peerNet.trust(ip))) return new Response("not one of your machines", { status: 403, headers });
             const local = getSessions().filter((x) => !x.remote);
@@ -6158,11 +6211,18 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
               if (req.headers.get("if-none-match") === st.tag) return new Response(null, { status: 304, headers: { ...headers, etag: st.tag } });
               return new Response(st.body, { headers: { ...headers, "content-type": "application/json", "content-encoding": "gzip", etag: st.tag } });
             }
-            if (url.pathname === "/peer/send" && req.method === "POST") {
+            if (req.method === "POST") {
               const body: any = await req.json().catch(() => ({}));
+              // A new session, only in a folder where one already runs here: never anywhere a request names.
+              if (url.pathname === "/peer/new") {
+                if (typeof body?.cwd !== "string" || typeof body?.prompt !== "string" || !local.some((x) => x.cwd === body.cwd)) return Response.json({ ok: false, error: "not a folder fleet knows here" }, { status: 404, headers });
+                return Response.json(await (web.start ?? startSession)(body.cwd, body.prompt), { headers });
+              }
               const target = local.find((x) => x.sid === body?.sid);
-              if (!target || typeof body.text !== "string") return Response.json({ ok: false, error: "no such session" }, { status: 404, headers });
-              return Response.json(await (web.send ?? sendToSession)(target, body.text), { headers });
+              if (!target) return Response.json({ ok: false, error: "no such session" }, { status: 404, headers });
+              if (url.pathname === "/peer/send" && typeof body.text === "string") return Response.json(await (web.send ?? sendToSession)(target, body.text), { headers });
+              if (url.pathname === "/peer/keys" && typeof body.key === "string") return Response.json(await (web.keys ?? keysToSession)(target, body.key), { headers });
+              if (url.pathname === "/peer/peek") return Response.json(await (web.peek ?? peekSession)(target), { headers });
             }
             return new Response("not allowed", { status: 405, headers });
           }
@@ -6263,6 +6323,9 @@ export interface TgConfig {
   pairCode?: string; // the one-time code in the pairing link, until a chat uses it
   at?: number; // when it last changed: the newest wins across your machines
   muted?: Record<string, number>; // sessions you silenced, until when
+  quiet?: { from: string; to: string }; // quiet hours: only "needs you" comes through
+  digest?: { at: string; last?: number }; // the digest's time ("08:00", or "off") and when it was last sent
+  live?: { id: number }; // the pinned overview that keeps itself up to date
 }
 const fleetConfigDir = () => path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "claude-fleet");
 export const tgConfigPath = () => process.env.FLEET_TELEGRAM_FILE || path.join(fleetConfigDir(), "telegram.json");
@@ -6326,7 +6389,7 @@ export async function tgSay(text: string, sid?: string, asking = false): Promise
   const c = readTg();
   if (!c.token || !c.chat) return false;
   // A question carries a Reply button; it is taken off again once the session stops waiting.
-  const markup = sid ? { reply_markup: { inline_keyboard: [[...(asking ? [{ text: "↩ Reply", callback_data: "reply" }] : []), { text: "ℹ️ Details", callback_data: `d:${sid}` }, { text: "🔕 Mute", callback_data: `z:${sid}` }]] } } : {};
+  const markup = sid ? { reply_markup: { inline_keyboard: [[...(asking ? [{ text: "↩ Reply", callback_data: "reply" }, { text: "📺 Screen", callback_data: `w:${sid}` }] : []), { text: "ℹ️ Details", callback_data: `d:${sid}` }, { text: "🔕 Mute", callback_data: `z:${sid}` }]] } } : {};
   const r = await tgCall(c.token, "sendMessage", { chat_id: c.chat, text: text.slice(0, 4000), disable_web_page_preview: true, ...markup });
   if (!r.ok) tg.status = r.error ?? "";
   if (r.ok && sid && typeof r.result?.message_id === "number") {
@@ -6388,6 +6451,26 @@ export async function tgHandle(update: any): Promise<void> {
   if (cmd === "menu") return void (await tgSend(c, { text: "◆ <b>Claude Fleet</b> — what would you like to see?", markup: tgMenuMarkup() }, undefined, true));
   if (sectionKeys.has(cmd)) return void (await tgSend(c, tgSection(cmd, arg), undefined, true));
   if (cmd === "usage") return void (await tgUsage(c));
+  if (cmd === "live") return void (await tgLive(c));
+  if (cmd === "new") return void (await tgSend(c, tgNew(c, arg), undefined, true));
+  if (cmd === "digest") {
+    if (!arg) return void (await tgSend(c, { text: tgDigest(Math.min(readTg().digest?.last || Infinity, clock() - 16 * 3600_000)) }, undefined, true));
+    const at = arg.toLowerCase() === "off" ? "off" : minutesOf(arg) !== undefined ? arg.padStart(5, "0") : undefined;
+    if (!at) return void (await tgSend(c, { text: "Say a time, like <code>/digest 7:30</code>, or <code>/digest off</code>." }));
+    writeTg({ ...readTg(), digest: { at, last: readTg().digest?.last } });
+    return void (await tgSend(c, { text: at === "off" ? "No morning digest." : `The digest comes at ${at} each day.` }));
+  }
+  if (cmd === "quiet") {
+    if (!arg) return void (await tgSend(c, { text: readTg().quiet ? `Quiet hours ${readTg().quiet!.from}–${readTg().quiet!.to}: only “needs you” comes through; the rest waits for the digest. <code>/quiet off</code> to end them.` : "No quiet hours. <code>/quiet 23:00-07:00</code> holds everything but “needs you” overnight." }));
+    if (arg.toLowerCase() === "off") {
+      writeTg({ ...readTg(), quiet: undefined });
+      return void (await tgSend(c, { text: "Quiet hours off." }));
+    }
+    const m = /^(\d{1,2}:?\d{2})\s*[-–to ]+\s*(\d{1,2}:?\d{2})$/.exec(arg);
+    if (!m || minutesOf(m[1]) === undefined || minutesOf(m[2]) === undefined) return void (await tgSend(c, { text: "Say it like <code>/quiet 23:00-07:00</code>." }));
+    writeTg({ ...readTg(), quiet: { from: m[1], to: m[2] } });
+    return void (await tgSend(c, { text: `Quiet from ${m[1]} to ${m[2]}: only “needs you” comes through; the rest waits for the digest.` }));
+  }
   if (cmd === "screen") {
     const s = arg ? tg.getSessions().find((x) => x.name.toLowerCase().includes(arg.toLowerCase())) : undefined;
     return void (await tgPicture(c, s?.sid));
@@ -6415,6 +6498,10 @@ export const TG_COMMANDS = [
     { key: "machines", about: "each machine's load" },
   ].map((x) => ({ command: x.key, description: x.about })),
   { command: "session", description: "everything about one session: /session <name>" },
+  { command: "new", description: "start a session: /new <what to do>, then pick where" },
+  { command: "live", description: "pin an overview that keeps itself up to date" },
+  { command: "digest", description: "what happened lately; /digest 7:30 sets the morning time" },
+  { command: "quiet", description: "quiet hours: /quiet 23:00-07:00, or off" },
   { command: "usage", description: "your Claude usage on each machine" },
   { command: "screen", description: "a picture of the fleet, or /screen <session>" },
   { command: "help", description: "what I can do" },
@@ -6563,7 +6650,8 @@ export function tgCard(sid: string, now = clock()): TgView | undefined {
   const markup = {
     inline_keyboard: [
       [{ text: s.state === "needs" ? "↩ Answer" : "✍️ Message", callback_data: `r:${sid}` }, { text: "🖼 Picture", callback_data: `p:${sid}` }, { text: "💬 Chat", callback_data: `m:${sid}` }],
-      [{ text: muted ? "🔔 Unmute" : "🔕 Mute 24h", callback_data: `z:${sid}` }, { text: "🔄 Refresh", callback_data: `x:${sid}` }, { text: "⬅ All", callback_data: "L" }],
+      [{ text: "📺 Screen", callback_data: `w:${sid}` }, { text: "⎋ Interrupt", callback_data: `i:${sid}` }, { text: muted ? "🔔 Unmute" : "🔕 Mute 24h", callback_data: `z:${sid}` }],
+      [{ text: "🔄 Refresh", callback_data: `x:${sid}` }, { text: "⬅ All", callback_data: "L" }],
     ],
   };
   let text = lines.join("\n").replace(/\n{3,}/g, "\n\n");
@@ -6580,6 +6668,7 @@ async function tgSend(c: TgConfig, v: TgView, sid?: string, temporary = true) {
 }
 /** Show a view in place of the message a button was on, so the chat does not fill up with menus. */
 async function tgEdit(c: TgConfig, messageId: number, v: TgView) {
+  if (messageId === readTg().live?.id) return void (await tgSend(c, v)); // the pinned overview stays an overview
   const r = await tgCall(c.token!, "editMessageText", { chat_id: c.chat, message_id: messageId, text: v.text, parse_mode: "HTML", disable_web_page_preview: true, ...(v.markup ? { reply_markup: v.markup } : {}) });
   // A notification's text cannot always be edited into a menu (or nothing changed): then send it new.
   if (!r.ok && !/not modified/i.test(r.error ?? "")) await tgSend(c, v);
@@ -6607,10 +6696,11 @@ async function tgPicture(c: TgConfig, sid?: string) {
   if (sid && !s) return void (await tgSend(c, { text: "That session has finished." }));
   await tgPhotoSend(c, fleetPicture(sessions, clock(), sid), s ? tgName(s) : "Claude Fleet", sid);
 }
-async function tgPhotoSend(c: TgConfig, png: Buffer, caption: string, sid?: string) {
+async function tgPhotoSend(c: TgConfig, png: Buffer, caption: string, sid?: string, markup?: unknown) {
   const form = new FormData();
   form.append("chat_id", String(c.chat));
   form.append("caption", caption.slice(0, 1000));
+  if (markup) form.append("reply_markup", JSON.stringify(markup));
   form.append("photo", new Blob([png], { type: "image/png" }), "fleet.png");
   const r = await tgCall(c.token!, "sendPhoto", form, 60_000);
   if (r.ok && sid && typeof r.result?.message_id === "number") rememberTg(r.result.message_id, sid);
@@ -6621,9 +6711,24 @@ async function tgPhotoSend(c: TgConfig, png: Buffer, caption: string, sid?: stri
 async function tgButton(c: TgConfig, q: any) {
   const data = typeof q.data === "string" ? q.data : "";
   const msgId = q.message?.message_id;
-  const [act, sid = typeof msgId === "number" ? tgSent.get(msgId) ?? "" : ""] = data === "reply" ? ["r"] : data.split(":");
+  const [act, sid = typeof msgId === "number" ? tgSent.get(msgId) ?? "" : "", extra = ""] = data === "reply" ? ["r"] : data.split(":");
+  if (act === "n") {
+    await tgCall(c.token!, "answerCallbackQuery", { callback_query_id: q.id });
+    return tgNewPick(c, msgId, sid, extra);
+  }
   const session = sid ? tg.getSessions().find((x) => x.sid === sid) : undefined;
   const gone = !!sid && !session && act !== "L" && act !== "v";
+  if (act === "k" && session) {
+    // A key pressed in the session, as you would at its terminal: a numbered choice, Enter or Esc.
+    const r = await (web.keys ?? keysToSession)(session, extra);
+    await tgCall(c.token!, "answerCallbackQuery", { callback_query_id: q.id, text: r.ok ? `✓ pressed ${extra === "X" ? "Esc" : extra === "E" ? "Enter" : extra} in ${tgName(session)}` : `✗ ${r.error}`.slice(0, 190) });
+    return;
+  }
+  if (act === "I" && session) {
+    const r = await (web.keys ?? keysToSession)(session, "X");
+    await tgCall(c.token!, "answerCallbackQuery", { callback_query_id: q.id, text: r.ok ? `⎋ interrupted ${tgName(session)}` : `✗ ${r.error}`.slice(0, 190) });
+    return tgEdit(c, msgId, tgCard(sid) ?? { text: "That session has finished." });
+  }
   await tgCall(c.token!, "answerCallbackQuery", { callback_query_id: q.id, text: gone ? "That session has finished." : act === "p" || act === "P" ? "Drawing…" : undefined });
   if (gone) return;
   if (act === "L") return tgEdit(c, msgId, tgOverview());
@@ -6633,6 +6738,11 @@ async function tgButton(c: TgConfig, q: any) {
   if (act === "P") return tgPicture(c);
   if (act === "p") return tgPicture(c, sid);
   if (act === "U") return tgUsage(c);
+  if (act === "w") return tgPeek(c, session!);
+  if (act === "i") {
+    // Esc stops what it is doing: asked once more, on the same message.
+    return void (await tgCall(c.token!, "editMessageReplyMarkup", { chat_id: c.chat, message_id: msgId, reply_markup: { inline_keyboard: [[{ text: `⎋ Yes, interrupt ${tgName(session!)}`.slice(0, 60), callback_data: `I:${sid}` }, { text: "Cancel", callback_data: `x:${sid}` }]] } }));
+  }
   if (act === "m") {
     const s = webState(tg.getSessions(), clock()).sessions.find((x) => x.sid === sid);
     const talk = s?.talk ?? [];
@@ -6866,7 +6976,7 @@ export interface Peer {
   tgReady?: boolean; // it can talk to the bot
   tag?: string; // what it last sent, so it can answer "unchanged"
   machine?: { cpu: number; mem: number }; // its CPU and memory, for Telegram's overview
-  usage?: { label: string; pct: number; resets: string }[]; // its Claude account's limits
+  usage?: { label: string; pct: number; resets: string; resetsAt?: number }[]; // its Claude account's limits
 }
 export const peers = new Map<string, Peer>(); // by address
 /** This machine on the tailnet: its name, address and Tailscale user. */
@@ -7023,7 +7133,7 @@ async function fetchPeer(p: Peer) {
     p.tg = j.tg && typeof j.tg === "object" ? j.tg : undefined;
     p.tgReady = j.tgReady === true;
     p.machine = j.machine && typeof j.machine.cpu === "number" ? { cpu: j.machine.cpu, mem: Number(j.machine.mem) || 0 } : undefined;
-    p.usage = Array.isArray(j.usage) ? j.usage.filter((l: any) => typeof l?.label === "string" && typeof l?.pct === "number").map((l: any) => ({ label: safeLine(l.label).slice(0, 20), pct: l.pct, resets: typeof l.resets === "string" ? safeLine(l.resets).slice(0, 40) : "" })) : undefined;
+    p.usage = Array.isArray(j.usage) ? j.usage.filter((l: any) => typeof l?.label === "string" && typeof l?.pct === "number").map((l: any) => ({ label: safeLine(l.label).slice(0, 20), pct: l.pct, resets: typeof l.resets === "string" ? safeLine(l.resets).slice(0, 40) : "", resetsAt: typeof l.resetsAt === "number" ? l.resetsAt : undefined })) : undefined;
     // Their pull requests' states, for the rows; this machine's own reads win for a PR both have.
     for (const [key, st] of Object.entries(j.prs ?? {})) if (!prState.get(key)?.state || prState.get(key)!.at < Date.now() - 60_000) prState.set(key, { at: Date.now() - 30_000, state: st as PrState });
     // The newest Telegram pairing wins, so pairing (or unpairing) on any machine reaches all of them.
@@ -7059,16 +7169,220 @@ export function tgLeader(selfIp: string | undefined, others: { ip: string; tgRea
   if (!selfIp) return true;
   return !others.some((p) => p.tgReady && p.at && now - p.at <= PEER_GONE_MS && ipValue(p.ip) < ipValue(selfIp));
 }
-/** Send a message to a session on another machine, through that machine's fleet. */
-async function sendToPeer(s: Session, text: string): Promise<{ ok: boolean; via?: string; error?: string }> {
+/** Ask the fleet on a session's own machine to do something with it: send, press a key, look at its screen. */
+async function peerCall(s: Session, route: string, body: Record<string, unknown>): Promise<Reach> {
   try {
-    const r = await fetch(`http://${s.remote!.addr}/peer/send`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sid: s.sid, text }), signal: AbortSignal.timeout(30_000) });
+    const r = await fetch(`http://${s.remote!.addr}${route}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
     const j: any = await r.json().catch(() => ({}));
-    return { ok: j?.ok === true, via: `${s.remote!.host}${j?.via ? " " + j.via : ""}`, error: j?.ok ? undefined : typeof j?.error === "string" ? `${s.remote!.host}: ${j.error}` : `${s.remote!.host} did not answer` };
+    return { ok: j?.ok === true, via: `${s.remote!.host}${j?.via ? " " + j.via : ""}`, screen: typeof j?.screen === "string" ? j.screen : undefined, id: typeof j?.id === "string" ? j.id : undefined, error: j?.ok ? undefined : typeof j?.error === "string" ? `${s.remote!.host}: ${j.error}` : `${s.remote!.host} did not answer` };
   } catch {
     return { ok: false, error: `could not reach fleet on ${s.remote!.host}` };
   }
 }
+
+// ── what happened, for the digest ──
+// Everything the bot told you (or held, or you muted), every celebration and every session that finished is kept
+// for two days, so the morning digest can say what happened while you were away.
+const tgLogPath = () => path.join(path.dirname(tgConfigPath()), "telegram-log.json");
+let tgLogCache: { t: number; text: string }[] | undefined;
+export function tgLog(text: string, t = Date.now()) {
+  const log = tgLogRead();
+  log.push({ t, text: text.split("\n")[0].slice(0, 200) });
+  while (log.length && log[0].t < t - 48 * 3600_000) log.shift();
+  if (log.length > 600) log.splice(0, log.length - 600);
+  try {
+    fs.writeFileSync(tgLogPath(), JSON.stringify(log), { mode: 0o600 });
+  } catch {}
+}
+export function tgLogRead(): { t: number; text: string }[] {
+  if (!tgLogCache)
+    try {
+      const j = JSON.parse(fs.readFileSync(tgLogPath(), "utf8"));
+      tgLogCache = Array.isArray(j) ? j.filter((x) => typeof x?.t === "number" && typeof x?.text === "string") : [];
+    } catch {
+      tgLogCache = [];
+    }
+  return tgLogCache!;
+}
+
+// ── quiet hours ──
+const minutesOf = (hhmm: string) => {
+  const m = /^(\d{1,2}):?(\d{2})$/.exec(hhmm.trim());
+  return m && +m[1] < 24 && +m[2] < 60 ? +m[1] * 60 + +m[2] : undefined;
+};
+/** Whether `now` falls in your quiet hours ("23:00" to "07:00" wraps past midnight). */
+export function inQuiet(q: TgConfig["quiet"], now = Date.now()): boolean {
+  if (!q) return false;
+  const from = minutesOf(q.from);
+  const to = minutesOf(q.to);
+  if (from === undefined || to === undefined || from === to) return false;
+  const d = new Date(now);
+  const m = d.getHours() * 60 + d.getMinutes();
+  return from < to ? m >= from && m < to : m >= from || m < to;
+}
+
+// ── the morning digest ──
+const DIGEST_DEFAULT = "08:00";
+/** The digest: what happened since `since`, what is waiting now, and usage. */
+export function tgDigest(since: number, now = clock()): string {
+  const st = webState(tg.getSessions(), now);
+  const fmt = (t: number) => new Date(t).toLocaleString("en-GB", { weekday: "short", hour: "2-digit", minute: "2-digit" });
+  const lines = [`☀️ <b>Digest</b> · since ${fmt(since)}`];
+  const happened = tgLogRead().filter((x) => x.t >= since);
+  const kinds = (re: RegExp) => happened.filter((x) => re.test(x.text)).length;
+  const tally = [kinds(/merged/) && `🎉 ${kinds(/merged/)} merged`, kinds(/live on/) && `🚀 ${kinds(/live on/)} live`, kinds(/finished/) && `✓ ${kinds(/finished/)} finished`, kinds(/CI failing/) && `❌ ${kinds(/CI failing/)} CI failures`, kinds(/stuck/) && `⏳ ${kinds(/stuck/)} stuck`, kinds(/needs you/) && `🟡 ${kinds(/needs you/)} questions`].filter(Boolean);
+  lines.push("", tally.length ? tally.join(" · ") : "A quiet stretch: nothing to report.");
+  if (happened.length) {
+    lines.push("", "<b>What happened</b>");
+    for (const x of happened.slice(-25)) lines.push(`<code>${new Date(x.t).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}</code> ${esc(x.text)}`);
+    if (happened.length > 25) lines.push(`… and ${happened.length - 25} earlier`);
+  }
+  const waiting = st.sessions.filter((s) => s.state === "needs" || s.state === "stalled");
+  lines.push("", `<b>Now</b> · ${st.counts.working} working${waiting.length ? `, ${waiting.length} waiting on you` : ""}`);
+  for (const s of waiting) lines.push(`${STATE_EMOJI[s.state]} ${esc(s.name)}${s.needs ? `: ${esc(capText(flatReply(s.needs), 120))}` : ""}`);
+  const usage = [...(st.account?.limits.length ? [{ host: selfHost(), limits: st.account.limits }] : []), ...[...peers.values()].filter((p) => p.usage?.length).map((p) => ({ host: p.host, limits: p.usage! }))];
+  if (usage.length) lines.push("", ...usage.map((u) => `📊 ${esc(u.host)}: ${u.limits.map((l) => `${esc(l.label)} ${l.pct}%`).join(" · ")}`));
+  let text = lines.join("\n");
+  if (text.length > 4000) text = text.slice(0, 3990) + "…";
+  return text;
+}
+/** Today's digest time as a timestamp, or undefined when the digest is off. */
+function digestDue(c: TgConfig, now: number): number | undefined {
+  const at = c.digest?.at ?? DIGEST_DEFAULT;
+  if (at === "off") return undefined;
+  const m = minutesOf(at) ?? minutesOf(DIGEST_DEFAULT)!;
+  const d = new Date(now);
+  d.setHours(Math.floor(m / 60), m % 60, 0, 0);
+  return d.getTime();
+}
+
+// ── usage alerts ──
+const USAGE_ALERTS = [80, 95];
+const usageAlerted = new Set<string>();
+const usageSeen = new Set<string>(); // machines whose figures have been seen once: what was already high at launch is not news
+/** The usage alerts due now: a limit crossing 80% or 95%, once per limit window, per machine. */
+export function usageAlerts(now = clock()): string[] {
+  const st = webState([], now);
+  const blocks = [...(st.account?.limits.length ? [{ host: selfHost(), limits: st.account.limits }] : []), ...[...peers.values()].filter((p) => p.usage?.length).map((p) => ({ host: p.host, limits: p.usage! }))];
+  const out: string[] = [];
+  for (const b of blocks) {
+    const first = !usageSeen.has(b.host);
+    usageSeen.add(b.host);
+    for (const l of b.limits)
+      for (const at of USAGE_ALERTS) {
+        const key = `${b.host}|${l.label}|${at}|${Math.round((l.resetsAt || 0) / 3600_000)}`;
+        if (l.pct < at || usageAlerted.has(key)) continue;
+        usageAlerted.add(key);
+        if (!first) out.push(`${at >= 95 ? "🔴" : "🟠"} ${b.host}: ${l.label} usage at ${l.pct}%${l.resets ? ` · ${l.resets}` : ""}`);
+      }
+  }
+  return out;
+}
+
+// ── the live message ──
+const LIVE_EVERY_MS = 60_000;
+let liveAt = 0;
+/** Turn the pinned live overview on or off. */
+async function tgLive(c: TgConfig) {
+  if (c.live?.id) {
+    await tgCall(c.token!, "unpinChatMessage", { chat_id: c.chat, message_id: c.live.id });
+    await tgCall(c.token!, "deleteMessage", { chat_id: c.chat, message_id: c.live.id });
+    writeTg({ ...readTg(), live: undefined });
+    return void (await tgSend(c, { text: "Live overview off." }));
+  }
+  const v = tgOverview();
+  const r = await tgCall(c.token!, "sendMessage", { chat_id: c.chat, text: liveText(v.text), parse_mode: "HTML", reply_markup: v.markup });
+  if (!r.ok || typeof r.result?.message_id !== "number") return void (await tgSend(c, { text: `Could not start it: ${esc(r.error ?? "")}` }));
+  await tgCall(c.token!, "pinChatMessage", { chat_id: c.chat, message_id: r.result.message_id, disable_notification: true });
+  writeTg({ ...readTg(), live: { id: r.result.message_id } });
+  liveAt = Date.now();
+}
+const liveText = (text: string) => `${text}\n\n<i>📌 live · updated ${new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })} · /live to stop</i>`;
+async function tgLiveTick(c: TgConfig, now: number) {
+  if (!c.live?.id || now - liveAt < LIVE_EVERY_MS) return;
+  liveAt = now;
+  const v = tgOverview();
+  const r = await tgCall(c.token!, "editMessageText", { chat_id: c.chat, message_id: c.live.id, text: liveText(v.text), parse_mode: "HTML", reply_markup: v.markup });
+  if (!r.ok && /not found|can't be edited/i.test(r.error ?? "")) writeTg({ ...readTg(), live: undefined }); // you deleted it: it stops
+}
+
+// ── new sessions ──
+const newPicks = new Map<string, { prompt: string; at: number; choices: { host: string; addr?: string; cwd: string; place: string }[] }>();
+/** /new <prompt>: where to start it, from the folders your sessions run in on each machine. */
+function tgNew(c: TgConfig, prompt: string): TgView {
+  if (!prompt) return { text: "Say what to ask: <code>/new fix the flaky refund test</code>, then pick where." };
+  const seen = new Set<string>();
+  const choices = [...tg.getSessions()]
+    .sort((a, b) => b.startedAt - a.startedAt)
+    .map((s) => ({ host: s.remote?.host ?? selfHost(), addr: s.remote?.addr, cwd: s.cwd, place: foldersOf(s.cwd.replace(os.homedir(), "~")).slice(-2).join("/") }))
+    .filter((x) => absoluteDir(x.cwd) && !seen.has(x.host + x.cwd) && seen.add(x.host + x.cwd))
+    .slice(0, 8);
+  if (!choices.length) return { text: "There are no folders to start in: fleet offers the folders your sessions run in." };
+  const id = Buffer.from(crypto.getRandomValues(new Uint8Array(4))).toString("base64url");
+  newPicks.set(id, { prompt, at: Date.now(), choices });
+  for (const [k, v] of newPicks) if (Date.now() - v.at > TG_KEEP_MS) newPicks.delete(k);
+  const many = new Set(choices.map((x) => x.host)).size > 1 || manyMachines();
+  return { text: `▶ <b>New session</b>\n\n${esc(capText(prompt, 600))}\n\nWhere should it run?`, markup: { inline_keyboard: [...choices.map((x, i) => [{ text: `${many ? `💻 ${x.host} · ` : "📁 "}${x.place}`.slice(0, 60), callback_data: `n:${id}:${i}` }]), [{ text: "✕ Cancel", callback_data: `n:${id}:x` }]] } };
+}
+async function tgNewPick(c: TgConfig, msgId: number, id: string, pick: string) {
+  const p = newPicks.get(id);
+  if (!p) return tgEdit(c, msgId, { text: "That has expired: send /new again." });
+  newPicks.delete(id);
+  if (pick === "x") return tgEdit(c, msgId, { text: "Not started." });
+  const ch = p.choices[Number(pick)];
+  if (!ch) return;
+  await tgEdit(c, msgId, { text: `▶ Starting on ${esc(ch.host)} in ${esc(ch.place)}…` });
+  const r = ch.addr
+    ? await peerCall({ remote: { host: ch.host, addr: ch.addr } } as Session, "/peer/new", { cwd: ch.cwd, prompt: p.prompt })
+    : await (web.start ?? startSession)(ch.cwd, p.prompt);
+  await tgEdit(c, msgId, { text: r.ok ? `▶ Started <code>${esc(r.id ?? "")}</code> on ${esc(ch.host)} in ${esc(ch.place)}.\n\n${esc(capText(p.prompt, 300))}\n\nIt will show in /status in a moment.` : `✗ Not started: ${esc(r.error ?? "")}` });
+}
+
+// ── the session's own screen ──
+/** A picture of what the session's terminal shows, with a button for each choice it offers. */
+async function tgPeek(c: TgConfig, s: Session) {
+  const r = await (web.peek ?? peekSession)(s);
+  if (!r.ok || !r.screen) return void (await tgSend(c, { text: `📺 Can't see ${esc(tgName(s))}: ${esc(r.error ?? "")}` }));
+  const lines = r.screen.split("\n");
+  while (lines.length && !lines[lines.length - 1].replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").trim()) lines.pop();
+  const options = screenOptions(r.screen);
+  const markup = {
+    inline_keyboard: [
+      ...(options.length ? [options.slice(0, 4).map((o) => ({ text: `${o.key}. ${o.label}`.slice(0, 40), callback_data: `k:${s.sid}:${o.key}` }))] : []),
+      ...(options.length > 4 ? [options.slice(4, 8).map((o) => ({ text: `${o.key}. ${o.label}`.slice(0, 40), callback_data: `k:${s.sid}:${o.key}` }))] : []),
+      [{ text: "⏎ Enter", callback_data: `k:${s.sid}:E` }, { text: "⎋ Esc", callback_data: `k:${s.sid}:X` }, { text: "🔄 Look again", callback_data: `w:${s.sid}` }],
+    ],
+  };
+  await tgPhotoSend(c, pictureOf(lines.slice(-40), 120), `📺 ${tgName(s)}${options.length ? " · tap a choice to press it" : ""}`, s.sid, markup);
+}
+/** Everything the bot does on each scan, beyond notifications: the log, usage alerts, the digest and the live message. */
+export async function tgTick(sessions: Session[], now: number, partied: string[]) {
+  const c = readTg();
+  if (!c.token || !c.chat) return;
+  for (const p of partied) {
+    const [sid, ...rest] = p.split(" ");
+    const s = sessions.find((x) => x.sid === sid);
+    if (s) tgLog(`🎉 ${tgName(s)}: ${rest.join(" ")}`);
+  }
+  // A session that has finished its turn, for the digest.
+  const states = new Map(buildViews(sessions, now).map((v) => [v.s.sid, v.state as string]));
+  for (const s of sessions) {
+    const done = ["yours", "done"].includes(states.get(s.sid) ?? "idle");
+    if (done && tgWasWorking.get(s.sid)) tgLog(`✓ ${tgName(s)} finished${factsOf(s).main?.say ? `: ${capText(flatReply(factsOf(s).main!.say!.text), 120)}` : ""}`);
+    tgWasWorking.set(s.sid, !done);
+  }
+  for (const text of usageAlerts(now)) {
+    tgLog(text);
+    if (!inQuiet(c.quiet, now)) void tgSay(text);
+  }
+  const due = digestDue(c, now);
+  if (due !== undefined && now >= due && now - due < 4 * 3600_000 && (c.digest?.last ?? 0) < due) {
+    writeTg({ ...readTg(), digest: { at: c.digest?.at ?? DIGEST_DEFAULT, last: now } });
+    void tgSend(c, { text: tgDigest(c.digest?.last || now - 16 * 3600_000, now) }, undefined, false);
+  }
+  await tgLiveTick(c, now);
+}
+const tgWasWorking = new Map<string, boolean>();
 
 // ───────────────────────── pictures ─────────────────────────
 // Fleet can draw its own screen as a PNG, for Telegram: the frame it would show, in the unscii-16 bitmap font
@@ -7077,7 +7391,7 @@ async function sendToPeer(s: Session, text: string): Promise<{ ok: boolean; via?
 const FONT_B64 = "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";
 let font: Map<number, Uint8Array> | undefined;
 // Characters the screen uses that unscii has no glyph for, drawn as the nearest one it has.
-const FONT_STANDINS: Record<string, string> = { "↻": "o", "⇡": "↑", "⏳": "◐", "✗": "×", "✦": "◆", "❯": ">", "␣": "_", "⎇": "Y", "↩": "<" };
+const FONT_STANDINS: Record<string, string> = { "↻": "o", "⇡": "↑", "⏳": "◐", "✗": "×", "✦": "◆", "❯": ">", "␣": "_", "⎇": "Y", "↩": "<", "⏺": "●", "⎿": "└", "✻": "*", "✢": "*", "✳": "*", "✶": "*", "✽": "*", "⏸": "‖", "⏵": "▸" };
 /** The state marks drawn as true shapes: the font's circles and diamonds are too narrow at this size to tell from a 0. */
 const SHAPES: Record<string, (dx: number, dy: number, d: number) => boolean> = {
   "●": (_x, _y, d) => d <= 3.7,
@@ -7106,6 +7420,7 @@ function shapeOf(ch: string): Uint8Array | undefined {
   return g;
 }
 function glyphOf(ch: string): Uint8Array | undefined {
+  ch = FONT_STANDINS[ch] ?? ch;
   const shape = shapeOf(ch);
   if (shape) return shape;
   if (!font) {
@@ -7113,7 +7428,7 @@ function glyphOf(ch: string): Uint8Array | undefined {
     const raw = inflateSync(Buffer.from(FONT_B64, "base64"));
     for (let i = 0; i + 19 <= raw.length; i += 19) font.set((raw[i] << 16) | (raw[i + 1] << 8) | raw[i + 2], raw.subarray(i + 3, i + 19));
   }
-  return font.get((FONT_STANDINS[ch] ?? ch).codePointAt(0)!) ?? font.get(0x3f);
+  return font.get(ch.codePointAt(0)!) ?? font.get(0x3f);
 }
 /** A PNG of `w` by `h` pixels from RGB bytes, row by row. */
 export function pngOf(w: number, h: number, rgb: Uint8Array): Buffer {
@@ -7143,6 +7458,18 @@ export function pngOf(w: number, h: number, rgb: Uint8Array): Buffer {
   ihdr[8] = 8;
   ihdr[9] = 2;
   return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(raw, { level: 6 })), chunk("IEND", Buffer.alloc(0))]);
+}
+const BASIC16: RGB[] = [[0, 0, 0], [205, 49, 49], [13, 188, 121], [229, 229, 16], [36, 114, 200], [188, 63, 188], [17, 168, 205], [229, 229, 229], [102, 102, 102], [241, 76, 76], [35, 209, 139], [245, 245, 67], [59, 142, 234], [214, 112, 214], [41, 184, 219], [255, 255, 255]];
+/** An xterm 256-colour number as RGB. */
+export function x256(n: number): RGB {
+  if (n < 16) return BASIC16[n] ?? C.text;
+  if (n < 232) {
+    const steps = [0, 95, 135, 175, 215, 255];
+    const i = n - 16;
+    return [steps[Math.floor(i / 36) % 6], steps[Math.floor(i / 6) % 6], steps[i % 6]];
+  }
+  const g = 8 + (n - 232) * 10;
+  return [g, g, g];
 }
 export interface Cell {
   ch: string;
@@ -7191,7 +7518,14 @@ export function cellsOf(line: string): Cell[] {
           if (v === 38) fgc = c;
           else bgc = c;
           k += 4;
-        }
+        } else if ((v === 38 || v === 48) && p[k + 1] === 5) {
+          // Claude's own screen uses the 256-colour palette too.
+          const c = x256(p[k + 2]);
+          if (v === 38) fgc = c;
+          else bgc = c;
+          k += 2;
+        } else if ((v >= 30 && v <= 37) || (v >= 90 && v <= 97)) fgc = x256(v >= 90 ? v - 82 : v - 30);
+        else if ((v >= 40 && v <= 47) || (v >= 100 && v <= 107)) bgc = x256(v >= 100 ? v - 92 : v - 40);
       }
     }
     i = j;
@@ -7454,19 +7788,25 @@ function refresh() {
   const asked = newAsks(needing, askedAt, asks).filter((sid) => !fresh.has(sid));
   const stalled = newStalls(stalledNow, facts.flatMap((x) => stallMarks(x.s, x.f, stallOf(x.s, x.f, now)))).filter((k) => !fresh.has(k.split("/")[0]));
   const rings = asked.length + stalled.length;
-  if (tgWanted) {
-    const told = tgEvents(sessions, asked, stalled); // always, so what changed while another fleet held the bot is not news later
-    tg.paired = !!readTg().chat;
-    if (tg.on && tg.paired) {
-      const muted = readTg().muted ?? {};
-      for (const [text, sid, asking] of told) if (!((muted[sid] ?? 0) > Date.now())) void tgSay(text, sid, asking);
-      tgSettle(new Set(asks.map(([sid]) => sid)));
-      tgSweep();
+  const told = tgWanted ? tgEvents(sessions, asked, stalled) : []; // always, so what changed while another fleet held the bot is not news later
+  const botHere = tgWanted && tg.on && (tg.paired = !!readTg().chat);
+  if (botHere) {
+    const c = readTg();
+    const muted = c.muted ?? {};
+    const quiet = inQuiet(c.quiet);
+    for (const [text, sid, asking] of told) {
+      // Muted, or quiet hours and not a question: kept for the digest, not sent.
+      const held = (muted[sid] ?? 0) > Date.now() || (quiet && !asking);
+      tgLog(text + (held ? " (held)" : ""));
+      if (!held) void tgSay(text, sid, asking);
     }
+    tgSettle(new Set(asks.map(([sid]) => sid)));
+    tgSweep();
   }
   if (opt.bell && !opt.once) process.stdout.write("\x07".repeat(rings));
   noteScan(sessions, now);
   const partied = noteParties(sessions, now);
+  if (botHere) void tgTick(sessions, now, partied);
   if (opt.bell && !opt.once && partied.length) process.stdout.write("\x07");
 }
 
