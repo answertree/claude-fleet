@@ -5513,9 +5513,12 @@ export function buttonBar(W: number, row: number, idle = 0): string {
     add("q Quit", "q Quit", "q", "quit");
     return { line, used: x, found };
   };
+  // Shorter labels when the buttons do not fit, or a notice needs the room.
+  const noticeOn = !!notice.text && clock() < notice.until;
+  const tight = (b: { used: number }) => b.used > W || (noticeOn && W - b.used - 2 < width(notice.text));
   let bar = build(0);
-  if (bar.used > W) bar = build(1);
-  if (bar.used > W) bar = build(2);
+  if (tight(bar)) bar = build(1);
+  if (tight(bar)) bar = build(2);
   hits.push(...bar.found);
   // The hint: a notice, or how to focus a session.
   const room = W - bar.used - 2;
@@ -5959,7 +5962,7 @@ tick(); setInterval(tick, 2000);
 </script></body></html>`;
 
 /** The web server, once key w has started it: where it listens and the link to open. */
-export const web: { url?: string; host?: string; onTailnet?: boolean; server?: { stop: () => void }; error?: string; send?: typeof sendToSession; shared?: boolean; retake?: () => void } = {};
+export const web: { url?: string; host?: string; onTailnet?: boolean; server?: { stop: () => void }; error?: string; send?: typeof sendToSession; shared?: boolean; retake?: () => void; older?: boolean } = {};
 const sameToken = (a: string, b: string) => a.length === b.length && crypto.timingSafeEqual ? (() => { try { return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b)); } catch { return false; } })() : a === b;
 /** This Mac's Tailscale IPv4 address, when it has one. */
 function tailnetAddress(): string | undefined {
@@ -6206,10 +6209,20 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
   };
   fetch(`http://${host}:${base}/manifest.webmanifest?t=${token}`, { signal: AbortSignal.timeout(2000) })
     .then((r) => r.json())
-    .then((m) => (m?.name === "Claude Fleet" ? undefined : fallBack()))
+    .then(async (m) => {
+      if (m?.name !== "Claude Fleet") return fallBack();
+      // A fleet, but is it this version? An older one cannot answer your other machines, so they would not see this one.
+      const r = await fetch(`http://${host}:${base}/peer/state`, { signal: AbortSignal.timeout(4000) }).catch(() => undefined);
+      const j: any = r?.ok ? await r.json().catch(() => undefined) : undefined;
+      web.older = j?.proto !== PEER_PROTO;
+    })
     .catch(fallBack);
   web.retake = () => {
-    if (web.shared && serveOn(base)) web.retake = undefined;
+    if (web.shared && serveOn(base)) {
+      web.retake = undefined;
+      web.older = false;
+      notice.until = 0;
+    } else if (web.older) Object.assign(notice, { text: `old fleet holds :${base}, quit it`, until: clock() + 12_000 });
   };
   return web;
 }
