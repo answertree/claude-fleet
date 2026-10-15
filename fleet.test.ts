@@ -5228,6 +5228,28 @@ describe("key t: Telegram", () => {
     }
   });
 
+  test("/live pins a picture of the fleet that redraws itself in place, when something changed or every five minutes", async () => {
+    F.writeTg({ token: TOKEN, chat: 42, user: 7, bot: "my_fleet_bot" });
+    F.tg.getSessions = () => [session];
+    calls.length = 0;
+    await F.tgHandle({ message: { message_id: 60, text: "/live", chat: { id: 42 }, from: { id: 7 } } });
+    expect(calls.map(([m]) => m)).toEqual(["sendPhoto", "pinChatMessage"]);
+    const liveId = F.readTg().live!.id;
+    expect(F.readTg().live!.text).toBeUndefined();
+    calls.length = 0;
+    const t0 = Date.now();
+    await F.tgLiveTick(F.readTg(), t0 + 61_000); // a minute on, nothing changed: not drawn again yet
+    expect(calls.length).toBe(0);
+    await F.tgLiveTick(F.readTg(), t0 + 5 * 60_000 + 62_000); // five minutes on: redrawn regardless
+    const [method, body] = calls[0];
+    expect([method, body.message_id, JSON.parse(body.media).media, (body.pic as Blob).size > 1000]).toEqual(["editMessageMedia", String(liveId), "attach://pic", true]);
+    // /live again takes it away.
+    calls.length = 0;
+    await F.tgHandle({ message: { message_id: 61, text: "/live", chat: { id: 42 }, from: { id: 7 } } });
+    expect(calls.map(([m]) => m).slice(0, 2)).toEqual(["unpinChatMessage", "deleteMessage"]);
+    expect(F.readTg().live).toBeUndefined();
+  });
+
   test("the t screen never draws the token, even while it is being pasted", () => {
     F.writeTg({});
     F.tg.entry = "";
