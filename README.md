@@ -10,6 +10,7 @@ Every live Claude Code session, on every one of your machines, on one screen: wh
 
 - **Every machine.** Run fleet on each of your computers and each one shows the sessions on all of them, found through [Tailscale](https://tailscale.com) with nothing to set up. See [Every machine](#every-machine).
 - **Your phone.** Fleet serves a page for your phone, over Tailscale, from the moment it starts: press `w` and scan the QR code. Add it to your home screen and it opens like an app, and you can answer a session from it. See [On your phone](#on-your-phone).
+- **In the background.** Press `i` and fleet keeps all of this running with every window closed, starting when you log in. See [In the background](#in-the-background).
 - **Telegram.** Pair your own bot with `t` and fleet messages you, on every device, when a session needs you, gets stuck, or a pull request changes. Tap ↩ Reply to answer, 📺 Screen to see the session's own terminal and tap a choice on it, or ask for anything the detail view shows: `/status`, `/menu`, `/tasks`, `/prs`, `/usage`, `/screen`, `/new` to start a session, a morning digest, quiet hours and a live pinned picture of the fleet that redraws itself. See [On Telegram](#on-telegram).
 
 <p align="center">
@@ -124,6 +125,7 @@ Every control has a key, and all but `tab` and `esc` are also buttons on the bot
 | `r` | Open the session that has waited on you longest (or the one in focus) to answer it, if it is on this machine |
 | `w` | The phone page's QR code and link (the page itself is always on) |
 | `t` | Telegram: pair your bot, `s` sends a test message, `x` unpairs |
+| `i` | Run fleet in the background: its status and log, and `y` to install or remove it |
 | `+` `-` | Sparkline window: 5, 15, 30, 60 or 180 minutes (from another window given on the command line, the next of these up or down) |
 | `a` | Show idle and finished sessions too. The button carries how many there are |
 | `d` | List finished agents instead of counting them |
@@ -217,6 +219,16 @@ Menus, cards, pictures and confirmations delete themselves ten minutes after you
 Setting it up: in Telegram, open @BotFather, send `/newbot` and follow it; it gives you a token. Press `t` in fleet, paste the token and press Enter (it is shown as dots, and kept in `~/.config/claude-fleet/telegram.json`, readable only by you). Fleet then shows a QR code: scan it with your phone, or open the link, and tap Start. Only the chat that opens that link is paired; the bot ignores everyone else. On the `t` screen afterwards, `s` sends a test message and `x` unpairs and forgets the token.
 
 The messages go through Telegram's servers, so they can read them. With several fleets open, one talks to the bot (Telegram allows only one reader) and another takes over when it quits.
+
+## In the background
+
+Press `i`, then `y`, and fleet keeps running with every window closed: it starts when you log in, serves the phone page and your other machines, and runs the Telegram bot (notifications, the digest, `/live`), so all of it works whether or not a fleet window is open. Any fleet window you open just shows the screen.
+
+- **How it starts:** the way each system starts things at login, always as you and never as an administrator: a launchd agent on macOS (`~/Library/LaunchAgents/com.answertree.claude-fleet.plist`), a systemd user service on Linux (with `loginctl enable-linger`, so it also runs while you are logged out, where your system allows it), and a hidden script in the Startup folder on Windows.
+- **It looks after itself.** `fleet.ts --serve` is a small supervisor that runs the screenless fleet and starts it again whenever it stops: after a crash, and after `fleet.ts` changes (a `git pull`), so it is always running the code on disk. Five quick failures in a row and it waits a minute between tries.
+- **The log** is `~/.cache/claude-fleet/service.log`, kept under a megabyte; the `i` screen shows its last lines. It notes when fleet starts and stops, why, and what it is doing: serving the page or not, talking to the Telegram bot or not, how many machines and sessions.
+- **Usage figures, even over ssh or mosh.** On macOS the service runs in your login session, where the keychain is open, so it reads your usage figures and shares them through the figures file: a fleet window in a remote shell, where the keychain is closed, shows them too.
+- `i` then `y` again stops it and removes it.
 
 ## Deploys
 

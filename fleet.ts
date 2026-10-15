@@ -6312,6 +6312,7 @@ export function webScreen(cols: number, rows: number): string[] {
     out.push("", fg(C.text, "  " + web.url));
     out.push(
       ...(web.shared ? [fg(C.dim, "  Another fleet on this Mac is serving it (same link); this one takes over if that one quits.")] : []),
+      fg(C.dim, svcState().running ? "  Fleet runs in the background here, so the page stays up with every window closed." : "  Press i to keep fleet running in the background, so the page stays up when you close this."),
       fg(C.dim, web.onTailnet ? "  On your tailnet: any of your Tailscale devices can open it, nothing else can." : "  No Tailscale here, so it is open on this Mac only (127.0.0.1)."),
       fg(C.dim, "  The link is the key and stays the same, so add it to your home screen. It can type messages into your"),
       fg(C.dim, "  sessions, so keep it to yourself. Delete ~/.config/claude-fleet/web-token to change it."),
@@ -7692,6 +7693,291 @@ export function headerPicture(now: number, cols = 110): Buffer {
   return pictureOf(lines.slice(0, end > 0 ? end + 1 : 8), cols);
 }
 
+// ───────────────────────── in the background ─────────────────────────
+// Fleet can run with no screen, as a service started when you log in: it scans, serves the phone page and the
+// other machines, and runs the Telegram bot, with every fleet window closed. `--serve` is a small supervisor that
+// runs the screenless fleet (`--serve-worker`) and starts it again whenever it stops: after a crash, and after
+// fleet.ts changes (a git pull), which the worker notices and stops for, so it always runs the code on disk.
+// Key i installs it the way each system starts things at login: a launchd agent on macOS, a systemd user service
+// on Linux, a hidden script in the Startup folder on Windows. Always as you, never as an administrator.
+
+const svcDir = () => path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache"), "claude-fleet");
+export const svcLogPath = () => path.join(svcDir(), "service.log");
+const svcPidPath = (which: "service" | "worker") => path.join(svcDir(), `${which}.pid`);
+const SVC_LOG_MAX = 1_000_000;
+/** A line in the service log, which is kept under a megabyte (the one before is kept as service.log.1). */
+export function svcLog(text: string) {
+  try {
+    fs.mkdirSync(svcDir(), { recursive: true });
+    const file = svcLogPath();
+    if ((fs.statSync(file, { throwIfNoEntry: false })?.size ?? 0) > SVC_LOG_MAX) fs.renameSync(file, file + ".1");
+    fs.appendFileSync(file, `${new Date().toISOString().slice(0, 19).replace("T", " ")}  ${safeLine(text).slice(0, 500)}\n`);
+  } catch {}
+}
+const readPid = (which: "service" | "worker") => {
+  try {
+    const pid = Number(fs.readFileSync(svcPidPath(which), "utf8"));
+    return pid > 0 && alive(pid) ? pid : undefined;
+  } catch {
+    return undefined;
+  }
+};
+const writePid = (which: "service" | "worker", pid: number) => {
+  try {
+    fs.mkdirSync(svcDir(), { recursive: true });
+    fs.writeFileSync(svcPidPath(which), String(pid));
+  } catch {}
+};
+
+/** --serve: keep the screenless fleet running, starting it again whenever it stops. */
+export async function serveSupervisor(): Promise<never> {
+  svcLog(`service started (pid ${process.pid}, ${process.platform})`);
+  writePid("service", process.pid);
+  let child: ReturnType<typeof Bun.spawn> | undefined;
+  const stop = () => {
+    svcLog("service stopping");
+    try {
+      child?.kill();
+    } catch {}
+    process.exit(0);
+  };
+  for (const sig of process.platform === "win32" ? (["SIGINT", "SIGBREAK"] as const) : (["SIGINT", "SIGTERM", "SIGHUP"] as const))
+    try {
+      process.on(sig, stop);
+    } catch {}
+  let quick = 0;
+  for (;;) {
+    const t0 = Date.now();
+    child = Bun.spawn([process.execPath, import.meta.path, "--serve-worker"], { stdin: "ignore", stdout: "ignore", stderr: "pipe", env: process.env, windowsHide: true } as any);
+    writePid("worker", child.pid);
+    const err = new Response(child.stderr as ReadableStream).text();
+    const code = await child.exited;
+    const tail = (await err).trim().split("\n").slice(-4).join(" | ");
+    svcLog(`fleet stopped (exit ${code})${tail ? `: ${tail}` : ""}`);
+    // Five quick failures in a row: something is wrong that a restart will not fix, so wait a minute between tries.
+    quick = Date.now() - t0 < 10_000 && code !== 0 ? quick + 1 : 0;
+    await pause(quick >= 5 ? 60_000 : code === 0 ? 300 : 3000);
+  }
+}
+
+/** --serve-worker: fleet with no screen. */
+export async function serveWorker(): Promise<never> {
+  opt.bell = false;
+  svcLog(`fleet running with no screen (pid ${process.pid})`);
+  process.on("uncaughtException", (e: any) => {
+    svcLog(`crashed: ${String(e?.stack ?? e).split("\n").slice(0, 3).join(" | ")}`);
+    process.exit(1);
+  });
+  process.on("unhandledRejection", (e: any) => svcLog(`unhandled: ${String(e?.message ?? e)}`));
+  if (process.env.FLEET_WEB !== "0") startWeb(() => sessions);
+  peersWanted = true;
+  tgWanted = true;
+  tg.getSessions = () => sessions;
+  tgClaim();
+  if (opt.usage) {
+    await fetchUsage().catch(() => {});
+    const u = accountView(clock());
+    svcLog(u.kind === "current" ? "usage figures read" : `usage figures not read: ${u.reason || u.kind}`);
+  }
+  refresh();
+  setInterval(refresh, 2000);
+  // Back to the code on disk when it changes: stop, and the supervisor starts the new one.
+  const me = import.meta.path;
+  const born = fs.statSync(me).mtimeMs;
+  setInterval(() => {
+    try {
+      if (fs.statSync(me).mtimeMs !== born) {
+        svcLog("fleet.ts changed: restarting onto the new code");
+        tgRelease();
+        process.exit(0);
+      }
+    } catch {}
+  }, 10_000);
+  // A line in the log whenever what it is doing changes.
+  let said = "";
+  const report = () => {
+    const now = [web.server && !web.shared ? `serving ${web.url?.replace(/\?t=.*/, "")}` : web.shared ? "another fleet serves the page" : web.error ?? "no page", tg.on ? "talking to the Telegram bot" : readTg().token ? "another fleet talks to the bot" : "no Telegram bot", `${peers.size ? [...peers.values()].filter((p) => p.at).length : 0} other machines`, `${sessions.filter((s) => !s.remote).length} sessions here`].join(" · ");
+    if (now !== said) svcLog((said = now));
+  };
+  setTimeout(report, 5000);
+  setInterval(report, 30_000);
+  for (const sig of ["SIGINT", "SIGTERM"] as const)
+    try {
+      process.on(sig, () => {
+        tgRelease();
+        process.exit(0);
+      });
+    } catch {}
+  return new Promise<never>(() => {});
+}
+
+// ── installing it ──
+export const SVC_LABEL = "com.answertree.claude-fleet";
+type SvcPlace = { kind: "launchd" | "systemd" | "startup"; file: string };
+const xml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+/** Where this system starts things at login, for fleet. */
+export function svcPlace(label = SVC_LABEL, platform = process.platform): SvcPlace | undefined {
+  if (platform === "darwin") return { kind: "launchd", file: path.join(os.homedir(), "Library", "LaunchAgents", `${label}.plist`) };
+  if (platform === "linux") return { kind: "systemd", file: path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "systemd", "user", `${label === SVC_LABEL ? "claude-fleet" : label}.service`) };
+  if (platform === "win32") return { kind: "startup", file: path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "Microsoft", "Windows", "Start Menu", "Programs", "Startup", `${label === SVC_LABEL ? "Claude Fleet" : label}.vbs`) };
+  return undefined;
+}
+/** The file that starts fleet at login, for each system. */
+export function svcFile(kind: SvcPlace["kind"], label: string, bun: string, fleet: string, env: Record<string, string>): string {
+  if (kind === "launchd")
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${xml(label)}</string>
+  <key>ProgramArguments</key>
+  <array><string>${xml(bun)}</string><string>${xml(fleet)}</string><string>--serve</string></array>
+  <key>EnvironmentVariables</key>
+  <dict>${Object.entries(env)
+    .map(([k, v]) => `<key>${xml(k)}</key><string>${xml(v)}</string>`)
+    .join("")}</dict>
+  <key>WorkingDirectory</key><string>${xml(os.homedir())}</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>/dev/null</string>
+  <key>StandardErrorPath</key><string>${xml(svcLogPath())}</string>
+</dict>
+</plist>
+`;
+  const q = (s: string) => `"${s.replace(/(["\\])/g, "\\$1")}"`;
+  if (kind === "systemd")
+    return `[Unit]
+Description=Claude Fleet, with no screen
+After=network-online.target
+
+[Service]
+ExecStart=${q(bun)} ${q(fleet)} --serve
+Restart=always
+RestartSec=5
+${Object.entries(env)
+  .map(([k, v]) => `Environment=${q(`${k}=${v}`)}`)
+  .join("\n")}
+
+[Install]
+WantedBy=default.target
+`;
+  // A VBScript run at logon from the Startup folder: window style 0 keeps it out of sight. Quotes inside are doubled.
+  const vb = (s: string) => s.replace(/"/g, '""');
+  return `' Claude Fleet, with no screen: started when you log in. Remove it with key i in fleet.\r\nCreateObject("WScript.Shell").Run """${vb(bun)}"" ""${vb(fleet)}"" --serve", 0, False\r\n`;
+}
+export interface SvcState {
+  supported: boolean;
+  installed: boolean;
+  running?: number; // the service's pid
+  file?: string;
+}
+export function svcState(label = SVC_LABEL): SvcState {
+  const place = svcPlace(label);
+  if (!place) return { supported: false, installed: false };
+  return { supported: true, installed: fs.existsSync(place.file), running: readPid("service"), file: place.file };
+}
+const run1 = (cmd: string, args: string[]) => spawnSync(cmd, args, { encoding: "utf8", timeout: 15_000 });
+/** Install the service and start it now. `env` and `label` are for tests. */
+export function svcInstall(o: { label?: string; env?: Record<string, string> } = {}): { ok: boolean; text: string } {
+  const label = o.label ?? SVC_LABEL;
+  const place = svcPlace(label);
+  if (!place) return { ok: false, text: `fleet does not know how to start things at login on ${process.platform}` };
+  const bun = process.execPath;
+  const fleet = import.meta.path;
+  const env = { PATH: process.env.PATH ?? "", HOME: os.homedir(), ...(o.env ?? {}) };
+  try {
+    fs.mkdirSync(path.dirname(place.file), { recursive: true });
+    fs.mkdirSync(svcDir(), { recursive: true });
+    fs.writeFileSync(place.file, svcFile(place.kind, label, bun, fleet, env));
+  } catch (e: any) {
+    return { ok: false, text: `could not write ${place.file}: ${e?.message ?? e}` };
+  }
+  if (place.kind === "launchd") {
+    const uid = process.getuid?.() ?? 0;
+    run1("launchctl", ["bootout", `gui/${uid}/${label}`]);
+    const r = run1("launchctl", ["bootstrap", `gui/${uid}`, place.file]);
+    if (r.status !== 0) return { ok: false, text: `launchctl would not start it: ${safeLine(r.stderr || r.stdout || "").slice(0, 160)}` };
+  } else if (place.kind === "systemd") {
+    const unit = path.basename(place.file);
+    run1("systemctl", ["--user", "daemon-reload"]);
+    const r = run1("systemctl", ["--user", "enable", "--now", unit]);
+    if (r.status !== 0) return { ok: false, text: `systemctl would not start it: ${safeLine(r.stderr || "").slice(0, 160)}` };
+    // So it keeps running while you are logged out (allowed for your own user on most systems).
+    const linger = run1("loginctl", ["enable-linger", os.userInfo().username]);
+    if (linger.status !== 0) svcLog("loginctl enable-linger failed: it runs while you are logged in");
+  } else {
+    try {
+      const p = spawn("wscript.exe", [place.file], { detached: true, stdio: "ignore" });
+      p.unref();
+    } catch (e: any) {
+      return { ok: false, text: `installed, but could not start it now: ${e?.message ?? e}` };
+    }
+  }
+  svcLog(`installed (${place.kind}: ${place.file})`);
+  return { ok: true, text: `installed: it starts when you log in, and is starting now` };
+}
+/** Stop the service and remove it. */
+export function svcUninstall(o: { label?: string } = {}): { ok: boolean; text: string } {
+  const label = o.label ?? SVC_LABEL;
+  const place = svcPlace(label);
+  if (!place) return { ok: false, text: "nothing to remove here" };
+  if (place.kind === "launchd") run1("launchctl", ["bootout", `gui/${process.getuid?.() ?? 0}/${label}`]);
+  else if (place.kind === "systemd") run1("systemctl", ["--user", "disable", "--now", path.basename(place.file)]);
+  // The supervisor and its fleet, wherever they were started from.
+  for (const which of ["service", "worker"] as const) {
+    const pid = readPid(which);
+    if (pid && pid !== process.pid)
+      try {
+        process.kill(pid);
+      } catch {}
+  }
+  try {
+    fs.rmSync(place.file, { force: true });
+  } catch {}
+  svcLog("removed");
+  return { ok: true, text: "removed: it is stopped and will not start at login" };
+}
+
+let svcOn = false; // key i: the background service screen is showing
+let svcSaid = ""; // what the last y did, for the screen
+/** Key i: whether fleet runs in the background, its log, and y to install or remove it. */
+export function svcScreen(cols: number, rows: number): string[] {
+  const W = Math.max(40, cols);
+  const st = svcState();
+  const out: string[] = ["", fg(C.cyan, bold("  ◆ CLAUDE FLEET")) + fg(C.white, " in the background"), ""];
+  const say = (t: string, c: RGB = C.text) => out.push(fg(c, "  " + t));
+  if (!st.supported) say(`Not available on ${process.platform}.`, C.red);
+  else {
+    say(st.running ? `● Running (pid ${st.running}).` : st.installed ? "◐ Installed, but not running right now." : "○ Not installed.", st.running ? C.green : st.installed ? C.amber : C.dim);
+    out.push("");
+    say("With it, fleet keeps working with every window closed: it serves the phone page and your other machines,");
+    say("and the Telegram bot keeps you posted. It starts when you log in, and restarts itself after a crash or a");
+    say("git pull. Any fleet window you open just shows the screen.");
+    if (st.file) say(`Started from ${st.file.replace(os.homedir(), "~")}`, C.dim);
+    say(`Log: ${svcLogPath().replace(os.homedir(), "~")}`, C.dim);
+    out.push("");
+    try {
+      const log = fs.readFileSync(svcLogPath(), "utf8").trimEnd().split("\n").slice(-8);
+      for (const l of log) say(l, C.dim);
+    } catch {}
+    if (svcSaid) out.push("", fg(C.white, "  " + svcSaid));
+  }
+  while (out.length < rows - 1) out.push("");
+  out.length = Math.max(0, rows - 1);
+  out.push(fg(C.dim, fit(st.supported ? (st.installed ? "  y removes it · any other key returns" : "  y installs it · any other key returns") : "  any key returns", W)));
+  return out.map((l) => clipRow(l, W));
+}
+/** A key on the i screen. Returns false when the screen should close. */
+export function svcKey(key: string): boolean {
+  if (key !== "y") return false;
+  const st = svcState();
+  if (!st.supported) return false;
+  const r = st.installed ? svcUninstall() : svcInstall();
+  svcSaid = (r.ok ? "✓ " : "✗ ") + r.text;
+  return true;
+}
+
 // ───────────────────────── legend ─────────────────────────
 
 let legendOn = false; // key ?: the legend is showing instead of the fleet
@@ -7750,7 +8036,7 @@ export function legend(cols: number, rows: number): string[] {
     key("d", "list finished agents"),
     key("tab", "focus the next session"),
     key("esc", "leave focus; with none, quit"),
-    key("r w t", "open one waiting; phone page; Telegram"),
+    key("r w t i", "open one waiting; phone; Telegram; background"),
     key("b u", "bell on/off; retry usage now"),
     key("space", "seen it: clears the new marks"),
     key("?", "this legend"),
@@ -7931,6 +8217,9 @@ if (import.meta.main) {
   const party = /^([\w-]+)=(.{1,60})$/.exec(process.env.FLEET_PARTY ?? ""); // FLEET_PARTY (demo only): "session id=text" celebrates from launch
   if (party) parties.set(party[1], { text: safeLine(party[2]), at: clock() });
   focusSid = process.env.FLEET_FOCUS || null; // FLEET_FOCUS (demo only): start focused on this session, as a click on it would
+  // In the background (key i installs it): the supervisor, or the screenless fleet it runs. Neither returns.
+  if (process.argv.includes("--serve")) await serveSupervisor();
+  if (process.argv.includes("--serve-worker")) await serveWorker();
   if (!process.stdout.isTTY) opt.once = true; // output to a file or a pipe: one frame, not screen codes for ever
   if (opt.once) {
     sampleMachine();
@@ -7956,7 +8245,7 @@ if (import.meta.main) {
   const out = process.stdout;
   let onScreen: string[] | undefined; // the frame the terminal shows, so the next writes only the rows that differ
   const draw = () => {
-    const lines = legendOn ? legend(out.columns || 140, out.rows || 45) : webOn ? webScreen(out.columns || 140, out.rows || 45) : tgOn ? tgScreen(out.columns || 140, out.rows || 45) : render(sessions, out.columns || 140, out.rows || 45, clock());
+    const lines = legendOn ? legend(out.columns || 140, out.rows || 45) : webOn ? webScreen(out.columns || 140, out.rows || 45) : tgOn ? tgScreen(out.columns || 140, out.rows || 45) : svcOn ? svcScreen(out.columns || 140, out.rows || 45) : render(sessions, out.columns || 140, out.rows || 45, clock());
     out.write(frameDiff(onScreen, lines));
     onScreen = lines;
   };
@@ -7984,7 +8273,10 @@ if (import.meta.main) {
     else if (name === "win+") opt.windowMin = stepWindow(opt.windowMin, 1);
     else if (name === "win-") opt.windowMin = stepWindow(opt.windowMin, -1);
     else if (name === "reply") return reply();
-    else if (name === "telegram") {
+    else if (name === "service") {
+      svcOn = true;
+      svcSaid = "";
+    } else if (name === "telegram") {
       tgOn = true;
       tg.status = "";
       if (!readTg().token) tg.entry = "";
@@ -8061,7 +8353,7 @@ if (import.meta.main) {
     } catch {}
 
   const KEYS: Record<string, string> = {
-    q: "quit", "\x03": "quit", "\x1b": "back", "\t": "next", w: "web", t: "telegram",
+    q: "quit", "\x03": "quit", "\x1b": "back", "\t": "next", w: "web", t: "telegram", i: "service",
     "1": "mode:detail", "2": "mode:compact", "3": "mode:far", r: "reply",
     "+": "win+", "=": "win+", "-": "win-", _: "win-",
     d: "done", a: "all", b: "bell", u: "usage", " ": "seen", "?": "legend",
@@ -8072,6 +8364,17 @@ if (import.meta.main) {
     const handle = (events: InputEvent[]) => {
       const keys = events.filter((e) => e.kind === "key");
       if (keys.some((e) => e.kind === "key" && e.key === "\x03")) return quit(); // Ctrl-C quits from anywhere in a read
+      // The background service screen: y installs or removes it, anything else closes it.
+      if (svcOn) {
+        for (const e of events)
+          if ((e.kind === "key" && !svcKey(e.key)) || e.kind === "press") {
+            svcOn = false;
+            clear();
+            break;
+          }
+        draw();
+        return;
+      }
       // The Telegram screen takes every key, a pasted token included; a click or a key it has no use for closes it.
       if (tgOn) {
         for (const e of events)
