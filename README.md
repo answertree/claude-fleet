@@ -148,6 +148,20 @@ It is built to be safe to leave running:
 - Otherwise it serves only the page, its data and its icons.
 - It stops when fleet quits. With several fleets open, the first serves the page and the others show the same link; when it quits, another takes the page over within ten seconds.
 
+## On Telegram
+
+Press `t` to pair fleet with a Telegram bot of your own; then it messages you on every device:
+
+- 🟡 when a session needs you, with its question and a **↩ Reply** button: tap it, type, send, and your answer goes to that session (the button comes off once the session is answered);
+- ⏳ when a session looks stuck (reply to nudge it);
+- ❌ ✅ 🚀 when a pull request's CI fails or goes green, when it merges, and when it is live on a deploy target.
+
+Reply to any of its messages to send your text to that session, and send `/status` for what is waiting. Replies reach a session the same way the phone page's messages do (see above).
+
+Setting it up: in Telegram, open @BotFather, send `/newbot` and follow it; it gives you a token. Press `t` in fleet, paste the token and press Enter (it is shown as dots, and kept in `~/.config/claude-fleet/telegram.json`, readable only by you). Fleet then shows a QR code: scan it with your phone, or open the link, and tap Start. Only the chat that opens that link is paired; the bot ignores everyone else. On the `t` screen afterwards, `s` sends a test message and `x` unpairs and forgets the token.
+
+The messages go through Telegram's servers, so they can read them. With several fleets open, one talks to the bot (Telegram allows only one reader) and another takes over when it quits.
+
 ## Deploys
 
 A merged pull request can say whether it is live yet. List each repository's deploy target in `~/.config/claude-fleet/deploys.json` (or under `$XDG_CONFIG_HOME`):
@@ -263,6 +277,8 @@ These environment variables exist for tests and screenshots only:
 | `FLEET_DEPLOYS_FILE` | Read deploy targets from this file instead of `~/.config/claude-fleet/deploys.json`. |
 | `FLEET_DEPLOY_FIXTURE` | Take each deploy target's revision from this JSON file (URL to revision) instead of asking the URL. |
 | `FLEET_ATTACH_CMD` | Run this instead of `claude` when `r` opens a session (tests use `true`). |
+| `FLEET_TELEGRAM_FILE` | Where the Telegram bot's token and paired chat are kept (default `~/.config/claude-fleet/telegram.json`). |
+| `FLEET_TELEGRAM_API` | Another address for Telegram's bot API. Only for testing. |
 | `FLEET_WEB` | `0` stops fleet from serving the phone page; it starts with fleet otherwise. |
 | `FLEET_WEB_HOST` | Serve the phone page on this address instead of the Tailscale one (or 127.0.0.1). Only for testing: anyone who can reach the address and has the link can read your sessions. |
 | `FLEET_WEB_TOKEN_FILE` | Where the phone page's secret is kept (default `~/.config/claude-fleet/web-token`). |

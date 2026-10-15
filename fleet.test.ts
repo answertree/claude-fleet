@@ -2057,9 +2057,9 @@ describe("header and chrome", () => {
 
   test("the button bar carries the hidden count, and its labels shorten in two steps", () => {
     const bar = (W: number, idle = 1, account = "current") => draw(account, () => strip(F.buttonBar(W, 44, idle)).trimEnd());
-    expect(bar(200)).toBe("  1 Detail   2 Compact   3 Timeline    −  30m  +    a All · 1 idle   d Finished agents   b Bell   space Seen   r Reply   w Phone   ? Legend    q Quit                       click a session to focus it");
-    expect(bar(150)).toBe("  1 Detail   2 Compact   3 Timeline    −  30m  +    a All·1   d Done   b   ␣ Seen   r Reply   w Phone   ?    q Quit       click a session to focus it");
-    expect(bar(80, 1, "remote")).toBe("  1   2   3    −  30m  +    a   d   b   u   ␣   r   w   ?    q");
+    expect(bar(200)).toBe("  1 Detail   2 Compact   3 Timeline    −  30m  +    a All · 1 idle   d Finished agents   b Bell   space Seen   r Reply   w Phone   t Telegram   ? Legend    q Quit          click a session to focus it");
+    expect(bar(150)).toBe("  1 Detail   2 Compact   3 Timeline    −  30m  +    a All·1   d Done   b   ␣ Seen   r Reply   w Phone   t   ?    q Quit");
+    expect(bar(80, 1, "remote")).toBe("  1   2   3    −  30m  +    a   d   b   u   ␣   r   w   t   ?    q");
     // "u Retry usage" is there only while a usage read is failing, whatever figures are on screen.
     expect([bar(220, 1, "none"), bar(220, 1, "stale"), bar(220, 1, "shared")].map((b) => b.includes(" u Retry usage "))).toEqual([true, true, true]);
     expect([bar(220), bar(220, 1, "off")].map((b) => b.includes("Retry"))).toEqual([false, false]);
@@ -2082,7 +2082,7 @@ describe("header and chrome", () => {
       const text = lines.join("\n");
       for (const word of ["needs you", "stalled?", "working", "your turn", "idle", "finished", "you", "Claude", "earlier", "live", "in progress", "not started", "done", "failed", "workflow", "no reading", "pace", "context", "rail"]) expect([cols, word, text.includes(word)]).toEqual([cols, word, true]);
       for (const glyph of ["▲", "◐", "●", "▸", "○", "✓", "✗", "◆", "◇", "⠋", "≡", "━", "┼", "┿", "╌", "█", "▌", "░", "■", "•", "…", "┴", "▼"]) expect([cols, glyph, text.includes(glyph)]).toEqual([cols, glyph, true]);
-      for (const key of ["1 2 3", "+ -", "a ", "d ", "tab", "esc", "b u", "r w", "space", "? ", "q "]) expect([cols, key, lines.some((l) => l.includes(key))]).toEqual([cols, key, true]);
+      for (const key of ["1 2 3", "+ -", "a ", "d ", "tab", "esc", "b u", "r w t", "space", "? ", "q "]) expect([cols, key, lines.some((l) => l.includes(key))]).toEqual([cols, key, true]);
       expect(lines.at(-1)).toContain("any key or click returns");
     }
     // With --plain-glyphs it shows the stand-ins the screen is drawing.
@@ -5032,5 +5032,94 @@ describe("key w: the phone page", () => {
   test("the page builds no markup from data, so text from a session cannot become HTML", () => {
     expect(F.WEB_PAGE).not.toContain("innerHTML");
     expect(F.WEB_PAGE).not.toContain("insertAdjacentHTML");
+  });
+});
+
+describe("key t: Telegram", () => {
+  // A stand-in for Telegram's bot API: it records each call and answers as Telegram would.
+  const calls: [string, any][] = [];
+  let fake: ReturnType<typeof Bun.serve>;
+  let dir: string;
+  const TOKEN = "123456:" + "A".repeat(35);
+  beforeAll(() => {
+    fake = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const [, bot, method] = new URL(req.url).pathname.split("/");
+        if (bot !== `bot${TOKEN}`) return Response.json({ ok: false, description: "Unauthorized" }, { status: 401 });
+        const body = await req.json();
+        calls.push([method, body]);
+        if (method === "getMe") return Response.json({ ok: true, result: { username: "my_fleet_bot" } });
+        return Response.json({ ok: true, result: { message_id: 100 + calls.length } });
+      },
+    });
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-tg-"));
+    process.env.FLEET_TELEGRAM_API = `http://127.0.0.1:${fake.port}`;
+    process.env.FLEET_TELEGRAM_FILE = path.join(dir, "telegram.json");
+  });
+  afterAll(() => {
+    fake.stop();
+    F.tg.on = false;
+    delete process.env.FLEET_TELEGRAM_API;
+    delete process.env.FLEET_TELEGRAM_FILE;
+  });
+  const session = { sid: "s1", name: "checkout flow", cwd: "/x", mains: [], agents: [], workflows: [] } as any;
+
+  test("only the chat with the one-time code pairs; the token is kept private and never in an error", async () => {
+    F.writeTg({ token: TOKEN, pairCode: "code123" });
+    expect(fs.statSync(process.env.FLEET_TELEGRAM_FILE!).mode & 0o777).toBe(0o600);
+    await F.tgHandle({ message: { message_id: 1, text: "/start", chat: { id: 666, type: "private" }, from: { id: 666 } } });
+    await F.tgHandle({ message: { message_id: 2, text: "/start wrong", chat: { id: 666, type: "private" }, from: { id: 666 } } });
+    expect(F.readTg().chat).toBeUndefined();
+    await F.tgHandle({ message: { message_id: 3, text: "/start code123", chat: { id: 42, type: "private" }, from: { id: 7 } } });
+    expect([F.readTg().chat, F.readTg().user, F.readTg().pairCode]).toEqual([42, 7, undefined]);
+    const bad = await F.tgCall("999999:" + "B".repeat(35), "getMe");
+    expect(bad).toEqual({ ok: false, error: "Telegram does not know that token" });
+    expect(JSON.stringify(bad)).not.toContain("B".repeat(35));
+  });
+
+  test("a question carries a Reply button; tapping it opens a reply box, and the reply reaches the session", async () => {
+    F.writeTg({ token: TOKEN, chat: 42, user: 7, bot: "my_fleet_bot" });
+    F.tg.getSessions = () => [session];
+    const sent: [string, string][] = [];
+    F.web.send = async (s, text) => (sent.push([s.sid, text]), { ok: true });
+    try {
+      calls.length = 0;
+      await F.tgSay("🟡 checkout flow needs you", "s1", true);
+      const [method, body] = calls[0];
+      expect([method, body.chat_id, body.reply_markup.inline_keyboard[0][0].text]).toEqual(["sendMessage", 42, "↩ Reply"]);
+      const askId = 101;
+      // A tap from someone else's chat is ignored.
+      await F.tgHandle({ callback_query: { id: "q0", from: { id: 666 }, message: { message_id: askId, chat: { id: 666 } } } });
+      expect(calls.length).toBe(1);
+      await F.tgHandle({ callback_query: { id: "q1", from: { id: 7 }, message: { message_id: askId, chat: { id: 42 } } } });
+      expect(calls.map(([m]) => m)).toEqual(["sendMessage", "answerCallbackQuery", "sendMessage"]);
+      expect(calls[2][1].reply_markup.force_reply).toBe(true);
+      const promptId = 103;
+      await F.tgHandle({ message: { message_id: 9, text: "yes, drop it", chat: { id: 42 }, from: { id: 7 }, reply_to_message: { message_id: promptId } } });
+      expect(sent).toEqual([["s1", "yes, drop it"]]);
+      expect(calls.at(-1)![1].text).toBe("✓ sent to checkout flow");
+      // Once the session stops waiting, the button comes off the question.
+      F.tgSettle(new Set());
+      await Bun.sleep(50);
+      expect(calls.at(-1)).toEqual(["editMessageReplyMarkup", { chat_id: 42, message_id: askId, reply_markup: { inline_keyboard: [] } }]);
+      // Messages from another chat never reach a session.
+      await F.tgHandle({ message: { message_id: 10, text: "rm -rf", chat: { id: 666 }, from: { id: 666 }, reply_to_message: { message_id: promptId } } });
+      expect(sent.length).toBe(1);
+    } finally {
+      delete F.web.send;
+    }
+  });
+
+  test("the t screen never draws the token, even while it is being pasted", () => {
+    F.writeTg({});
+    F.tg.entry = "";
+    for (const ch of TOKEN) F.tgKey(ch);
+    const screen = F.tgScreen(140, 30).join("\n");
+    expect(screen).not.toContain(TOKEN.slice(7, 20));
+    expect(screen).toContain("•••");
+    F.tgKey("\x1b");
+    expect(F.tg.entry).toBeUndefined();
+    expect(F.readTg().token).toBeUndefined();
   });
 });

@@ -5499,6 +5499,7 @@ export function buttonBar(W: number, row: number, idle = 0): string {
     add(seenIt, newCount() ? `␣ Seen·${newCount()}` : "␣ Seen", "␣", "seen");
     add("r Reply", "r Reply", "r", "reply");
     add("w Phone", "w Phone", "w", "web", !!web.url);
+    add("t Telegram", "t", "t", "telegram", tg.paired);
     add("? Legend", "?", "?", "legend");
     plain(" ");
     add("q Quit", "q Quit", "q", "quit");
@@ -6207,6 +6208,331 @@ export function webScreen(cols: number, rows: number): string[] {
   return out.map((l) => clipRow(l, W));
 }
 
+// ───────────────────────── Telegram ─────────────────────────
+// Key t pairs fleet with a Telegram bot of your own, so it can message you on every device: when a session needs
+// you (reply to that message to answer it), when one looks stuck, and when a pull request fails, goes green, merges
+// or goes live. Messages go through Telegram's servers. The bot answers only the one chat it was paired with.
+
+export interface TgConfig {
+  token?: string; // the bot's token from @BotFather: never drawn, logged or put in an error
+  bot?: string; // the bot's username
+  chat?: number; // the paired chat and the person in it; nothing else is listened to
+  user?: number;
+  pairCode?: string; // the one-time code in the pairing link, until a chat uses it
+}
+const fleetConfigDir = () => path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "claude-fleet");
+export const tgConfigPath = () => process.env.FLEET_TELEGRAM_FILE || path.join(fleetConfigDir(), "telegram.json");
+const tgApiBase = () => process.env.FLEET_TELEGRAM_API || "https://api.telegram.org";
+export function readTg(): TgConfig {
+  try {
+    const c = JSON.parse(fs.readFileSync(tgConfigPath(), "utf8"));
+    return c && typeof c === "object" ? c : {};
+  } catch {
+    return {};
+  }
+}
+export function writeTg(c: TgConfig) {
+  const file = tgConfigPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(c, null, 2) + "\n", { mode: 0o600 });
+  fs.renameSync(tmp, file);
+}
+export const TG_TOKEN = /^\d{5,}:[A-Za-z0-9_-]{30,}$/;
+/** One call to the bot API. Failures say what went wrong in words, never with the address, which holds the token. */
+export async function tgCall(token: string, method: string, params: Record<string, unknown> = {}, timeoutMs = 15_000): Promise<{ ok: boolean; result?: any; error?: string }> {
+  try {
+    const r = await fetch(`${tgApiBase()}/bot${token}/${method}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(params), signal: AbortSignal.timeout(timeoutMs) });
+    const j: any = await r.json().catch(() => ({}));
+    if (j?.ok) return { ok: true, result: j.result };
+    return { ok: false, error: r.status === 401 || r.status === 404 ? "Telegram does not know that token" : r.status === 409 ? "another program is reading this bot" : `Telegram said ${typeof j?.description === "string" ? safeLine(j.description).slice(0, 80) : r.status}` };
+  } catch {
+    return { ok: false, error: "could not reach Telegram" };
+  }
+}
+
+/** Which session each message we sent is about, so a reply to it reaches that session. Kept on disk so a reply works after a restart, or from the fleet that takes over. */
+const tgSentPath = () => path.join(path.dirname(tgConfigPath()), "telegram-sent.json");
+const tgSent = new Map<number, string>();
+function loadTgSent() {
+  try {
+    for (const [id, sid] of JSON.parse(fs.readFileSync(tgSentPath(), "utf8"))) tgSent.set(Number(id), String(sid));
+  } catch {}
+}
+function rememberTg(id: number, sid: string) {
+  tgSent.set(id, sid);
+  while (tgSent.size > 500) tgSent.delete(tgSent.keys().next().value!);
+  try {
+    fs.writeFileSync(tgSentPath(), JSON.stringify([...tgSent]), { mode: 0o600 });
+  } catch {}
+}
+
+export const tg = {
+  on: false, // this fleet is the one talking to the bot
+  status: "", // the latest problem, in words, for the t screen
+  entry: undefined as string | undefined, // the token being typed or pasted on the t screen
+  getSessions: (() => []) as () => Session[],
+  paired: false, // read from the file on each scan, for the button
+  was: { ready: false, pr: new Map<string, string>() },
+};
+/** Send `text` to the paired chat; when it is about a session, a reply to it goes to that session. */
+export async function tgSay(text: string, sid?: string, asking = false): Promise<boolean> {
+  const c = readTg();
+  if (!c.token || !c.chat) return false;
+  // A question carries a Reply button; it is taken off again once the session stops waiting.
+  const markup = asking && sid ? { reply_markup: { inline_keyboard: [[{ text: "↩ Reply", callback_data: "reply" }]] } } : {};
+  const r = await tgCall(c.token, "sendMessage", { chat_id: c.chat, text: text.slice(0, 4000), disable_web_page_preview: true, ...markup });
+  if (!r.ok) tg.status = r.error ?? "";
+  if (r.ok && sid && typeof r.result?.message_id === "number") {
+    rememberTg(r.result.message_id, sid);
+    if (asking) tgAsking.set(sid, r.result.message_id);
+  }
+  return r.ok;
+}
+/** The question message each waiting session was sent, so its Reply button can be taken off when it is answered. */
+const tgAsking = new Map<string, number>();
+/** Take the Reply button off questions whose session is no longer waiting. */
+export function tgSettle(waiting: Set<string>) {
+  const c = readTg();
+  if (!c.token || !c.chat) return;
+  for (const [sid, id] of tgAsking)
+    if (!waiting.has(sid)) {
+      tgAsking.delete(sid);
+      void tgCall(c.token, "editMessageReplyMarkup", { chat_id: c.chat, message_id: id, reply_markup: { inline_keyboard: [] } });
+    }
+}
+const tgName = (s: Session) => s.name || path.basename(s.cwd);
+/** What fleet does with a message from Telegram: pairing, a reply to a session, or a short status. */
+export async function tgHandle(update: any): Promise<void> {
+  const q = update?.callback_query;
+  if (q && typeof q.id === "string") {
+    const c = readTg();
+    if (!c.token) return;
+    const from = q.message?.chat?.id;
+    if (!c.chat || from !== c.chat || (c.user && q.from?.id !== c.user)) return;
+    const sid = typeof q.message?.message_id === "number" ? tgSent.get(q.message.message_id) : undefined;
+    const s = sid ? tg.getSessions().find((x) => x.sid === sid) : undefined;
+    await tgCall(c.token, "answerCallbackQuery", { callback_query_id: q.id, text: s ? undefined : "That session has finished." });
+    if (!s) return;
+    // Telegram's own reply box, opened on whichever device was tapped; the answer is a reply to this prompt.
+    const r = await tgCall(c.token, "sendMessage", { chat_id: c.chat, text: `✍️ Your answer to ${tgName(s)}:`, reply_markup: { force_reply: true, input_field_placeholder: `answer ${tgName(s)}…`.slice(0, 64) } });
+    if (r.ok && typeof r.result?.message_id === "number") rememberTg(r.result.message_id, s.sid);
+    return;
+  }
+  const m = update?.message;
+  if (!m || typeof m.text !== "string" || typeof m.chat?.id !== "number") return;
+  const c = readTg();
+  if (!c.token) return;
+  const say = (text: string) => tgCall(c.token!, "sendMessage", { chat_id: m.chat.id, text, reply_to_message_id: m.message_id });
+  if (!c.chat) {
+    // Only the chat that opens the pairing link (which carries the one-time code) is paired; anyone else is ignored.
+    if (c.pairCode && m.chat.type === "private" && m.text.trim() === `/start ${c.pairCode}`) {
+      writeTg({ ...c, chat: m.chat.id, user: m.from?.id, pairCode: undefined });
+      await say("Paired with Claude Fleet ✓\n\nI'll message you when a session needs you, looks stuck, or a pull request changes. Reply to one of my messages to send your reply to that session. /status lists what's waiting.");
+    }
+    return;
+  }
+  if (m.chat.id !== c.chat || (c.user && m.from?.id !== c.user)) return;
+  const text = m.text.trim();
+  const target = typeof m.reply_to_message?.message_id === "number" ? tgSent.get(m.reply_to_message.message_id) : undefined;
+  if (target) {
+    const s = tg.getSessions().find((x) => x.sid === target);
+    if (!s) return void (await say("That session has finished, so I can't send to it."));
+    const r = await (web.send ?? sendToSession)(s, text);
+    await say(r.ok ? `✓ sent to ${tgName(s)}` : `✗ not sent: ${r.error}`);
+    return;
+  }
+  if (text === "/status" || text === "/start") {
+    const views = buildViews(tg.getSessions(), clock()).filter((v) => !isHidden(v));
+    const lines = views.map((v) => `${v.state === "needs" ? "🟡" : v.state === "stalled" ? "⏳" : v.state === "working" ? "🟢" : "⚪"} ${tgName(v.s)} — ${STATE[v.state].word}${v.facts.needs ? `: ${capText(flatReply(v.facts.needs), 200)}` : ""}`);
+    await say(lines.length ? lines.join("\n") : "Nothing is working and nothing is waiting on you.");
+    return;
+  }
+  await say("Reply to one of my messages to send your text to that session. /status lists the sessions.");
+}
+let tgPolling = false;
+/** Read the bot's messages for as long as this fleet is the one talking to it. */
+async function tgPoll() {
+  if (tgPolling) return;
+  tgPolling = true;
+  let offset = 0;
+  try {
+    while (tg.on) {
+      const c = readTg();
+      if (!c.token) break;
+      const r = await tgCall(c.token, "getUpdates", { offset, timeout: 25, allowed_updates: ["message", "callback_query"] }, 35_000);
+      if (!r.ok) {
+        tg.status = r.error ?? "";
+        await new Promise((res) => setTimeout(res, 10_000));
+        continue;
+      }
+      tg.status = "";
+      for (const u of r.result ?? []) {
+        offset = Math.max(offset, u.update_id + 1);
+        await tgHandle(u).catch(() => {});
+      }
+    }
+  } finally {
+    tgPolling = false;
+  }
+}
+/** Only one fleet talks to the bot (Telegram allows one reader): the one holding the lock, taken over when it quits. */
+const tgLockPath = () => path.join(path.dirname(tgConfigPath()), "telegram.lock");
+export function tgClaim(): boolean {
+  if (!readTg().token) return (tg.on = false);
+  const file = tgLockPath();
+  try {
+    const pid = Number(fs.readFileSync(file, "utf8"));
+    if (pid && pid !== process.pid && alive(pid)) return (tg.on = false);
+  } catch {}
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, String(process.pid));
+    if (!tg.on) {
+      tg.on = true;
+      loadTgSent();
+      void tgPoll();
+    }
+  } catch {
+    tg.on = false;
+  }
+  return tg.on;
+}
+export function tgRelease() {
+  try {
+    if (Number(fs.readFileSync(tgLockPath(), "utf8")) === process.pid) fs.unlinkSync(tgLockPath());
+  } catch {}
+}
+/** A pull request's state, in the few words a message needs: "failing", "green", "merged", "live on staging", or "". */
+function prWord(pr: PrLink, cwd: string): string {
+  const st = prState.get(`${pr.repo}#${pr.number}`)?.state;
+  if (!st) return "";
+  if (st.state === "MERGED") {
+    const d = deploys().find((x) => x.repo === pr.repo);
+    return d && st.mergeSha && mergeLive(st.mergeSha, deployState.get(d.url)?.revision, cwd, pr.repo) ? `live on ${d.name}` : "merged";
+  }
+  return st.state !== "OPEN" ? "" : st.fail ? "failing" : !st.pending && st.pass ? "green" : "";
+}
+/** The messages for what changed in this scan. Called with what the bell rang for, so both agree on what is new. */
+export function tgEvents(sessions: Session[], asked: string[], stalled: string[]): [text: string, sid: string, asking?: boolean][] {
+  const out: [string, string, boolean?][] = [];
+  const bySid = new Map(sessions.map((s) => [s.sid, s]));
+  for (const sid of asked) {
+    const s = bySid.get(sid);
+    const q = s && factsOf(s).needs;
+    if (s) out.push([`🟡 ${tgName(s)} needs you${q ? `\n\n${capText(flatReply(q), 1500)}` : ""}`, sid, true]);
+  }
+  for (const sid of new Set(stalled.map((k) => k.split("/")[0]))) {
+    const s = bySid.get(sid);
+    if (s) out.push([`⏳ ${tgName(s)} looks stuck: nothing new for a while.\n\n↩ Reply to nudge it.`, sid]);
+  }
+  for (const s of sessions)
+    for (const pr of s.side?.prs.slice(0, PR_SHOWN) ?? []) {
+      const key = `${pr.repo}#${pr.number}`;
+      const word = prWord(pr, s.side?.cwd ?? s.cwd);
+      const was = tg.was.pr.get(key);
+      if (tg.was.ready && word && was !== undefined && word !== was) out.push([`${word === "failing" ? "❌" : word.startsWith("live") ? "🚀" : "✅"} ${tgName(s)}: #${pr.number} ${word === "green" ? "CI green" : word === "failing" ? "CI failing" : word}`, s.sid]);
+      if (word || was === undefined) tg.was.pr.set(key, word);
+    }
+  tg.was.ready = true;
+  return out;
+}
+
+let tgOn = false; // key t: the Telegram screen is showing
+let tgCheck = { at: 0, text: "" }; // the bot's name, checked when the screen opens
+/** Key t: pair with your own Telegram bot, or see that it is paired. */
+export function tgScreen(cols: number, rows: number): string[] {
+  const W = Math.max(40, cols);
+  const c = readTg();
+  const out: string[] = ["", fg(C.cyan, bold("  ◆ CLAUDE FLEET")) + fg(C.white, " on Telegram"), ""];
+  const say = (text: string, color: RGB = C.text) => out.push(fg(color, "  " + text));
+  if (tg.entry !== undefined || !c.token) {
+    say("Fleet can message you on Telegram, on every device, and you can reply to answer a session.");
+    say("Messages go through Telegram's servers.", C.dim);
+    out.push("");
+    say("1. In Telegram, open @BotFather and send /newbot. Pick any name; it gives you a token.");
+    say("2. Paste the token here and press Enter. It is kept in ~/.config/claude-fleet/telegram.json, readable only by you.");
+    out.push("");
+    out.push("  " + fg(C.white, "token: ") + fg(C.cyan, tg.entry === undefined ? "press Enter, then paste" : "•".repeat(Math.min(48, tg.entry.length)) + "▏"));
+    if (tg.status) out.push("", fg(C.red, "  " + tg.status));
+  } else if (!c.chat) {
+    const link = c.bot && c.pairCode ? `https://t.me/${c.bot}?start=${c.pairCode}` : undefined;
+    if (!link) say(tgCheck.text || "checking the token with Telegram…", C.dim);
+    else {
+      say("Scan this with your phone (or open the link) and tap Start to pair your chat:");
+      out.push("");
+      for (const line of qrRows(link) ?? []) out.push("  " + line);
+      out.push("", fg(C.text, "  " + link));
+    }
+    if (tg.status) out.push("", fg(C.red, "  " + tg.status));
+    out.push("", fg(C.dim, "  x forgets the token"));
+  } else {
+    say(`Paired with @${c.bot ?? "your bot"} ✓`, C.green);
+    out.push("");
+    say("You'll get a message when a session needs you or looks stuck, and when a pull request fails, goes green,");
+    say("merges or goes live. Tap ↩ Reply on a question, or reply to any message, to answer that session.");
+    say("/status lists what's waiting.");
+    out.push("", fg(C.dim, tg.on ? "  This fleet is talking to the bot." : "  Another fleet on this Mac is talking to the bot; this one takes over if it quits."));
+    if (tg.status) out.push("", fg(C.red, "  " + tg.status));
+    out.push("", fg(C.dim, "  s sends a test message · x unpairs and forgets the token"));
+  }
+  while (out.length < rows - 1) out.push("");
+  out.length = Math.max(0, rows - 1);
+  out.push(fg(C.dim, fit(tg.entry !== undefined ? "  Enter saves · Esc cancels" : "  any other key or click returns to the fleet", W)));
+  return out.map((l) => clipRow(l, W));
+}
+/** When the t screen opens, or a token was just saved: check the token, learn the bot's name, and make a pairing code. */
+export async function tgPrepare(): Promise<void> {
+  const c = readTg();
+  if (!c.token || c.chat) return;
+  tgCheck = { at: Date.now(), text: "checking the token with Telegram…" };
+  const me = await tgCall(c.token, "getMe");
+  if (!me.ok || typeof me.result?.username !== "string") {
+    tg.status = me.error ?? "Telegram did not accept the token";
+    tgCheck.text = "";
+    return;
+  }
+  tg.status = "";
+  writeTg({ ...readTg(), bot: me.result.username, pairCode: readTg().pairCode || Buffer.from(crypto.getRandomValues(new Uint8Array(12))).toString("base64url") });
+  if (tgWanted) tgClaim(); // never for the demo's made-up sessions
+}
+/** A key on the t screen. Returns false when the screen should close. */
+export function tgKey(key: string): boolean {
+  if (tg.entry !== undefined) {
+    if (key === "\x1b") tg.entry = undefined;
+    else if (key === "\r" || key === "\n") {
+      const token = tg.entry.trim();
+      tg.entry = undefined;
+      if (!TG_TOKEN.test(token)) tg.status = "That doesn't look like a bot token (digits, a colon, then letters).";
+      else {
+        writeTg({ token });
+        tg.status = "";
+        void tgPrepare();
+      }
+    } else if (key === "\x7f" || key === "\b") tg.entry = tg.entry.slice(0, -1);
+    else if (/^[\x20-\x7e]+$/.test(key)) tg.entry = (tg.entry + key).slice(0, 200);
+    return true;
+  }
+  const c = readTg();
+  if (!c.token && (key === "\r" || key === "\n")) {
+    tg.entry = "";
+    return true;
+  }
+  if (key === "x" && c.token) {
+    if (c.chat) void tgCall(c.token, "sendMessage", { chat_id: c.chat, text: "Unpaired from Claude Fleet. Bye 👋" });
+    writeTg({});
+    tg.on = false;
+    tg.status = "";
+    tgRelease();
+    return true;
+  }
+  if (key === "s" && c.chat) {
+    void tgSay("👋 Test from Claude Fleet. Notifications are working.");
+    return true;
+  }
+  return false;
+}
+
 // ───────────────────────── legend ─────────────────────────
 
 let legendOn = false; // key ?: the legend is showing instead of the fleet
@@ -6265,7 +6591,7 @@ export function legend(cols: number, rows: number): string[] {
     key("d", "list finished agents"),
     key("tab", "focus the next session"),
     key("esc", "leave focus; with none, quit"),
-    key("r w", "open one waiting; phone page (QR)"),
+    key("r w t", "open one waiting; phone page; Telegram"),
     key("b u", "bell on/off; retry usage now"),
     key("space", "seen it: clears the new marks"),
     key("?", "this legend"),
@@ -6386,10 +6712,12 @@ const needing = new Set<string>(); // sessions that were waiting on the person a
 const askedAt = new Map<string, number>(); // …and when each one's question was asked, the last time the bell rang for it
 const stalledNow = new Map<string, number>();
 let retakeAt = 0;
+let tgWanted = false; // set at launch for real sessions: talk to the Telegram bot when this fleet holds it
 function refresh() {
-  if (web.retake && Date.now() >= retakeAt) {
-    retakeAt = Date.now() + 10_000; // when the fleet serving the page quits, this one takes it over
-    web.retake();
+  if (Date.now() >= retakeAt) {
+    retakeAt = Date.now() + 10_000; // when the fleet serving the page or talking to the bot quits, this one takes over
+    web.retake?.();
+    if (tgWanted) tgClaim();
   }
   const now = clock();
   sessions = scan(now);
@@ -6402,7 +6730,17 @@ function refresh() {
   // Ring once when a session starts waiting on the person, and once for each thing that newly stalls.
   const facts = sessions.map((s) => ({ s, f: factsOf(s) }));
   const asks = facts.filter((x) => x.f.needs).map((x): [string, number] => [x.s.sid, stateSince(x.s, x.f, "needs")]);
-  const rings = newAsks(needing, askedAt, asks).length + newStalls(stalledNow, facts.flatMap((x) => stallMarks(x.s, x.f, stallOf(x.s, x.f, now)))).length;
+  const asked = newAsks(needing, askedAt, asks);
+  const stalled = newStalls(stalledNow, facts.flatMap((x) => stallMarks(x.s, x.f, stallOf(x.s, x.f, now))));
+  const rings = asked.length + stalled.length;
+  if (tgWanted) {
+    const told = tgEvents(sessions, asked, stalled); // always, so what changed while another fleet held the bot is not news later
+    tg.paired = !!readTg().chat;
+    if (tg.on && tg.paired) {
+      for (const [text, sid, asking] of told) void tgSay(text, sid, asking);
+      tgSettle(new Set(asks.map(([sid]) => sid)));
+    }
+  }
   if (opt.bell && !opt.once) process.stdout.write("\x07".repeat(rings));
   noteScan(sessions, now);
   const partied = noteParties(sessions, now);
@@ -6434,11 +6772,17 @@ if (import.meta.main) {
 
   // The phone page is always on (key w shows its link), except for made-up sessions (the demo and tests) or FLEET_WEB=0.
   if (!process.env.FLEET_HOME && process.env.FLEET_WEB !== "0") startWeb(() => sessions);
+  // Telegram, once key t has paired a bot; likewise only for real sessions.
+  if (!process.env.FLEET_HOME) {
+    tgWanted = true;
+    tg.getSessions = () => sessions;
+    tgClaim();
+  }
 
   const out = process.stdout;
   let onScreen: string[] | undefined; // the frame the terminal shows, so the next writes only the rows that differ
   const draw = () => {
-    const lines = legendOn ? legend(out.columns || 140, out.rows || 45) : webOn ? webScreen(out.columns || 140, out.rows || 45) : render(sessions, out.columns || 140, out.rows || 45, clock());
+    const lines = legendOn ? legend(out.columns || 140, out.rows || 45) : webOn ? webScreen(out.columns || 140, out.rows || 45) : tgOn ? tgScreen(out.columns || 140, out.rows || 45) : render(sessions, out.columns || 140, out.rows || 45, clock());
     out.write(frameDiff(onScreen, lines));
     onScreen = lines;
   };
@@ -6454,6 +6798,7 @@ if (import.meta.main) {
     if (process.stdin.isTTY) process.stdin.setRawMode(false);
   });
   const quit = () => {
+    tgRelease();
     restore();
     process.exit(0);
   };
@@ -6465,7 +6810,12 @@ if (import.meta.main) {
     else if (name === "win+") opt.windowMin = stepWindow(opt.windowMin, 1);
     else if (name === "win-") opt.windowMin = stepWindow(opt.windowMin, -1);
     else if (name === "reply") return reply();
-    else if (name === "web") {
+    else if (name === "telegram") {
+      tgOn = true;
+      tg.status = "";
+      if (!readTg().token) tg.entry = "";
+      else void tgPrepare();
+    } else if (name === "web") {
       startWeb(() => sessions);
       webOn = true;
     }
@@ -6532,7 +6882,7 @@ if (import.meta.main) {
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) process.on(signal, quit);
 
   const KEYS: Record<string, string> = {
-    q: "quit", "\x03": "quit", "\x1b": "back", "\t": "next", w: "web",
+    q: "quit", "\x03": "quit", "\x1b": "back", "\t": "next", w: "web", t: "telegram",
     "1": "mode:detail", "2": "mode:compact", "3": "mode:far", r: "reply",
     "+": "win+", "=": "win+", "-": "win-", _: "win-",
     d: "done", a: "all", b: "bell", u: "usage", " ": "seen", "?": "legend",
@@ -6543,6 +6893,18 @@ if (import.meta.main) {
     const handle = (events: InputEvent[]) => {
       const keys = events.filter((e) => e.kind === "key");
       if (keys.some((e) => e.kind === "key" && e.key === "\x03")) return quit(); // Ctrl-C quits from anywhere in a read
+      // The Telegram screen takes every key, a pasted token included; a click or a key it has no use for closes it.
+      if (tgOn) {
+        for (const e of events)
+          if ((e.kind === "key" && !tgKey(e.key)) || e.kind === "press") {
+            tgOn = false;
+            tg.entry = undefined;
+            clear();
+            break;
+          }
+        draw();
+        return;
+      }
       for (const e of events) {
         if (e.kind === "other" || (e.kind === "key" && keys.length > PASTE_KEYS)) continue;
         // The legend is closed by a key or a click, which then does nothing else. A button's release is not a click, so the click that opened it does not close it.
