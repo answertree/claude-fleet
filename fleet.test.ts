@@ -5130,3 +5130,93 @@ describe("on Windows", () => {
     for (const p of ["work/shop", "~/work", ""]) expect(F.absoluteDir(p)).toBe(false);
   });
 });
+
+describe("every machine", () => {
+  const tail = (over: Record<string, unknown> = {}) => {
+    const t = F.newTail("/x/main.jsonl") as any;
+    Object.assign(t, { lastT: Date.now(), mtime: Date.now(), tools: [Date.now() - 7 * 3600_000, Date.now() - 1000] }, over);
+    t.tokens.set("m1", [Date.now() - 1000, 50]);
+    t.tokens.set("old", [Date.now() - 7 * 3600_000, 50]);
+    t.prs.set("o/r#1", { repo: "o/r", number: 1, url: "https://github.com/o/r/pull/1", t: Date.now() });
+    return t;
+  };
+  const session = (sid: string, name: string, extra: Record<string, unknown> = {}) => ({ sid, pid: 999999, name, kind: "bg", status: "busy", cwd: "/Users/me/work", startedAt: Date.now(), mains: [tail()], agents: [], workflows: [], ...extra }) as any;
+
+  test("a machine's sessions travel whole: Maps come back, the reader's own state stays behind, old times are trimmed", () => {
+    const [back] = F.decodeSessions(F.encodeSessions([session("aaaaaaaa-0000-4000-8000-000000000001", "shop")], Date.now()));
+    const t = back.mains[0];
+    expect([back.name, t.tokens instanceof Map, t.prs instanceof Map, [...t.tokens.values()].map((v) => v[1]), t.tools.length, typeof t.decoder.write]).toEqual(["shop", true, true, [50], 1, "function"]);
+    expect(back.remote!.use.known).toBe(false);
+    expect((t as any).path).toBeUndefined(); // how this machine reads its files stays here
+    // What a session changed keeps its file names; an agent that finished before any window can show it is left behind.
+    const old = { id: "a1", label: "old", type: "x", model: "m", done: true, tail: tail({ lastT: Date.now() - 5 * 3600_000, mtime: Date.now() - 5 * 3600_000 }) };
+    const fresh = { id: "a2", label: "fresh", type: "x", model: "m", done: true, tail: tail() };
+    const [s2] = F.decodeSessions(F.encodeSessions([session("aaaaaaaa-0000-4000-8000-000000000003", "shop", { side: { prs: [], bg: [], fails: [], edits: [{ path: "/w/a.ts", t: 1 }], compactions: 0 }, agents: [old, fresh] })], Date.now()));
+    expect([s2.side!.edits[0].path, s2.agents.map((a) => a.label)]).toEqual(["/w/a.ts", ["fresh"]]);
+  });
+
+  test("another machine is answered only when Tailscale vouches for it, with this machine's own sessions, and can send to them", async () => {
+    process.env.FLEET_WEB_HOST = "127.0.0.1";
+    process.env.FLEET_WEB_PORT = "5077";
+    process.env.FLEET_WEB_TOKEN_FILE = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "fleet-peer-")), "web-token");
+    for (const k of ["server", "url", "error", "shared", "retake"] as const) delete (F.web as any)[k];
+    const trust = F.peerNet.trust;
+    const discover = F.peerNet.discover;
+    const sent: [string, string][] = [];
+    F.web.send = async (s, text) => (sent.push([s.sid, text]), { ok: true, via: "test" });
+    const here = session("aaaaaaaa-0000-4000-8000-000000000001", "shop");
+    const elsewhere = session("aaaaaaaa-0000-4000-8000-000000000002", "theirs", { remote: { host: "box", ip: "1.2.3.4", addr: "1.2.3.4:4777", use: { cpu: 0, rss: 0, known: false } } });
+    const web = F.startWeb(() => [here, elsewhere], () => Date.now());
+    try {
+      F.peerNet.trust = async () => false;
+      expect((await fetch("http://127.0.0.1:5077/peer/state")).status).toBe(403);
+      F.peerNet.trust = async (ip) => ip === "127.0.0.1";
+      const first = await fetch("http://127.0.0.1:5077/peer/state");
+      const j: any = await first.json();
+      // Asked again with nothing changed, it answers in a few bytes.
+      expect((await fetch("http://127.0.0.1:5077/peer/state", { headers: { "if-none-match": first.headers.get("etag")! } })).status).toBe(304);
+      expect([j.proto, j.sessions.map((s: any) => s.name)]).toEqual([F.PEER_PROTO, ["shop"]]); // never the sessions it got from others
+      expect((await fetch("http://127.0.0.1:5077/peer/send", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sid: elsewhere.sid, text: "x" }) })).status).toBe(404);
+
+      // This fleet, seen from another: it finds the machine, reads its sessions, and says which machine each is on.
+      F.tailnet.ip = "100.64.0.9";
+      F.tailnet.at = 0;
+      F.peerNet.discover = async () => void (F.tailnet.found = [{ host: "studio", ip: "127.0.0.1" }]);
+      F.wantPeers(true);
+      F.pollPeers(Date.now());
+      await Bun.sleep(50);
+      F.pollPeers(Date.now());
+      for (let i = 0; i < 40 && !F.peerSessions().length; i++) await Bun.sleep(25);
+      const remote = F.peerSessions();
+      expect(remote.map((s) => [s.name, s.remote!.host, s.remote!.addr])).toEqual([["shop", "studio", "127.0.0.1:5077"]]);
+      expect([F.manyMachines(), F.machineOf(remote[0])]).toEqual([true, "studio"]);
+      // The first read of a machine is not news; the next is.
+      expect([...F.takeFreshPeers()]).toEqual([here.sid]);
+      expect(F.takeFreshPeers().size).toBe(0);
+      // A message to a session over there is typed in by that machine's fleet.
+      expect(await F.sendToSession(remote[0], "go ahead")).toEqual({ ok: true, via: "studio test" });
+      expect(sent).toEqual([[here.sid, "go ahead"]]);
+    } finally {
+      web.server?.stop();
+      F.wantPeers(false);
+      F.peers.clear();
+      F.tailnet.found = [];
+      F.peerNet.trust = trust;
+      F.peerNet.discover = discover;
+      delete F.web.send;
+      delete process.env.FLEET_WEB_HOST;
+      delete process.env.FLEET_WEB_PORT;
+      delete process.env.FLEET_WEB_TOKEN_FILE;
+    }
+  });
+
+  test("one fleet on the network talks to the Telegram bot: the lowest address of those that can", () => {
+    const now = Date.now();
+    expect(F.tgLeader("100.64.0.5", [{ ip: "100.64.0.9", tgReady: true, at: now }], now)).toBe(true);
+    expect(F.tgLeader("100.64.0.9", [{ ip: "100.64.0.5", tgReady: true, at: now }], now)).toBe(false);
+    expect(F.tgLeader("100.64.0.9", [{ ip: "100.64.0.5", tgReady: false, at: now }], now)).toBe(true); // it has no bot
+    expect(F.tgLeader("100.64.0.9", [{ ip: "100.64.0.5", tgReady: true, at: now - 60_000 }], now)).toBe(true); // it has gone
+    expect(F.tgLeader("100.64.0.10", [{ ip: "100.64.0.9", tgReady: true, at: now }], now)).toBe(false); // by number, not by text
+    expect(F.tgLeader(undefined, [{ ip: "100.64.0.5", tgReady: true, at: now }], now)).toBe(true); // no tailnet: just this machine
+  });
+});

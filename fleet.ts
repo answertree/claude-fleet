@@ -1513,7 +1513,7 @@ export function pollSides(sessions: Session[], now: number, sync = false) {
   }
   if (opt.prs) pollDeploys(now, sync);
 }
-const gitOf = (s: Session): GitState | undefined => gitState.get(s.side?.cwd ?? s.cwd)?.state;
+const gitOf = (s: Session): GitState | undefined => (s.remote ? s.remote.git : gitState.get(s.side?.cwd ?? s.cwd)?.state);
 
 /** The side facts across a session's transcripts. */
 export function sideOf(mains: Tail[], now: number): Side {
@@ -1547,6 +1547,7 @@ export interface Session {
   job?: { state: string; detail: string; needs: string; since?: number; tokens?: number }; // since: when a blocked job began waiting; tokens: all it has used
   side?: Side; // what it is doing beside the conversation
   jobId?: string;
+  remote?: { host: string; ip: string; addr: string; use: { cpu: number; rss: number; known: boolean }; git?: GitState }; // on another machine: which, and what its fleet measured there
 }
 
 /**
@@ -1991,6 +1992,8 @@ export function sampleMachine() {
 }
 
 /** CPU and memory of a process and everything it started. `known` is false when the process was not in the last sample. */
+/** A session's process tree usage: measured here, or by the fleet on its own machine. */
+export const useOf = (s: Session): { cpu: number; rss: number; known: boolean } => (s.remote ? s.remote.use ?? { cpu: 0, rss: 0, known: false } : treeUsage(s.pid));
 export function treeUsage(pid: number): { cpu: number; rss: number; known: boolean } {
   const root = machine.procs.find((p) => p.pid === pid);
   let cpu = root?.cpu ?? 0;
@@ -2828,7 +2831,7 @@ const stallHeld = new Map<string, number>();
  * counts as stalled only when they have all gone quiet too. Something `held` (stalled at the last scan,
  * and silent since) stays stalled until the tree is properly busy again, not merely over 1%.
  */
-export function stallOf(s: Session, f: Facts, now: number, treeCpu: number | undefined = treeCpuOf(s.pid), stallMs = opt.stallMin * 60_000, held: ReadonlyMap<string, number> = stallHeld): Stall {
+export function stallOf(s: Session, f: Facts, now: number, treeCpu: number | undefined = s.remote ? (s.remote.use?.known ? s.remote.use.cpu : undefined) : treeCpuOf(s.pid), stallMs = opt.stallMin * 60_000, held: ReadonlyMap<string, number> = stallHeld): Stall {
   if (stallMs <= 0 || f.needs || !f.working) return NO_STALL;
   const agents = [...s.agents, ...s.workflows.filter((w) => w.status === "running").flatMap((w) => w.agents)];
   const lastWrite = Math.max(0, ...tailsOf(s).map(lastWriteOf));
@@ -4341,7 +4344,7 @@ function contextOf(b: Block, now: number) {
 }
 /** "34k out · cpu 3% · 0.4G": output tokens in the window, then the CPU and memory of the session's process tree. Fullest first, for whichever fits. */
 function figuresOf(b: Block, p: Paint): Seg[][] {
-  const use = treeUsage(b.v.s.pid);
+  const use = useOf(b.v.s);
   const out: Seg[] = [[human(tokensIn(tailsOf(b.v.s), p.win)), C.text], [" out", C.dim]];
   if (!use.known) return [out];
   const cpu: Seg[] = [...out, [` ${ICON.sep} `, C.faint], [`cpu ${Math.round(use.cpu)}%`, C.dim]];
@@ -4376,7 +4379,7 @@ function headRows(b: Block, p: Paint): Row[] {
   const folders = foldersOf(s.cwd.replace(os.homedir(), "~"));
   const branch = s.mains.map((m) => m.branch).find(Boolean);
   const at = branch && branch !== "HEAD" ? ` ${ICON.at} ${branch}` : "";
-  const where = folders.slice(-2).join("/") + at;
+  const where = (machineOf(s) ? `${machineOf(s)} ${ICON.sep} ` : "") + folders.slice(-2).join("/") + at;
   const kind = `${s.kind || "cli"} ${s.sid.slice(0, 8)}`;
   // 'folder/folder @ branch · kind id' loses the kind and id first, then the parent folder, then goes. Under 100 columns it is not drawn.
   // The session's totals go first when room is short: all the tokens it has used, the agents it has run, how often its context was compacted.
@@ -5232,7 +5235,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
       const agentsLive = [...s.agents, ...s.workflows.flatMap((w) => w.agents)].filter((a) => !a.done && lastWriteOf(a.tail) >= since).length;
       const wfLive = s.workflows.filter((w) => w.status === "running" && w.lastT >= since).length;
       const ctx = f.main?.ctx;
-      const use = treeUsage(s.pid);
+      const use = useOf(s);
       // Side column, one fact a row beside the chart: agents and workflows, context, the process tree, tool calls, tasks.
       const side: ((r: Row) => void)[] = [
         (r) =>
@@ -5256,7 +5259,8 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
           col = r.put(col, figure, tone.color, tone.bold);
           if (forecast) r.put(col + 1, forecast, runwayTone(runway!), true);
         });
-      side.push((r) => r.put(sideAt, `CPU ${Math.round(use.cpu)}% ${ICON.sep} ${gb(use.rss * 1024)}`, dimHere));
+      // With more than one machine on the screen, the machine leads its CPU row.
+      side.push((r) => r.put(sideAt, `${machineOf(s) ? `${machineOf(s)!.toUpperCase()} ${ICON.sep} ` : ""}CPU ${Math.round(use.cpu)}% ${ICON.sep} ${gb(use.rss * 1024)}`, dimHere));
       // Counted on the lane's bars, as the header's total and detail mode's figure are, so the cards add up to the header (the chart beside it has finer bars).
       side.push((r) => r.put(sideAt, `${human(sum(bucketsIn(tailsOf(s).map((t) => t.tools), win)))} tool calls / ${opt.windowMin}m`, dimHere));
       const tasks = s.tasks;
@@ -5330,7 +5334,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
     const b = buckets(tailsHere.map((t) => t.tools), now, S);
     const branch = s.mains.map((m) => m.branch).find(Boolean);
     const home = os.homedir();
-    const where = foldersOf(s.cwd.replace(home, "~")).slice(-2).join("/") + (branch && branch !== "HEAD" ? ` ${ICON.at} ${branch}` : "");
+    const where = (machineOf(s) ? `${machineOf(s)} ${ICON.sep} ` : "") + foldersOf(s.cwd.replace(home, "~")).slice(-2).join("/") + (branch && branch !== "HEAD" ? ` ${ICON.at} ${branch}` : "");
     const stalled = v.state === "stalled";
     // The lead glyph is the state: ▲ needs you, ◐ stalled, ● working, ▸ your turn, ○ idle, ✓ finished.
     const state = STATE[v.state];
@@ -5338,7 +5342,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
     const quietened = isReceded(v.state);
     const f = v.facts;
     const wide = W >= 120;
-    const use = treeUsage(s.pid);
+    const use = useOf(s);
     const ctxNow = f.main?.ctx;
     const ctxPct = ctxNow ? Math.min(100, (ctxNow.used / ctxMax(ctxNow)) * 100) : -1;
     // Context is a limit, so its figure follows the limit rule; CPU is a rate and stays dim.
@@ -5790,7 +5794,7 @@ export function webState(sessions: Session[], now: number) {
       return {
         sid: s.sid,
         name: s.name,
-        place: [foldersOf(s.cwd.replace(os.homedir(), "~")).slice(-2).join("/"), branch && branch !== "HEAD" ? `@ ${branch}` : ""].filter(Boolean).join(" "),
+        place: [machineOf(s) ? `${machineOf(s)} ·` : "", foldersOf(s.cwd.replace(os.homedir(), "~")).slice(-2).join("/"), branch && branch !== "HEAD" ? `@ ${branch}` : ""].filter(Boolean).join(" "),
         state: v.state,
         word: STATE[v.state].word,
         color: hexOf(STATE[v.state].color),
@@ -6084,6 +6088,7 @@ export function sendToSession(s: Session, raw: string): Promise<{ ok: boolean; v
   const text = cleanMessage(raw);
   const run = async () => {
     if (!text) return { ok: false, error: "nothing to send" };
+    if (s.remote) return sendToPeer(s, text); // its own machine's fleet types it in
     if (process.platform === "win32") return { ok: false, error: "sending to a session needs tmux, so it does not work on Windows" };
     if (spawnSync(tmuxCmd(), ["-V"], { timeout: 3000 }).status !== 0) return { ok: false, error: "sending needs tmux, which is not installed" };
     if (s.jobId) {
@@ -6137,8 +6142,27 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
       const server = Bun.serve({
         hostname: host,
         port,
-        async fetch(req) {
+        async fetch(req, srv) {
           const url = new URL(req.url);
+          // Another of your machines: allowed when Tailscale says the request comes from your own Tailscale user.
+          if (url.pathname === "/peer/state" || url.pathname === "/peer/send") {
+            const ip = (srv.requestIP(req)?.address ?? "").replace(/^::ffff:/, "");
+            if (!ip || !(await peerNet.trust(ip))) return new Response("not one of your machines", { status: 403, headers });
+            const local = getSessions().filter((x) => !x.remote);
+            if (url.pathname === "/peer/state" && req.method === "GET") {
+              const st = peerState(local, now());
+              // Nothing changed since that machine last asked: say so in a few bytes.
+              if (req.headers.get("if-none-match") === st.tag) return new Response(null, { status: 304, headers: { ...headers, etag: st.tag } });
+              return new Response(st.body, { headers: { ...headers, "content-type": "application/json", "content-encoding": "gzip", etag: st.tag } });
+            }
+            if (url.pathname === "/peer/send" && req.method === "POST") {
+              const body: any = await req.json().catch(() => ({}));
+              const target = local.find((x) => x.sid === body?.sid);
+              if (!target || typeof body.text !== "string") return Response.json({ ok: false, error: "no such session" }, { status: 404, headers });
+              return Response.json(await (web.send ?? sendToSession)(target, body.text), { headers });
+            }
+            return new Response("not allowed", { status: 405, headers });
+          }
           if (req.method === "POST" && url.pathname === "/api/send") {
             if (!sameToken(url.searchParams.get("t") ?? "", token)) return new Response("not without the link fleet showed you", { status: 403, headers });
             // Only the page itself may send: another site's form or script carries its own origin, or the wrong type.
@@ -6224,6 +6248,7 @@ export interface TgConfig {
   chat?: number; // the paired chat and the person in it; nothing else is listened to
   user?: number;
   pairCode?: string; // the one-time code in the pairing link, until a chat uses it
+  at?: number; // when it last changed: the newest wins across your machines
 }
 const fleetConfigDir = () => path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "claude-fleet");
 export const tgConfigPath = () => process.env.FLEET_TELEGRAM_FILE || path.join(fleetConfigDir(), "telegram.json");
@@ -6236,7 +6261,8 @@ export function readTg(): TgConfig {
     return {};
   }
 }
-export function writeTg(c: TgConfig) {
+export function writeTg(c: TgConfig, changed = true) {
+  if (changed) c = { ...c, at: Date.now() };
   const file = tgConfigPath();
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
@@ -6306,7 +6332,7 @@ export function tgSettle(waiting: Set<string>) {
       void tgCall(c.token, "editMessageReplyMarkup", { chat_id: c.chat, message_id: id, reply_markup: { inline_keyboard: [] } });
     }
 }
-const tgName = (s: Session) => s.name || path.basename(s.cwd);
+const tgName = (s: Session) => (s.name || path.basename(s.cwd)) + (machineOf(s) ? ` (${machineOf(s)})` : "");
 /** What fleet does with a message from Telegram: pairing, a reply to a session, or a short status. */
 export async function tgHandle(update: any): Promise<void> {
   const q = update?.callback_query;
@@ -6385,6 +6411,7 @@ async function tgPoll() {
 const tgLockPath = () => path.join(path.dirname(tgConfigPath()), "telegram.lock");
 export function tgClaim(): boolean {
   if (!readTg().token) return (tg.on = false);
+  if (!tgLeader(tailnet.ip, [...peers.values()])) return (tg.on = false); // another machine's fleet talks to the bot
   const file = tgLockPath();
   try {
     const pid = Number(fs.readFileSync(file, "utf8"));
@@ -6536,6 +6563,229 @@ export function tgKey(key: string): boolean {
     return true;
   }
   return false;
+}
+
+// ───────────────────────── every machine ─────────────────────────
+// Fleet shows the sessions on all your machines. Each fleet finds your other machines through Tailscale, asks
+// each one's fleet for its sessions every couple of seconds, and draws them with its own; a machine that is off,
+// asleep or not running fleet simply is not there. A fleet answers another machine only after Tailscale confirms
+// the request comes from a device of the same Tailscale user, so there is no secret to copy between machines.
+
+export const PEER_PROTO = 1; // what /peer/state speaks; a fleet speaking another is left out until it is updated
+const PEER_EVERY_MS = 2000;
+const PEER_GONE_MS = 15_000; // a machine that has not answered for this long is dropped
+const PEER_KEEP_MS = 3.5 * 3600_000; // what is older than this is not sent: the widest window is three hours
+const DISCOVER_EVERY_MS = 15_000;
+
+export interface Peer {
+  host: string;
+  ip: string;
+  addr: string; // ip:port of its fleet
+  sessions: Session[];
+  at: number; // when it last answered
+  fresh: boolean; // it answered for the first time in this scan: what it already had waiting is not news
+  busy: boolean;
+  tg?: TgConfig;
+  tgReady?: boolean; // it can talk to the bot
+  tag?: string; // what it last sent, so it can answer "unchanged"
+}
+export const peers = new Map<string, Peer>(); // by address
+/** This machine on the tailnet: its name, address and Tailscale user. */
+export const tailnet: { host?: string; ip?: string; user?: string; found: { host: string; ip: string }[]; at: number; busy: boolean } = { found: [], at: 0, busy: false };
+let peersWanted = false; // set at launch for real sessions
+export const wantPeers = (on: boolean) => (peersWanted = on);
+
+async function run(cmd: string[], timeoutMs = 4000): Promise<string | undefined> {
+  try {
+    const p = Bun.spawn(cmd, { stdout: "pipe", stderr: "ignore" });
+    const timer = setTimeout(() => p.kill(), timeoutMs);
+    const text = await new Response(p.stdout).text();
+    clearTimeout(timer);
+    return (await p.exited) === 0 ? text : undefined;
+  } catch {
+    return undefined;
+  }
+}
+/** How fleet finds machines and decides whom to trust. Tests replace these. */
+export const peerNet = {
+  /** Your other machines that could be running fleet: online, yours, and not a phone or tablet. */
+  async discover(): Promise<void> {
+    const text = await run(["tailscale", "status", "--json"]);
+    if (!text) return;
+    try {
+      const j = JSON.parse(text);
+      const v4 = (ips: unknown) => (Array.isArray(ips) ? ips.find((x) => typeof x === "string" && /^\d+\.\d+\.\d+\.\d+$/.test(x)) : undefined);
+      tailnet.host = typeof j.Self?.HostName === "string" ? j.Self.HostName : undefined;
+      tailnet.ip = v4(j.Self?.TailscaleIPs);
+      tailnet.user = j.Self?.UserID !== undefined ? String(j.Self.UserID) : undefined;
+      tailnet.found = Object.values(j.Peer ?? {})
+        .filter((p: any) => p?.Online && String(p.UserID) === tailnet.user && ["macOS", "linux", "windows"].includes(p.OS) && v4(p.TailscaleIPs))
+        .map((p: any) => ({ host: safeLine(String(p.HostName || p.DNSName || "")).slice(0, 40) || v4(p.TailscaleIPs)!, ip: v4(p.TailscaleIPs)! }));
+    } catch {}
+  },
+  /** Whether a request from `ip` comes from one of your own devices, by asking Tailscale who is there. */
+  async trust(ip: string): Promise<boolean> {
+    const hit = whoisSeen.get(ip);
+    if (hit && Date.now() - hit.at < 5 * 60_000) return hit.ok;
+    if (!tailnet.user) await peerNet.discover();
+    const text = await run(["tailscale", "whois", "--json", ip]);
+    let ok = false;
+    try {
+      ok = !!text && !!tailnet.user && String(JSON.parse(text)?.UserProfile?.ID) === tailnet.user;
+    } catch {}
+    whoisSeen.set(ip, { ok, at: Date.now() });
+    return ok;
+  },
+};
+const whoisSeen = new Map<string, { ok: boolean; at: number }>();
+
+/** This machine's name, as the other machines know it. */
+export const selfHost = () => tailnet.host || os.hostname().split(".")[0];
+/** Whether any other machine's fleet is on the screen: only then does each session say which machine it is on. */
+export const manyMachines = () => [...peers.values()].some((p) => p.sessions.length || p.at);
+/** The machine a session is on, when there is more than one to tell apart. */
+export const machineOf = (s: Session): string | undefined => (manyMachines() ? (s.remote?.host ?? selfHost()) : undefined);
+
+/** This machine's sessions as another machine reads them: Maps written out, the reader's own state left behind, old timestamps trimmed. */
+export function encodeSessions(list: Session[], now: number): string {
+  const cut = now - PEER_KEEP_MS;
+  // Agents that finished before the widest window can show anything of them are left behind.
+  const live = (a: Agent) => !a.done || lastWriteOf(a.tail) >= cut;
+  const body = list.map((s) => ({ ...s, agents: s.agents.filter(live), workflows: s.workflows.map((w) => ({ ...w, agents: w.agents.filter(live) })), remote: { host: selfHost(), ip: "", addr: "", use: treeUsage(s.pid), git: gitOf(s) } }));
+  const TAIL_ONLY = new Set(["decoder", "carry", "path", "offset", "ino", "used"]); // how this machine reads its files, of no use elsewhere
+  return JSON.stringify(body, function (this: any, k, v) {
+    if (TAIL_ONLY.has(k) && this && Array.isArray(this.tools)) return undefined;
+    if (v instanceof Map) {
+      let entries = [...v];
+      if (k === "tokens") {
+        // Only ever summed over time, so ten-second buckets say the same in a fraction of the bytes.
+        const buckets = new Map<string, [number, number]>();
+        for (const [, x] of entries as [string, [number, number]][]) {
+          if (!Array.isArray(x) || x[0] < cut) continue;
+          const key = String(Math.floor(x[0] / 10_000));
+          const b = buckets.get(key);
+          if (b) b[1] += x[1];
+          else buckets.set(key, [x[0], x[1]]);
+        }
+        entries = [...buckets];
+      }
+      if (k === "toolNames") entries = entries.slice(-50);
+      return { __map: entries };
+    }
+    if (v instanceof Set) return { __set: [...v] };
+    if (Array.isArray(v) && (k === "tools" || k === "sayTs" || k === "askLog" || k === "compactLog")) return v.filter((t) => typeof t !== "number" || t >= cut);
+    return v;
+  });
+}
+export function decodeSessions(text: string): Session[] {
+  const list = JSON.parse(text, (_k, v) => (v && typeof v === "object" && !Array.isArray(v) ? (Array.isArray(v.__map) ? new Map(v.__map) : Array.isArray(v.__set) ? new Set(v.__set) : v) : v));
+  if (!Array.isArray(list)) return [];
+  for (const s of list) for (const t of tailsOf(s)) t.decoder = new StringDecoder("utf8");
+  return list.filter((s) => s && typeof s.sid === "string" && PLAIN_ID.test(s.sid) && Array.isArray(s.mains));
+}
+/** What /peer/state answers: this machine's own sessions (never the ones it got from others), their pull requests, and the Telegram pairing. */
+let peerPayload = { at: 0, body: new Uint8Array(), tag: "" };
+export function peerState(local: Session[], now: number): { body: Uint8Array; tag: string } {
+  if (now - peerPayload.at < 1000) return peerPayload;
+  const prs: Record<string, PrState> = {};
+  for (const s of local) for (const pr of s.side?.prs ?? []) {
+    const st = prState.get(`${pr.repo}#${pr.number}`)?.state;
+    if (st) prs[`${pr.repo}#${pr.number}`] = st;
+  }
+  const tgc = readTg();
+  const text = `{"proto":${PEER_PROTO},"host":${JSON.stringify(selfHost())},"tgReady":${!!tgc.token && tgWanted},"tg":${JSON.stringify(tgc.at ? tgc : null)},"prs":${JSON.stringify(prs)},"sessions":${encodeSessions(local, now)}}`;
+  peerPayload = { at: now, body: Bun.gzipSync(new TextEncoder().encode(text)), tag: `"${Bun.hash(text).toString(36)}"` };
+  return peerPayload;
+}
+
+/** Ask each machine's fleet for its sessions; called on every scan, it starts what is due and returns at once. */
+export function pollPeers(now: number) {
+  if (!peersWanted) return;
+  if (!tailnet.busy && now - tailnet.at >= DISCOVER_EVERY_MS) {
+    tailnet.busy = true;
+    tailnet.at = now;
+    void peerNet.discover().finally(() => (tailnet.busy = false));
+  }
+  const port = Number(process.env.FLEET_WEB_PORT) || 4777;
+  const wanted = new Set<string>();
+  for (const m of tailnet.found) {
+    if (m.ip === tailnet.ip) continue;
+    const addr = `${m.ip}:${port}`;
+    wanted.add(addr);
+    const p = peers.get(addr) ?? { host: m.host, ip: m.ip, addr, sessions: [], at: 0, fresh: false, busy: false };
+    p.host = m.host;
+    peers.set(addr, p);
+    if (!p.busy && now - p.at >= PEER_EVERY_MS) void fetchPeer(p);
+  }
+  for (const [addr, p] of peers) if (!wanted.has(addr) && !p.busy) peers.delete(addr);
+}
+let peerTries = new Map<string, number>(); // when each machine was last asked, so one that is not running fleet is asked only now and then
+async function fetchPeer(p: Peer) {
+  const now = Date.now();
+  if (!p.at && now - (peerTries.get(p.addr) ?? 0) < 10_000) return;
+  peerTries.set(p.addr, now);
+  p.busy = true;
+  try {
+    const r = await fetch(`http://${p.addr}/peer/state`, { headers: p.tag ? { "if-none-match": p.tag } : {}, signal: AbortSignal.timeout(4000) });
+    if (r.status === 304) {
+      p.at = Date.now();
+      return;
+    }
+    if (!r.ok) throw new Error(String(r.status));
+    p.tag = r.headers.get("etag") ?? undefined;
+    const j: any = await r.json();
+    if (j?.proto !== PEER_PROTO) throw new Error("another version");
+    const sessions = decodeSessions(JSON.stringify(j.sessions ?? []));
+    for (const s of sessions) s.remote = { ...(s.remote as any), host: p.host, ip: p.ip, addr: p.addr }; // named as Tailscale names it, the same on every machine
+    p.fresh = !p.at;
+    p.at = Date.now();
+    p.sessions = sessions;
+    p.tg = j.tg && typeof j.tg === "object" ? j.tg : undefined;
+    p.tgReady = j.tgReady === true;
+    // Their pull requests' states, for the rows; this machine's own reads win for a PR both have.
+    for (const [key, st] of Object.entries(j.prs ?? {})) if (!prState.get(key)?.state || prState.get(key)!.at < Date.now() - 60_000) prState.set(key, { at: Date.now() - 30_000, state: st as PrState });
+    // The newest Telegram pairing wins, so pairing (or unpairing) on any machine reaches all of them.
+    if (p.tg?.at && p.tg.at > (readTg().at ?? 0)) writeTg(p.tg, false);
+  } catch {
+    if (p.at && Date.now() - p.at > PEER_GONE_MS) {
+      p.at = 0;
+      p.sessions = [];
+    }
+  } finally {
+    p.busy = false;
+  }
+}
+/** Every other machine's sessions, as last read. */
+export function peerSessions(): Session[] {
+  const out: Session[] = [];
+  for (const p of peers.values()) if (p.at && Date.now() - p.at <= PEER_GONE_MS) out.push(...p.sessions);
+  return out;
+}
+/** Sessions whose machine answered for the first time in this scan: what was already waiting there is not news. Clears the flags. */
+export function takeFreshPeers(): Set<string> {
+  const sids = new Set<string>();
+  for (const p of peers.values())
+    if (p.fresh) {
+      for (const s of p.sessions) sids.add(s.sid);
+      p.fresh = false;
+    }
+  return sids;
+}
+const ipValue = (ip: string) => ip.split(".").reduce((n, x) => n * 256 + Number(x), 0);
+/** One fleet on the whole network talks to the Telegram bot: of those that can, the one with the lowest Tailscale address. */
+export function tgLeader(selfIp: string | undefined, others: { ip: string; tgReady?: boolean; at: number }[], now = Date.now()): boolean {
+  if (!selfIp) return true;
+  return !others.some((p) => p.tgReady && p.at && now - p.at <= PEER_GONE_MS && ipValue(p.ip) < ipValue(selfIp));
+}
+/** Send a message to a session on another machine, through that machine's fleet. */
+async function sendToPeer(s: Session, text: string): Promise<{ ok: boolean; via?: string; error?: string }> {
+  try {
+    const r = await fetch(`http://${s.remote!.addr}/peer/send`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sid: s.sid, text }), signal: AbortSignal.timeout(30_000) });
+    const j: any = await r.json().catch(() => ({}));
+    return { ok: j?.ok === true, via: `${s.remote!.host}${j?.via ? " " + j.via : ""}`, error: j?.ok ? undefined : typeof j?.error === "string" ? `${s.remote!.host}: ${j.error}` : `${s.remote!.host} did not answer` };
+  } catch {
+    return { ok: false, error: `could not reach fleet on ${s.remote!.host}` };
+  }
 }
 
 // ───────────────────────── legend ─────────────────────────
@@ -6725,18 +6975,23 @@ function refresh() {
     if (tgWanted) tgClaim();
   }
   const now = clock();
-  sessions = scan(now);
+  const local = scan(now);
   prune(now);
   sampleMachine();
+  pollSides(local, now, opt.once);
+  // Your other machines' sessions join this one's; their git and pull requests were read by their own fleets.
+  pollPeers(now);
+  sessions = [...local, ...peerSessions()];
+  const fresh = takeFreshPeers();
   holdStalls(sessions, now);
-  pollSides(sessions, now, opt.once);
   steadyClock(now);
   if (opt.usage && !opt.once) tickUsage(now); // --once has already made its one read
   // Ring once when a session starts waiting on the person, and once for each thing that newly stalls.
   const facts = sessions.map((s) => ({ s, f: factsOf(s) }));
   const asks = facts.filter((x) => x.f.needs).map((x): [string, number] => [x.s.sid, stateSince(x.s, x.f, "needs")]);
-  const asked = newAsks(needing, askedAt, asks);
-  const stalled = newStalls(stalledNow, facts.flatMap((x) => stallMarks(x.s, x.f, stallOf(x.s, x.f, now))));
+  // A machine that has just come into view brings what was already waiting there: noted, but not news.
+  const asked = newAsks(needing, askedAt, asks).filter((sid) => !fresh.has(sid));
+  const stalled = newStalls(stalledNow, facts.flatMap((x) => stallMarks(x.s, x.f, stallOf(x.s, x.f, now)))).filter((k) => !fresh.has(k.split("/")[0]));
   const rings = asked.length + stalled.length;
   if (tgWanted) {
     const told = tgEvents(sessions, asked, stalled); // always, so what changed while another fleet held the bot is not news later
@@ -6779,6 +7034,7 @@ if (import.meta.main) {
   if (!process.env.FLEET_HOME && process.env.FLEET_WEB !== "0") startWeb(() => sessions);
   // Telegram, once key t has paired a bot; likewise only for real sessions.
   if (!process.env.FLEET_HOME) {
+    peersWanted = true;
     tgWanted = true;
     tg.getSessions = () => sessions;
     tgClaim();
@@ -6850,6 +7106,7 @@ if (import.meta.main) {
     const sid = replyTarget(sessions, focusSid);
     const s = sessions.find((x) => x.sid === sid);
     if (!s) return say("nothing is waiting on you: focus a session (tab or click) to open it");
+    if (s.remote) return say(`${s.name} is on ${s.remote.host}: answer it from the phone page or Telegram`);
     if (!s.jobId) return say(`${s.name} is not a background session: switch to its own terminal to answer it`);
     restore();
     const r = spawnSync(process.env.FLEET_ATTACH_CMD || "claude", ["attach", s.jobId], { stdio: "inherit" });

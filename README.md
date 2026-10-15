@@ -136,6 +136,16 @@ Every control has a key, and all but `tab` and `esc` are also buttons on the bot
 
 Capturing clicks means a plain drag no longer selects text. Hold Shift (Option in iTerm2 and Terminal.app) while dragging, or start with `--no-mouse`.
 
+## Every machine
+
+Fleet shows the sessions on all your machines at once, with nothing to set up beyond running fleet on each. Every fleet finds your other computers through Tailscale (online, signed in as you, and not a phone or tablet), asks each one's fleet for its sessions every two seconds on port 4777, and draws them with its own. A machine that is off, asleep or not running fleet is simply not there, and appears when it is. Once there is more than one machine, each session says which it is on: before its folder in the detail and compact views, and at the head of its CPU row in the timeline.
+
+- **No secrets to copy.** A fleet answers another machine only after `tailscale whois` confirms the request comes from a device signed in to your own Tailscale account.
+- **What travels:** each machine's own sessions (never what it got from others), trimmed to the last three and a half hours, compressed, and not sent at all when nothing changed since the last ask.
+- **Messages and replies** to a session on another machine (from the phone page or Telegram) are passed to that machine's fleet, which types them in there. The `r` key can only open a session on this machine.
+- **Telegram** is one bot for all of them. Pair it on any machine; the pairing (token and chat) reaches the others, newest change winning, and unpairing does too. Of the fleets that can, the one with the lowest Tailscale address talks to the bot and notifies you about every machine's sessions; when it goes, the next takes over. A machine coming into view does not set off notifications for what was already waiting on it.
+- Machines must run the same version of fleet to see each other.
+
 ## On your phone
 
 Fleet serves this page from the moment it starts. Press `w` and the dashboard shows its QR code; scan it and the same sessions open as a page on your phone that can also message them, refreshing every two seconds: who needs you (glowing), what each is doing, context, failures, background commands, pull requests with their CI and deploys, tasks, agents and the last few messages, with confetti when something merges. Add it to your home screen and it opens like an app.
