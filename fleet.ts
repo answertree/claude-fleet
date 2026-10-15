@@ -15,6 +15,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { StringDecoder } from "node:string_decoder";
+import { deflateSync } from "node:zlib";
 import { spawn, spawnSync } from "node:child_process";
 
 /**
@@ -22,6 +23,10 @@ import { spawn, spawnSync } from "node:child_process";
  * time it is used, not once at import: a test sets FLEET_HOME after its import of this file has already run,
  * and must never be left looking at the real sessions.
  */
+/** A full folder path, on macOS and Linux ("/Users/…") or on Windows ("C:\\Users\\…", "\\\\server\\share"). */
+export const absoluteDir = (p: string): boolean => /^(\/|[A-Za-z]:[\\/]|\\\\)/.test(p);
+/** A path's folders, whichever slash it uses. */
+export const foldersOf = (p: string): string[] => p.split(/[\\/]/).filter(Boolean);
 const claudeHome = (): string => process.env.FLEET_HOME || process.env.AGENT_FLEET_HOME || path.join(os.homedir(), ".claude");
 /** The time. FLEET_NOW (test only) pins it, in milliseconds since 1970, so a frame can be reproduced exactly. */
 export const clock = (): number => Number(process.env.FLEET_NOW) || Date.now();
@@ -905,7 +910,7 @@ const capMap = <K, V>(m: Map<K, V>, max: number) => {
 };
 /** What a line says beside the conversation: a pull request linked, a compaction, where the session works. */
 export function absorbSide(t: Tail, o: any, ts: number) {
-  if (typeof o?.cwd === "string" && o.cwd.startsWith("/") && !o.isSidechain) t.cwd = o.cwd;
+  if (typeof o?.cwd === "string" && absoluteDir(o.cwd) && !o.isSidechain) t.cwd = o.cwd;
   if (o?.type === "pr-link") {
     const repo = String(o.prRepository ?? "");
     const number = Number(o.prNumber);
@@ -1391,7 +1396,7 @@ function runFor(cmd: string, args: string[], sync: boolean, done: (out: string |
 }
 /** Ask git for a folder's state, at most every 30 seconds. --no-optional-locks keeps it from taking the index lock a session may need. */
 export function pollGit(cwd: string, now: number, sync = false) {
-  if (!cwd.startsWith("/")) return;
+  if (!absoluteDir(cwd)) return;
   const e = gitState.get(cwd);
   if (e && (e.busy || now - e.at < GIT_EVERY_MS)) return;
   const fx = fixture("FLEET_GIT_FIXTURE");
@@ -1481,7 +1486,7 @@ export function mergeLive(mergeSha: string, revision: string | undefined, cwd: s
   const key = `${mergeSha} ${revision}`;
   if (ancestry.get(key) !== undefined) return ancestry.get(key);
   if (fixture("FLEET_DEPLOY_FIXTURE")) return undefined;
-  if (!ancestry.has(key) && cwd.startsWith("/")) {
+  if (!ancestry.has(key) && absoluteDir(cwd)) {
     const r = spawnSync("git", ["--no-optional-locks", "-C", cwd, "merge-base", "--is-ancestor", mergeSha, revision], { timeout: 3000 });
     ancestry.set(key, r.status === 0 ? true : r.status === 1 ? false : undefined);
     if (ancestry.size > 500) ancestry.delete(ancestry.keys().next().value as string);
@@ -4368,7 +4373,7 @@ function headRows(b: Block, p: Paint): Row[] {
   const party = partyOn(s.sid, now);
   if (party) [...title].forEach((ch, i) => r1.put(g.icon + i, ch, ch === " " ? C.white : partyTone(i, now), true));
   else r1.put(g.icon, title, receded ? C.text : C.white, true);
-  const folders = s.cwd.replace(os.homedir(), "~").split("/").filter(Boolean);
+  const folders = foldersOf(s.cwd.replace(os.homedir(), "~"));
   const branch = s.mains.map((m) => m.branch).find(Boolean);
   const at = branch && branch !== "HEAD" ? ` ${ICON.at} ${branch}` : "";
   const where = folders.slice(-2).join("/") + at;
@@ -5325,7 +5330,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
     const b = buckets(tailsHere.map((t) => t.tools), now, S);
     const branch = s.mains.map((m) => m.branch).find(Boolean);
     const home = os.homedir();
-    const where = s.cwd.replace(home, "~").split("/").slice(-2).join("/") + (branch && branch !== "HEAD" ? ` ${ICON.at} ${branch}` : "");
+    const where = foldersOf(s.cwd.replace(home, "~")).slice(-2).join("/") + (branch && branch !== "HEAD" ? ` ${ICON.at} ${branch}` : "");
     const stalled = v.state === "stalled";
     // The lead glyph is the state: ▲ needs you, ◐ stalled, ● working, ▸ your turn, ○ idle, ✓ finished.
     const state = STATE[v.state];
@@ -5497,6 +5502,8 @@ export function buttonBar(W: number, row: number, idle = 0): string {
     const seenIt = newCount() ? `space Seen · ${newCount()} new` : "space Seen";
     add(seenIt, newCount() ? `␣ Seen·${newCount()}` : "␣ Seen", "␣", "seen");
     add("r Reply", "r Reply", "r", "reply");
+    add("w Phone", "w Phone", "w", "web", !!web.url);
+    add("t Telegram", "t", "t", "telegram", tg.paired);
     add("? Legend", "?", "?", "legend");
     plain(" ");
     add("q Quit", "q Quit", "q", "quit");
@@ -5530,6 +5537,1005 @@ export function marksOf(s: Session): [t: number, weight: number, glyph: string, 
   for (const w of s.workflows) marks.push([w.started, 3, ICON.workflow, C.purple]);
   for (const m of s.mains) for (const tr of m.taskLog.values()) if (tr.finished) marks.push([tr.finished, 4, ICON.done, C.green]);
   return marks;
+}
+
+// ───────────────────────── QR codes ─────────────────────────
+// Enough of the QR standard to put a link on the screen for a phone to scan: byte mode, error correction
+// level L, versions 1 to 10 (up to 271 bytes). After Project Nayuki's reference implementation.
+
+const QR_TOTAL = [0, 26, 44, 70, 100, 134, 172, 196, 242, 292, 346]; // codewords per version
+const QR_ECC = [0, 7, 10, 15, 20, 26, 18, 20, 24, 30, 18]; // error-correction codewords per block, level L
+const QR_BLOCKS = [0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4];
+const QR_ALIGN = [[], [], [6, 18], [6, 22], [6, 26], [6, 30], [6, 34], [6, 22, 38], [6, 24, 42], [6, 26, 46], [6, 28, 50]];
+
+function gfMul(x: number, y: number): number {
+  let z = 0;
+  for (let i = 7; i >= 0; i--) {
+    z = (z << 1) ^ ((z >>> 7) * 0x11d);
+    z ^= ((y >>> i) & 1) * x;
+  }
+  return z & 0xff;
+}
+function rsDivisor(degree: number): number[] {
+  const out = new Array(degree).fill(0);
+  out[degree - 1] = 1;
+  let root = 1;
+  for (let i = 0; i < degree; i++) {
+    for (let j = 0; j < out.length; j++) {
+      out[j] = gfMul(out[j], root);
+      if (j + 1 < out.length) out[j] ^= out[j + 1];
+    }
+    root = gfMul(root, 0x02);
+  }
+  return out;
+}
+function rsRemainder(data: number[], divisor: number[]): number[] {
+  const out = new Array(divisor.length).fill(0);
+  for (const b of data) {
+    const factor = b ^ (out.shift() as number);
+    out.push(0);
+    divisor.forEach((coef, i) => (out[i] ^= gfMul(coef, factor)));
+  }
+  return out;
+}
+
+/** The modules of a QR code for `text` (true = dark), or undefined when it is too long. */
+export function qrMatrix(text: string): boolean[][] | undefined {
+  const bytes = [...new TextEncoder().encode(text)];
+  let version = 1;
+  for (; version <= 10; version++) {
+    const dataCodewords = QR_TOTAL[version] - QR_ECC[version] * QR_BLOCKS[version];
+    if (4 + (version < 10 ? 8 : 16) + bytes.length * 8 <= dataCodewords * 8) break;
+  }
+  if (version > 10) return undefined;
+  const size = version * 4 + 17;
+  const dataCodewords = QR_TOTAL[version] - QR_ECC[version] * QR_BLOCKS[version];
+  // The bit stream: byte mode, the count, the bytes, a terminator, then padding.
+  const bits: number[] = [];
+  const put = (v: number, n: number) => {
+    for (let i = n - 1; i >= 0; i--) bits.push((v >>> i) & 1);
+  };
+  put(0b0100, 4);
+  put(bytes.length, version < 10 ? 8 : 16);
+  for (const b of bytes) put(b, 8);
+  put(0, Math.min(4, dataCodewords * 8 - bits.length));
+  put(0, (8 - (bits.length % 8)) % 8);
+  for (let pad = 0xec; bits.length < dataCodewords * 8; pad ^= 0xec ^ 0x11) put(pad, 8);
+  const data: number[] = [];
+  for (let i = 0; i < bits.length; i += 8) data.push(parseInt(bits.slice(i, i + 8).join(""), 2));
+  // Split into blocks, add error correction, and interleave.
+  const numBlocks = QR_BLOCKS[version];
+  const eccLen = QR_ECC[version];
+  const raw = QR_TOTAL[version];
+  const shortBlocks = numBlocks - (raw % numBlocks);
+  const shortLen = Math.floor(raw / numBlocks);
+  const divisor = rsDivisor(eccLen);
+  const blocks: number[][] = [];
+  for (let i = 0, k = 0; i < numBlocks; i++) {
+    const dat = data.slice(k, k + shortLen - eccLen + (i < shortBlocks ? 0 : 1));
+    k += dat.length;
+    const ecc = rsRemainder(dat, divisor);
+    if (i < shortBlocks) dat.push(0);
+    blocks.push([...dat, ...ecc]);
+  }
+  const codewords: number[] = [];
+  for (let i = 0; i < blocks[0].length; i++)
+    blocks.forEach((b, j) => {
+      if (i !== shortLen - eccLen || j >= shortBlocks) codewords.push(b[i]);
+    });
+
+  const modules = Array.from({ length: size }, () => new Array<boolean>(size).fill(false));
+  const fixed = Array.from({ length: size }, () => new Array<boolean>(size).fill(false));
+  const set = (x: number, y: number, dark: boolean) => {
+    modules[y][x] = dark;
+    fixed[y][x] = true;
+  };
+  for (let i = 0; i < size; i++) {
+    set(6, i, i % 2 === 0);
+    set(i, 6, i % 2 === 0);
+  }
+  for (const [cx, cy] of [[3, 3], [size - 4, 3], [3, size - 4]])
+    for (let dy = -4; dy <= 4; dy++)
+      for (let dx = -4; dx <= 4; dx++) {
+        const x = cx + dx;
+        const y = cy + dy;
+        if (x >= 0 && x < size && y >= 0 && y < size) set(x, y, Math.max(Math.abs(dx), Math.abs(dy)) !== 2 && Math.max(Math.abs(dx), Math.abs(dy)) !== 4);
+      }
+  const align = QR_ALIGN[version];
+  for (const ax of align)
+    for (const ay of align) {
+      if ((ax === 6 && ay === 6) || (ax === 6 && ay === align[align.length - 1]) || (ax === align[align.length - 1] && ay === 6)) continue;
+      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) set(ax + dx, ay + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
+    }
+  const formatBits = (mask: number) => {
+    const d = (1 << 3) | mask; // level L is 01
+    let rem = d;
+    for (let i = 0; i < 10; i++) rem = (rem << 1) ^ ((rem >>> 9) * 0x537);
+    return ((d << 10) | rem) ^ 0x5412;
+  };
+  const drawFormat = (mask: number) => {
+    const f = formatBits(mask);
+    const bit = (i: number) => ((f >>> i) & 1) === 1;
+    for (let i = 0; i <= 5; i++) set(8, i, bit(i));
+    set(8, 7, bit(6));
+    set(8, 8, bit(7));
+    set(7, 8, bit(8));
+    for (let i = 9; i < 15; i++) set(14 - i, 8, bit(i));
+    for (let i = 0; i < 8; i++) set(size - 1 - i, 8, bit(i));
+    for (let i = 8; i < 15; i++) set(8, size - 15 + i, bit(i));
+    set(8, size - 8, true);
+  };
+  drawFormat(0); // reserves the format areas; redrawn with the chosen mask below
+  if (version >= 7) {
+    let rem = version;
+    for (let i = 0; i < 12; i++) rem = (rem << 1) ^ ((rem >>> 11) * 0x1f25);
+    const v = (version << 12) | rem;
+    for (let i = 0; i < 18; i++) {
+      const bit = ((v >>> i) & 1) === 1;
+      set(size - 11 + (i % 3), Math.floor(i / 3), bit);
+      set(Math.floor(i / 3), size - 11 + (i % 3), bit);
+    }
+  }
+  // The codewords, in the zigzag the standard prescribes.
+  let n = 0;
+  for (let right = size - 1; right >= 1; right -= 2) {
+    if (right === 6) right = 5;
+    for (let vert = 0; vert < size; vert++)
+      for (let j = 0; j < 2; j++) {
+        const x = right - j;
+        const y = ((right + 1) & 2) === 0 ? size - 1 - vert : vert;
+        if (!fixed[y][x] && n < codewords.length * 8) {
+          modules[y][x] = ((codewords[n >>> 3] >>> (7 - (n & 7))) & 1) === 1;
+          n++;
+        }
+      }
+  }
+  const MASKS: ((x: number, y: number) => boolean)[] = [
+    (x, y) => (x + y) % 2 === 0,
+    (_x, y) => y % 2 === 0,
+    (x) => x % 3 === 0,
+    (x, y) => (x + y) % 3 === 0,
+    (x, y) => (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0,
+    (x, y) => ((x * y) % 2) + ((x * y) % 3) === 0,
+    (x, y) => (((x * y) % 2) + ((x * y) % 3)) % 2 === 0,
+    (x, y) => (((x + y) % 2) + ((x * y) % 3)) % 2 === 0,
+  ];
+  const applyMask = (m: number) => {
+    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) if (!fixed[y][x] && MASKS[m](x, y)) modules[y][x] = !modules[y][x];
+  };
+  // The mask with the lowest penalty, by the standard's four rules.
+  const penalty = () => {
+    let p = 0;
+    for (const line of [...modules, ...modules[0].map((_, x) => modules.map((r) => r[x]))]) {
+      let run = 1;
+      for (let i = 1; i <= line.length; i++) {
+        if (i < line.length && line[i] === line[i - 1]) run++;
+        else {
+          if (run >= 5) p += run - 2;
+          run = 1;
+        }
+      }
+      const s = line.map((d) => (d ? "1" : "0")).join("");
+      p += 40 * ((s.match(/(?=10111010000)/g) ?? []).length + (s.match(/(?=00001011101)/g) ?? []).length);
+    }
+    for (let y = 0; y < size - 1; y++) for (let x = 0; x < size - 1; x++) if (modules[y][x] === modules[y][x + 1] && modules[y][x] === modules[y + 1][x] && modules[y][x] === modules[y + 1][x + 1]) p += 3;
+    const dark = modules.flat().filter(Boolean).length;
+    return p + 10 * Math.floor(Math.abs((dark * 100) / (size * size) - 50) / 5);
+  };
+  let best = 0;
+  let bestScore = Infinity;
+  for (let m = 0; m < 8; m++) {
+    applyMask(m);
+    drawFormat(m);
+    const score = penalty();
+    if (score < bestScore) [best, bestScore] = [m, score];
+    applyMask(m); // undo
+  }
+  applyMask(best);
+  drawFormat(best);
+  return modules;
+}
+
+/** A QR code in terminal cells, two modules to a cell, light modules drawn in white so phones read it dark-on-light, with a quiet margin. */
+export function qrRows(text: string, margin = 2): string[] | undefined {
+  const m = qrMatrix(text);
+  if (!m) return undefined;
+  const size = m.length + margin * 2;
+  const dark = (x: number, y: number) => x >= margin && y >= margin && x < size - margin && y < size - margin && m[y - margin][x - margin];
+  const rows: string[] = [];
+  for (let y = 0; y < size; y += 2) {
+    let line = "";
+    for (let x = 0; x < size; x++) {
+      const top = !dark(x, y);
+      const bottom = y + 1 < size ? !dark(x, y + 1) : false;
+      line += top && bottom ? "█" : top ? "▀" : bottom ? "▄" : " ";
+    }
+    rows.push(fg([255, 255, 255], line));
+  }
+  return rows;
+}
+
+// ───────────────────────── the web dashboard ─────────────────────────
+// Key w serves a page for your phone: the same sessions, as cards, each with a box to type a message into it.
+// It answers only a link that carries a secret kept in ~/.config/claude-fleet/web-token, and it listens on this Mac's Tailscale
+// address when it has one (reachable from your own devices, encrypted), else on this Mac alone.
+
+const hexOf = (c: RGB) => "#" + c.map((v) => v.toString(16).padStart(2, "0")).join("");
+/** Coloured text as the page draws it: [text, colour] pairs. */
+const segsJson = (segs: Seg[]) => segs.filter(([t]) => t).map(([t, c, bold]) => ({ t, c: c ? hexOf(c) : undefined, b: bold || undefined }));
+
+/** Everything the page shows, from the same views the terminal draws. */
+export function webState(sessions: Session[], now: number) {
+  const all = buildViews(sessions, now);
+  const shown = all.filter((v) => !isHidden(v));
+  const win = laneWindow(now, 150);
+  const counts = fleetCounts(sessions, now);
+  const acct = opt.usage ? accountView(now) : undefined;
+  return {
+    now,
+    counts,
+    hidden: all.length - shown.length,
+    machine: { cpu: Math.round(machine.cpu), mem: Math.round((machine.memUsed / machine.memTotal) * 100), memText: `${gb(machine.memUsed)} of ${gb(machine.memTotal)}`, load: Number(machine.load.toFixed(1)) },
+    account: acct ? { limits: acct.limits.map((l) => ({ label: l.label, pct: Math.round(l.pct), resets: l.resetsAt ? (l.resetsAt - now < 24 * 3600_000 ? `resets in ${ago(l.resetsAt - now)}` : `resets ${new Date(l.resetsAt).toLocaleString("en-GB", { weekday: "short", hour: "2-digit", minute: "2-digit" })}`) : "" })), reason: acct.reason || undefined } : undefined,
+    sessions: shown.map((v) => {
+      const s = v.s;
+      const f = v.facts;
+      const main = f.main;
+      const ctx = main?.ctx;
+      const runway = sessionRunway(main, now);
+      const branch = s.mains.map((m) => m.branch).find(Boolean);
+      const sub = subheading(s, f, v.state);
+      const spark = bucketsIn(tailsOf(s).map((t) => t.tools), win);
+      const threads = [...s.agents, ...s.workflows.flatMap((w) => w.agents)].filter((a) => !a.done && lastWriteOf(a.tail) >= win.start);
+      return {
+        sid: s.sid,
+        name: s.name,
+        place: [foldersOf(s.cwd.replace(os.homedir(), "~")).slice(-2).join("/"), branch && branch !== "HEAD" ? `@ ${branch}` : ""].filter(Boolean).join(" "),
+        state: v.state,
+        word: STATE[v.state].word,
+        color: hexOf(STATE[v.state].color),
+        time: stateTime(s, f, v.state, now, v.stall.since),
+        sub: { source: sub.source, text: sub.text },
+        needs: f.needs || undefined,
+        party: partyOn(s.sid, now)?.text,
+        ctx: ctx ? { pct: Math.round(Math.min(100, (ctx.used / ctxMax(ctx)) * 100)), used: human(ctx.used), max: human(ctxMax(ctx)), split: main ? contextSplit(main).filter((p) => p.tokens > 0).map((p) => ({ name: p.short, tokens: p.tokens, color: hexOf(p.color) })) : [], runway: runway === undefined ? undefined : fullInText(runway) } : undefined,
+        spark,
+        tools: sum(spark),
+        fails: s.side?.fails.length ? { n: s.side.fails.length, last: `${s.side.fails.at(-1)!.tool ? s.side.fails.at(-1)!.tool + ": " : ""}${s.side.fails.at(-1)!.text}`, ago: ago(now - s.side.fails.at(-1)!.t) } : undefined,
+        bg: (s.side?.bg ?? []).map((b) => ({ desc: b.desc, ago: ago(now - b.started) })),
+        prs: (s.side?.prs ?? []).slice(0, PR_SHOWN).map((p) => segsJson(prSegs([p], s.side?.cwd ?? s.cwd))),
+        changes: s.side && (s.side.edits.length || gitOf(s)) ? segsJson(changeSegs(s.side.edits, gitOf(s), true)) : undefined,
+        tasks: s.tasks ? { done: s.tasks.done, total: s.tasks.total, open: s.tasks.items.filter((t) => t.status !== "completed").map((t) => ({ status: t.status, text: taskText(t), since: t.since ? ago(now - t.since) : undefined, blocked: t.blocked || undefined })) } : undefined,
+        workflows: s.workflows.filter((w) => w.status === "running" && w.lastT >= win.start).map((w) => ({ name: w.name, phase: w.phase, done: w.agents.filter((a) => a.done).length, total: w.agents.length })),
+        agents: threads.map((a) => {
+          const p = pendingOf(a.tail);
+          const st = stateOf(a, now);
+          return { label: a.label, state: st, doing: p ? `${p.name}${p.hint ? " · " + p.hint : ""}` : st === "active" ? "thinking" : "quiet", ago: ago(now - lastWriteOf(a.tail)) };
+        }),
+        talk: [
+          ...(main?.ask ? [{ who: "you", text: capText(main.ask.text, 400), t: main.ask.t }] : []),
+          ...(main?.says ?? []).slice(-2).map((x) => ({ who: "claude", text: capText(flatReply(x.text), 600), t: x.t })),
+        ]
+          .sort((a, b) => a.t - b.t)
+          .map((x) => ({ who: x.who, text: x.text, ago: ago(now - x.t) })),
+      };
+    }),
+  };
+}
+
+export const WEB_PAGE = `<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0d1117">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="color-scheme" content="dark">
+<link rel="manifest" href="/manifest.webmanifest?t=__TOKEN__">
+<meta name="referrer" content="no-referrer">
+<meta name="apple-mobile-web-app-title" content="Fleet">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+<title>Claude Fleet</title>
+<style>
+:root{--bg:#0d1117;--card:#151b23;--line:#262d37;--text:#c6cdd7;--dim:#6b7380;--faint:#3a404a;--white:#f5f7fa;--amber:#e5b544;--green:#50c878;--red:#f0625c;--cyan:#56cdd6;--purple:#be94ff;--blue:#61aaff}
+*{box-sizing:border-box;min-width:0}html,body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;-webkit-text-size-adjust:100%;overflow-x:hidden;overflow-wrap:anywhere}
+main,header,.gauges,#quip{max-width:720px;margin-left:auto;margin-right:auto}
+body{padding:calc(env(safe-area-inset-top) + 18px) max(12px,env(safe-area-inset-right)) calc(24px + env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left))}
+header{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:6px}
+h1{font-size:15px;margin:0;color:var(--cyan);letter-spacing:.08em}h1 b{color:var(--white)}
+#clock{color:var(--dim);font-size:12px}
+#quip{color:var(--white);font-size:16px;margin:4px 0 10px}
+#quip .needs{color:var(--amber)}
+.gauges{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:6px 14px;margin-bottom:14px;color:var(--dim);font-size:12px}
+.g{display:flex;align-items:center;gap:6px}.g .bar{flex:1;height:4px;background:var(--faint);border-radius:2px;overflow:hidden}.g .bar i{display:block;height:100%;background:#60aab6}
+.card{background:var(--card);border:1px solid var(--line);border-left:5px solid var(--c);border-radius:10px;padding:10px 12px 12px;margin-bottom:12px;position:relative;overflow:hidden}
+.card.needs{background:#2a2108;border-color:#5a4512;box-shadow:0 0 0 1px #5a4512,0 0 24px #e5b54433;animation:glow 2s ease-in-out infinite}
+@keyframes glow{50%{box-shadow:0 0 0 1px #8a6a1a,0 0 34px #e5b54466}}
+.head{display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px 8px;align-items:baseline}
+.name{color:var(--white);font-weight:700;letter-spacing:.14em;text-transform:uppercase;font-size:13px;word-break:break-word}
+.state{color:var(--c);font-weight:700;letter-spacing:.12em;font-size:11px;white-space:nowrap}
+.place{color:var(--dim);font-size:11px;margin-top:1px}
+.sub{color:var(--white);margin:6px 0 4px}.card.needs .sub{font-weight:700}
+.spark{display:flex;align-items:flex-end;gap:1px;height:28px;margin:8px 0 2px}.spark i{flex:1;background:#5b7fbf;border-radius:1px;min-height:1px;opacity:.9}
+.row{display:flex;gap:8px;align-items:flex-start;font-size:12px;color:var(--dim);margin-top:3px}.row .lead{flex:none;width:1.2em;text-align:center}.row>span:last-child{flex:1}
+.ctx{display:flex;height:6px;margin-top:6px;border-radius:3px;overflow:hidden;background:var(--faint);flex:1}.ctx i{display:block;height:100%}
+details{margin-top:8px}summary{cursor:pointer;color:var(--dim);font-size:12px;list-style:none}summary::-webkit-details-marker{display:none}summary::before{content:"▸ ";color:var(--faint)}details[open] summary::before{content:"▾ "}
+.talk p{margin:6px 0;font-size:13px;white-space:pre-wrap;word-break:break-word}.talk .you{color:var(--blue)}.talk .claude{color:var(--text)}.talk span{color:var(--dim);font-size:11px;margin-left:6px}
+.tasks div,.agents div{font-size:12px;margin:2px 0}.st-in_progress{color:var(--white)}.st-pending{color:var(--dim)}
+.foot{color:var(--faint);font-size:11px;text-align:center;margin-top:16px}.stale{color:var(--red)}
+.confetti{position:absolute;inset:0;pointer-events:none;overflow:hidden}.confetti i{position:absolute;top:-10px;width:6px;height:10px;opacity:.9;animation:fall 2.6s linear infinite}
+@keyframes fall{to{transform:translateY(260px) rotate(540deg)}}
+.party{color:var(--amber);font-weight:700;margin-top:4px}
+.empty{color:var(--dim);text-align:center;margin:40px 0}
+.send{display:flex;gap:6px;margin-top:6px;align-items:flex-end}.send textarea{flex:1;min-height:42px;max-height:40vh;resize:vertical;background:var(--bg);color:var(--white);border:1px solid var(--line);border-radius:8px;padding:8px;font:16px/1.35 ui-monospace,Menlo,monospace}
+.send button{background:var(--cyan);color:#0d1117;border:0;border-radius:8px;padding:10px 14px;font:700 14px ui-monospace,Menlo,monospace}.send button:disabled{opacity:.5}
+.sent{font-size:12px;margin-top:4px;color:var(--dim)}.sent.ok{color:var(--green)}.sent.err{color:var(--red)}
+</style></head><body>
+<header><h1>◆ CLAUDE <b>FLEET</b></h1><span id="clock"></span></header>
+<div id="quip">Waking the fleet…</div>
+<div class="gauges" id="gauges"></div>
+<main id="cards"></main>
+<div class="foot" id="foot"></div>
+<script>
+const token = new URLSearchParams(location.search).get("t") || "";
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
+const segs = (list) => { const s = el("span"); for (const x of list) { const p = el("span", "", x.t); if (x.c) p.style.color = x.c; if (x.b) p.style.fontWeight = "700"; s.append(p); } return s; };
+const row = (lead, color, content) => { const r = el("div", "row"); const l = el("span", "lead", lead); l.style.color = color; r.append(l, typeof content === "string" ? el("span", "", content) : content); return r; };
+const gauge = (label, pct, extra) => { const g = el("div", "g"); const b = el("span", "bar"); const i = el("i"); i.style.width = Math.min(100, pct) + "%"; if (pct >= 80) i.style.background = "#f0625c"; else if (pct >= 60) i.style.background = "#f5f7fa"; b.append(i); g.append(el("span", "", label), b, el("span", "", pct + "%" + (extra ? " " + extra : ""))); return g; };
+function quip(d) {
+  const c = d.counts, n = d.sessions.length;
+  const parts = [];
+  if (c.needs) parts.push([c.needs === 1 ? "1 session wants you" : c.needs + " sessions want you", "needs"]);
+  if (c.stalled) parts.push(c.stalled + " looking a bit stuck");
+  if (c.working) parts.push(c.working + (c.working === 1 ? " grinding away" : " grinding away"));
+  if (c.agents) parts.push(c.agents + (c.agents === 1 ? " agent hustling" : " agents hustling"));
+  if (!n) return [["All quiet. Go and make a cup of tea."]];
+  if (!c.needs && !c.stalled) parts.push(["nothing needs you, carry on", "all under control, apparently", "you could probably go outside"][Math.floor(d.now / 60000) % 3]);
+  return parts.map((p) => (typeof p === "string" ? [p] : p));
+}
+function card(s) {
+  const c = el("section", "card" + (s.state === "needs" ? " needs" : "")); c.style.setProperty("--c", s.color);
+  const head = el("div", "head"); head.append(el("div", "name", s.name), el("div", "state", s.word.toUpperCase() + (s.time ? " · " + s.time : ""))); c.append(head);
+  if (s.place) c.append(el("div", "place", s.place));
+  c.append(el("div", "sub", (s.sub.source === "prompt" ? "▸ " : s.sub.source === "reply" ? "◆ " : "") + (s.sub.text || "")));
+  if (s.party) { c.append(el("div", "party", "✦ " + s.party + " ✦")); const f = el("div", "confetti"); const cols = ["#e5b544", "#50c878", "#56cdd6", "#be94ff", "#f0625c", "#61aaff"]; for (let i = 0; i < 28; i++) { const p = el("i"); p.style.left = (i * 37 % 100) + "%"; p.style.background = cols[i % cols.length]; p.style.animationDelay = (i % 9) * 0.25 + "s"; f.append(p); } c.append(f); }
+  const max = Math.max(1, ...s.spark); const sp = el("div", "spark"); for (const v of s.spark) { const i = el("i"); i.style.height = (v ? Math.max(8, Math.sqrt(v / max) * 100) : 0) + "%"; sp.append(i); } c.append(sp);
+  if (s.ctx) { const bar = el("span", "ctx"); const total = s.ctx.split.reduce((n, p) => n + p.tokens, 0) || 1; for (const p of s.ctx.split) { const i = el("i"); i.style.width = (p.tokens / total) * s.ctx.pct + "%"; i.style.background = p.color; bar.append(i); } const r = row("◫", "#6b7380", bar); r.append(el("span", "", s.ctx.pct + "% of " + s.ctx.max + (s.ctx.runway ? " · " + s.ctx.runway : ""))); c.append(r); }
+  if (s.fails) c.append(row("✗", "#f0625c", s.fails.n + " failed · " + s.fails.last + " · " + s.fails.ago));
+  for (const b of s.bg) c.append(row("↻", "#56cdd6", b.desc + " · " + b.ago));
+  for (const p of s.prs) c.append(row("⇡", "#c6cdd7", segs(p)));
+  if (s.changes) c.append(row("±", "#6b7380", segs(s.changes)));
+  for (const w of s.workflows) c.append(row("≡", "#be94ff", w.name + " · " + w.phase + " · " + w.done + "/" + w.total));
+  if (s.tasks && s.tasks.total) { const d = el("details", "tasks"); d.append(el("summary", "", "tasks " + s.tasks.done + "/" + s.tasks.total + " done")); for (const t of s.tasks.open) d.append(el("div", "st-" + t.status, (t.status === "in_progress" ? "◐ " : "○ ") + t.text + (t.since ? " · " + t.since : "") + (t.blocked ? " · blocked" : ""))); c.append(d); }
+  if (s.agents.length) { const d = el("details", "agents"); d.append(el("summary", "", s.agents.length + (s.agents.length === 1 ? " agent" : " agents"))); for (const a of s.agents) d.append(el("div", "", (a.state === "active" ? "⠋ " : a.state === "tool" ? "◐ " : "○ ") + a.label + " — " + a.doing + " · " + a.ago)); c.append(d); }
+  if (s.talk.length) { const d = el("details", "talk"); if (s.state === "needs") d.open = true; d.append(el("summary", "", "conversation")); for (const m of s.talk) { const p = el("p", m.who, (m.who === "you" ? "▸ " : "◆ ") + m.text); p.append(el("span", "", m.ago)); d.append(p); } c.append(d); }
+  const m = el("details", "message"); if (s.state === "needs") m.open = true; m.append(el("summary", "", s.state === "needs" ? "answer" : "send a message"));
+  const f = el("form", "send"); const ta = el("textarea"); ta.rows = 2; ta.placeholder = s.state === "needs" ? "your answer…" : "type to " + s.name + "…"; ta.value = drafts.get(s.sid) || ""; ta.dataset.sid = s.sid;
+  ta.addEventListener("input", () => drafts.set(s.sid, ta.value));
+  const go = el("button", "", "Send"); go.type = "submit"; f.append(ta, go); m.append(f);
+  const note = el("div", "sent" + (notes.get(s.sid)?.cls ? " " + notes.get(s.sid).cls : ""), notes.get(s.sid)?.text || ""); m.append(note);
+  f.addEventListener("submit", async (e) => {
+    e.preventDefault(); const text = ta.value.trim(); if (!text) return;
+    go.disabled = true; note.className = "sent"; note.textContent = "sending…";
+    try {
+      const r = await fetch("api/send?t=" + encodeURIComponent(token), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sid: s.sid, text }) });
+      const d = await r.json().catch(() => ({ ok: false, error: "fleet said " + r.status }));
+      if (d.ok) { drafts.delete(s.sid); ta.value = ""; notes.set(s.sid, { cls: "ok", text: "sent ✓ " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) }); }
+      else notes.set(s.sid, { cls: "err", text: "not sent: " + (d.error || "unknown") });
+    } catch { notes.set(s.sid, { cls: "err", text: "not sent: can't reach fleet" }); }
+    const n = notes.get(s.sid); note.className = "sent " + n.cls; note.textContent = n.text; go.disabled = false; ta.blur(); tick();
+  });
+  c.append(m);
+  return c;
+}
+let last = 0, open = new Map();
+const drafts = new Map(), notes = new Map();
+async function tick() {
+  try {
+    const r = await fetch("api/state?t=" + encodeURIComponent(token), { cache: "no-store" });
+    if (!r.ok) throw new Error(r.status);
+    const d = await r.json(); last = Date.now();
+    const q = document.getElementById("quip"); q.replaceChildren(); quip(d).forEach(([text, cls], i) => { if (i) q.append(" · "); q.append(el("span", cls || "", text)); });
+    const g = document.getElementById("gauges"); g.replaceChildren(gauge("cpu", d.machine.cpu), gauge("mem", d.machine.mem, d.machine.memText));
+    if (d.account) for (const l of d.account.limits) g.append(gauge(l.label, l.pct, l.resets));
+    const cards = document.getElementById("cards");
+    // Never redraw under your thumbs: while you are typing a message the cards hold still.
+    if (document.activeElement && document.activeElement.tagName === "TEXTAREA" && cards.contains(document.activeElement)) return;
+    for (const det of cards.querySelectorAll("details")) open.set(det.closest(".card")?.dataset.sid + det.className, det.open);
+    cards.replaceChildren(...d.sessions.map((s) => { const c = card(s); c.dataset.sid = s.sid; for (const det of c.querySelectorAll("details")) { const k = s.sid + det.className; if (open.has(k)) det.open = open.get(k); } return c; }));
+    if (!d.sessions.length) cards.replaceChildren(el("div", "empty", "No sessions working and nothing waiting on you."));
+    document.getElementById("clock").textContent = new Date(d.now).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    document.getElementById("foot").textContent = (d.hidden ? d.hidden + " idle or finished not shown · " : "") + "refreshes every 2s";
+    document.title = (d.counts.needs ? "▲" + d.counts.needs + " " : "") + "Claude Fleet";
+  } catch (e) { document.getElementById("foot").replaceChildren(el("span", "stale", "can't reach fleet — is it still running?")); }
+}
+tick(); setInterval(tick, 2000);
+</script></body></html>`;
+
+/** The web server, once key w has started it: where it listens and the link to open. */
+export const web: { url?: string; host?: string; onTailnet?: boolean; server?: { stop: () => void }; error?: string; send?: typeof sendToSession; shared?: boolean; retake?: () => void } = {};
+const sameToken = (a: string, b: string) => a.length === b.length && crypto.timingSafeEqual ? (() => { try { return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b)); } catch { return false; } })() : a === b;
+/** This Mac's Tailscale IPv4 address, when it has one. */
+function tailnetAddress(): string | undefined {
+  if (process.env.FLEET_WEB_HOST) return process.env.FLEET_WEB_HOST;
+  try {
+    const r = spawnSync("tailscale", ["ip", "-4"], { encoding: "utf8", timeout: 3000 });
+    const ip = r.stdout?.split("\n")[0]?.trim();
+    return r.status === 0 && ip && /^100\.\d+\.\d+\.\d+$/.test(ip) ? ip : undefined;
+  } catch {
+    return undefined;
+  }
+}
+/** Where the page's secret is kept: made once, readable only by you, so the link (and a home-screen icon) stays the same. Delete it to change the link. */
+export const webTokenPath = () => process.env.FLEET_WEB_TOKEN_FILE || path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "claude-fleet", "web-token");
+export function webToken(): string {
+  const file = webTokenPath();
+  try {
+    const t = fs.readFileSync(file, "utf8").trim();
+    if (/^[A-Za-z0-9_-]{24,}$/.test(t)) {
+      fs.chmodSync(file, 0o600);
+      return t;
+    }
+  } catch {}
+  const t = Buffer.from(crypto.getRandomValues(new Uint8Array(18))).toString("base64url");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, t + "\n", { mode: 0o600 });
+  return t;
+}
+/** The home-screen icon at `n` pixels: the fleet diamond, a cyan ring around a white core on the page's dark ground, as a PNG. Kept well inside the middle 80% so a maskable crop never clips it. */
+const iconPngs = new Map<number, Buffer>();
+export function webIcon(n: number): Buffer {
+  const hit = iconPngs.get(n);
+  if (hit) return hit;
+  const bg = [13, 17, 23];
+  const colourAt = (x: number, y: number) => {
+    const d = (Math.abs(x - n / 2) + Math.abs(y - n / 2)) / n; // diamond distance, as a share of the size
+    return d < 0.1 ? [245, 247, 250] : d < 0.16 ? bg : d < 0.3 ? [86, 205, 214] : bg;
+  };
+  const raw = Buffer.alloc((n * 3 + 1) * n);
+  const S = 4; // samples per side, so the diagonal edges are smooth
+  for (let y = 0; y < n; y++)
+    for (let x = 0; x < n; x++) {
+      const sum = [0, 0, 0];
+      for (let sy = 0; sy < S; sy++)
+        for (let sx = 0; sx < S; sx++) {
+          const c = colourAt(x + (sx + 0.5) / S, y + (sy + 0.5) / S);
+          for (let i = 0; i < 3; i++) sum[i] += c[i];
+        }
+      raw.set(sum.map((v) => Math.round(v / (S * S))), y * (n * 3 + 1) + 1 + x * 3);
+    }
+  const table = Array.from({ length: 256 }, (_, k) => {
+    let c = k;
+    for (let i = 0; i < 8; i++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  });
+  const crc = (b: Buffer) => {
+    let c = 0xffffffff;
+    for (const x of b) c = table[(c ^ x) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type: string, data: Buffer) => {
+    const body = Buffer.concat([Buffer.from(type), data]);
+    const out = Buffer.alloc(body.length + 8);
+    out.writeUInt32BE(data.length, 0);
+    body.copy(out, 4);
+    out.writeUInt32BE(crc(body), body.length + 4);
+    return out;
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(n, 0);
+  ihdr.writeUInt32BE(n, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 2;
+  const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(raw, { level: 9 })), chunk("IEND", Buffer.alloc(0))]);
+  iconPngs.set(n, png);
+  return png;
+}
+const ICON_SIZES: Record<string, number> = { "/apple-touch-icon.png": 180, "/apple-touch-icon-precomposed.png": 180, "/favicon.ico": 32, "/icon-192.png": 192, "/icon-512.png": 512 };
+/** The web app manifest. It carries the secret in its start address, so it is served only to a request that has the link. */
+export const webManifest = (token: string) => ({
+  name: "Claude Fleet",
+  short_name: "Fleet",
+  description: "Every Claude Code session on your Mac, at a glance.",
+  start_url: `/?t=${token}`,
+  scope: "/",
+  display: "standalone",
+  orientation: "portrait",
+  background_color: "#0d1117",
+  theme_color: "#0d1117",
+  icons: [
+    { src: "/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
+    { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
+    { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
+  ],
+});
+
+/** A message from the page made safe to paste into a terminal: no control characters but newlines and tabs, so it cannot carry escape codes; at most 4000 characters. */
+export const cleanMessage = (text: string): string =>
+  text
+    .replace(/\r\n?/g, "\n")
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g, "")
+    .trim()
+    .slice(0, 4000);
+const tmuxCmd = () => "tmux";
+const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** The tmux pane a session's process runs in, on your usual tmux server, if it runs in one. */
+function paneOf(pid: number): string | undefined {
+  const tty = spawnSync("ps", ["-o", "tty=", "-p", String(pid)], { encoding: "utf8", timeout: 3000 }).stdout?.trim();
+  if (!tty || tty.startsWith("?")) return undefined;
+  const panes = spawnSync(tmuxCmd(), ["list-panes", "-a", "-F", "#{pane_tty} #{pane_id}"], { encoding: "utf8", timeout: 3000 }).stdout ?? "";
+  return panes.split("\n").map((l) => l.split(" ")).find(([t]) => t === `/dev/${tty}` || t === tty)?.[1];
+}
+/** Paste `text` into a tmux pane as one bracketed paste (so its lines stay one message), then press Enter. */
+function pasteInto(server: string[], pane: string, text: string): boolean {
+  const load = spawnSync(tmuxCmd(), [...server, "load-buffer", "-b", "fleet-message", "-"], { input: text, timeout: 3000 });
+  const paste = load.status === 0 && spawnSync(tmuxCmd(), [...server, "paste-buffer", "-p", "-d", "-b", "fleet-message", "-t", pane], { timeout: 3000 }).status === 0;
+  return paste && spawnSync(tmuxCmd(), [...server, "send-keys", "-t", pane, "Enter"], { timeout: 3000 }).status === 0;
+}
+let sendChain: Promise<unknown> = Promise.resolve();
+/**
+ * Type a message into a session, as if you had typed it there. A background session is opened with `claude attach` in
+ * a hidden tmux, the message pasted and sent, and the attach closed (the session keeps running). A session running in
+ * a tmux pane gets it pasted into that pane. Anything else cannot be reached. One message at a time.
+ */
+export function sendToSession(s: Session, raw: string): Promise<{ ok: boolean; via?: string; error?: string }> {
+  const text = cleanMessage(raw);
+  const run = async () => {
+    if (!text) return { ok: false, error: "nothing to send" };
+    if (process.platform === "win32") return { ok: false, error: "sending to a session needs tmux, so it does not work on Windows" };
+    if (spawnSync(tmuxCmd(), ["-V"], { timeout: 3000 }).status !== 0) return { ok: false, error: "sending needs tmux, which is not installed" };
+    if (s.jobId) {
+      const server = ["-L", `fleet-send-${process.pid}`];
+      spawnSync(tmuxCmd(), [...server, "kill-server"], { timeout: 3000 });
+      const attach = process.env.FLEET_ATTACH_CMD || "claude";
+      if (spawnSync(tmuxCmd(), [...server, "new-session", "-d", "-x", "120", "-y", "40", attach, "attach", s.jobId], { timeout: 5000 }).status !== 0) return { ok: false, error: "could not open the session" };
+      try {
+        // Ready once the input line is drawn and the screen has stopped changing.
+        let last = "";
+        let ready = false;
+        for (let i = 0; i < 60 && !ready; i++) {
+          await pause(250);
+          const screen = spawnSync(tmuxCmd(), [...server, "capture-pane", "-p"], { encoding: "utf8", timeout: 3000 }).stdout ?? "";
+          ready = /^❯/m.test(screen) && screen === last;
+          last = screen;
+        }
+        if (!ready) return { ok: false, error: "the session did not open in time" };
+        if (!pasteInto(server, "0", text)) return { ok: false, error: "could not type into the session" };
+        await pause(1000); // let it take the message before the attach closes
+        return { ok: true, via: "attach" };
+      } finally {
+        spawnSync(tmuxCmd(), [...server, "kill-server"], { timeout: 3000 });
+      }
+    }
+    const pane = paneOf(s.pid);
+    if (!pane) return { ok: false, error: "this session is not a background session or in tmux, so it cannot be reached from here" };
+    return pasteInto([], pane, text) ? { ok: true, via: "pane" } : { ok: false, error: "could not type into its tmux pane" };
+  };
+  const next = sendChain.then(run, run);
+  sendChain = next.catch(() => {});
+  return next;
+}
+
+/** Start serving the page (once). Every request must carry the secret; anything but the page and its data is a 404. */
+export function startWeb(getSessions: () => Session[], now: () => number = clock): typeof web {
+  if (web.server || web.error || web.shared) return web;
+  let token: string;
+  try {
+    token = webToken();
+  } catch (e) {
+    web.error = `could not keep the page's secret in ${webTokenPath()}: ${(e as Error).message}`;
+    return web;
+  }
+  const tail = tailnetAddress();
+  const host = tail ?? "127.0.0.1";
+  const headers = { "cache-control": "no-store", "referrer-policy": "no-referrer", "x-frame-options": "DENY", "x-content-type-options": "nosniff", "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" };
+  const base = Number(process.env.FLEET_WEB_PORT) || 4777;
+  const serveOn = (port: number) => {
+    try {
+      const server = Bun.serve({
+        hostname: host,
+        port,
+        async fetch(req) {
+          const url = new URL(req.url);
+          if (req.method === "POST" && url.pathname === "/api/send") {
+            if (!sameToken(url.searchParams.get("t") ?? "", token)) return new Response("not without the link fleet showed you", { status: 403, headers });
+            // Only the page itself may send: another site's form or script carries its own origin, or the wrong type.
+            const origin = req.headers.get("origin");
+            if ((origin && origin !== `${url.protocol}//${url.host}`) || !req.headers.get("content-type")?.startsWith("application/json")) return new Response("not from here", { status: 403, headers });
+            let body: { sid?: unknown; text?: unknown };
+            try {
+              body = await req.json();
+            } catch {
+              return new Response("bad message", { status: 400, headers });
+            }
+            const target = getSessions().find((x) => x.sid === body.sid);
+            if (!target || typeof body.text !== "string") return Response.json({ ok: false, error: "no such session" }, { status: 404, headers });
+            const r = await (web.send ?? sendToSession)(target, body.text);
+            return Response.json(r, { status: r.ok ? 200 : 409, headers });
+          }
+          if (req.method !== "GET") return new Response("not allowed", { status: 405, headers });
+          // The icon is the only thing served without the secret: phones fetch it without the link's query.
+          if (ICON_SIZES[url.pathname]) return new Response(webIcon(ICON_SIZES[url.pathname]), { headers: { ...headers, "content-type": "image/png", "cache-control": "max-age=86400" } });
+          if (!sameToken(url.searchParams.get("t") ?? "", token)) return new Response("not without the link fleet showed you", { status: 403, headers });
+          if (url.pathname === "/manifest.webmanifest") return Response.json(webManifest(token), { headers: { ...headers, "content-type": "application/manifest+json" } });
+          if (url.pathname === "/") return new Response(WEB_PAGE.replace("__TOKEN__", token), { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
+          if (url.pathname === "/api/state") return Response.json(webState(getSessions(), now()), { headers });
+          return new Response("not found", { status: 404, headers });
+        },
+      });
+      Object.assign(web, { server, host, onTailnet: !!tail, url: `http://${host}:${port}/?t=${token}`, shared: false });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (serveOn(base)) return web;
+  // The port is taken, most likely by another fleet, which keeps the same secret and so answers the same link: use
+  // that, so the link (and a home-screen icon) is the same whichever fleet serves it. Check it really is a fleet; if
+  // not, serve on the next free port. And take the page over when the other fleet quits.
+  Object.assign(web, { host, onTailnet: !!tail, url: `http://${host}:${base}/?t=${token}`, shared: true });
+  const fallBack = () => {
+    for (let port = base + 1; port < base + 20; port++) if (serveOn(port)) return;
+    Object.assign(web, { url: undefined, shared: false, error: `could not find a free port from ${base}` });
+  };
+  fetch(`http://${host}:${base}/manifest.webmanifest?t=${token}`, { signal: AbortSignal.timeout(2000) })
+    .then((r) => r.json())
+    .then((m) => (m?.name === "Claude Fleet" ? undefined : fallBack()))
+    .catch(fallBack);
+  web.retake = () => {
+    if (web.shared && serveOn(base)) web.retake = undefined;
+  };
+  return web;
+}
+
+let webOn = false; // key w: the screen with the page's QR code is showing
+/** Key w: the QR code to scan, the link, and where it is reachable from. Any key returns. */
+export function webScreen(cols: number, rows: number): string[] {
+  const W = Math.max(40, cols);
+  const out: string[] = ["", fg(C.cyan, bold("  ◆ CLAUDE FLEET")) + fg(C.white, " on your phone"), ""];
+  if (!web.url) out.push(fg(C.red, `  ${web.error ?? "the web page did not start"}`));
+  else {
+    const qr = qrRows(web.url) ?? [];
+    for (const line of qr) out.push("  " + line);
+    out.push("", fg(C.text, "  " + web.url));
+    out.push(
+      ...(web.shared ? [fg(C.dim, "  Another fleet on this Mac is serving it (same link); this one takes over if that one quits.")] : []),
+      fg(C.dim, web.onTailnet ? "  On your tailnet: any of your Tailscale devices can open it, nothing else can." : "  No Tailscale here, so it is open on this Mac only (127.0.0.1)."),
+      fg(C.dim, "  The link is the key and stays the same, so add it to your home screen. It can type messages into your"),
+      fg(C.dim, "  sessions, so keep it to yourself. Delete ~/.config/claude-fleet/web-token to change it."),
+    );
+  }
+  while (out.length < rows - 1) out.push("");
+  out.length = Math.max(0, rows - 1);
+  out.push(fg(C.dim, fit("  any key or click returns to the fleet", W)));
+  return out.map((l) => clipRow(l, W));
+}
+
+// ───────────────────────── Telegram ─────────────────────────
+// Key t pairs fleet with a Telegram bot of your own, so it can message you on every device: when a session needs
+// you (reply to that message to answer it), when one looks stuck, and when a pull request fails, goes green, merges
+// or goes live. Messages go through Telegram's servers. The bot answers only the one chat it was paired with.
+
+export interface TgConfig {
+  token?: string; // the bot's token from @BotFather: never drawn, logged or put in an error
+  bot?: string; // the bot's username
+  chat?: number; // the paired chat and the person in it; nothing else is listened to
+  user?: number;
+  pairCode?: string; // the one-time code in the pairing link, until a chat uses it
+}
+const fleetConfigDir = () => path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "claude-fleet");
+export const tgConfigPath = () => process.env.FLEET_TELEGRAM_FILE || path.join(fleetConfigDir(), "telegram.json");
+const tgApiBase = () => process.env.FLEET_TELEGRAM_API || "https://api.telegram.org";
+export function readTg(): TgConfig {
+  try {
+    const c = JSON.parse(fs.readFileSync(tgConfigPath(), "utf8"));
+    return c && typeof c === "object" ? c : {};
+  } catch {
+    return {};
+  }
+}
+export function writeTg(c: TgConfig) {
+  const file = tgConfigPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(c, null, 2) + "\n", { mode: 0o600 });
+  fs.renameSync(tmp, file);
+}
+export const TG_TOKEN = /^\d{5,}:[A-Za-z0-9_-]{30,}$/;
+/** One call to the bot API. Failures say what went wrong in words, never with the address, which holds the token. */
+export async function tgCall(token: string, method: string, params: Record<string, unknown> = {}, timeoutMs = 15_000): Promise<{ ok: boolean; result?: any; error?: string }> {
+  try {
+    const r = await fetch(`${tgApiBase()}/bot${token}/${method}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(params), signal: AbortSignal.timeout(timeoutMs) });
+    const j: any = await r.json().catch(() => ({}));
+    if (j?.ok) return { ok: true, result: j.result };
+    return { ok: false, error: r.status === 401 || r.status === 404 ? "Telegram does not know that token" : r.status === 409 ? "another program is reading this bot" : `Telegram said ${typeof j?.description === "string" ? safeLine(j.description).slice(0, 80) : r.status}` };
+  } catch {
+    return { ok: false, error: "could not reach Telegram" };
+  }
+}
+
+/** Which session each message we sent is about, so a reply to it reaches that session. Kept on disk so a reply works after a restart, or from the fleet that takes over. */
+const tgSentPath = () => path.join(path.dirname(tgConfigPath()), "telegram-sent.json");
+const tgSent = new Map<number, string>();
+function loadTgSent() {
+  try {
+    for (const [id, sid] of JSON.parse(fs.readFileSync(tgSentPath(), "utf8"))) tgSent.set(Number(id), String(sid));
+  } catch {}
+}
+function rememberTg(id: number, sid: string) {
+  tgSent.set(id, sid);
+  while (tgSent.size > 500) tgSent.delete(tgSent.keys().next().value!);
+  try {
+    fs.writeFileSync(tgSentPath(), JSON.stringify([...tgSent]), { mode: 0o600 });
+  } catch {}
+}
+
+export const tg = {
+  on: false, // this fleet is the one talking to the bot
+  status: "", // the latest problem, in words, for the t screen
+  entry: undefined as string | undefined, // the token being typed or pasted on the t screen
+  getSessions: (() => []) as () => Session[],
+  paired: false, // read from the file on each scan, for the button
+  was: { ready: false, pr: new Map<string, string>() },
+};
+/** Send `text` to the paired chat; when it is about a session, a reply to it goes to that session. */
+export async function tgSay(text: string, sid?: string, asking = false): Promise<boolean> {
+  const c = readTg();
+  if (!c.token || !c.chat) return false;
+  // A question carries a Reply button; it is taken off again once the session stops waiting.
+  const markup = asking && sid ? { reply_markup: { inline_keyboard: [[{ text: "↩ Reply", callback_data: "reply" }]] } } : {};
+  const r = await tgCall(c.token, "sendMessage", { chat_id: c.chat, text: text.slice(0, 4000), disable_web_page_preview: true, ...markup });
+  if (!r.ok) tg.status = r.error ?? "";
+  if (r.ok && sid && typeof r.result?.message_id === "number") {
+    rememberTg(r.result.message_id, sid);
+    if (asking) tgAsking.set(sid, r.result.message_id);
+  }
+  return r.ok;
+}
+/** The question message each waiting session was sent, so its Reply button can be taken off when it is answered. */
+const tgAsking = new Map<string, number>();
+/** Take the Reply button off questions whose session is no longer waiting. */
+export function tgSettle(waiting: Set<string>) {
+  const c = readTg();
+  if (!c.token || !c.chat) return;
+  for (const [sid, id] of tgAsking)
+    if (!waiting.has(sid)) {
+      tgAsking.delete(sid);
+      void tgCall(c.token, "editMessageReplyMarkup", { chat_id: c.chat, message_id: id, reply_markup: { inline_keyboard: [] } });
+    }
+}
+const tgName = (s: Session) => s.name || path.basename(s.cwd);
+/** What fleet does with a message from Telegram: pairing, a reply to a session, or a short status. */
+export async function tgHandle(update: any): Promise<void> {
+  const q = update?.callback_query;
+  if (q && typeof q.id === "string") {
+    const c = readTg();
+    if (!c.token) return;
+    const from = q.message?.chat?.id;
+    if (!c.chat || from !== c.chat || (c.user && q.from?.id !== c.user)) return;
+    const sid = typeof q.message?.message_id === "number" ? tgSent.get(q.message.message_id) : undefined;
+    const s = sid ? tg.getSessions().find((x) => x.sid === sid) : undefined;
+    await tgCall(c.token, "answerCallbackQuery", { callback_query_id: q.id, text: s ? undefined : "That session has finished." });
+    if (!s) return;
+    // Telegram's own reply box, opened on whichever device was tapped; the answer is a reply to this prompt.
+    const r = await tgCall(c.token, "sendMessage", { chat_id: c.chat, text: `✍️ Your answer to ${tgName(s)}:`, reply_markup: { force_reply: true, input_field_placeholder: `answer ${tgName(s)}…`.slice(0, 64) } });
+    if (r.ok && typeof r.result?.message_id === "number") rememberTg(r.result.message_id, s.sid);
+    return;
+  }
+  const m = update?.message;
+  if (!m || typeof m.text !== "string" || typeof m.chat?.id !== "number") return;
+  const c = readTg();
+  if (!c.token) return;
+  const say = (text: string) => tgCall(c.token!, "sendMessage", { chat_id: m.chat.id, text, reply_to_message_id: m.message_id });
+  if (!c.chat) {
+    // Only the chat that opens the pairing link (which carries the one-time code) is paired; anyone else is ignored.
+    if (c.pairCode && m.chat.type === "private" && m.text.trim() === `/start ${c.pairCode}`) {
+      writeTg({ ...c, chat: m.chat.id, user: m.from?.id, pairCode: undefined });
+      await say("Paired with Claude Fleet ✓\n\nI'll message you when a session needs you, looks stuck, or a pull request changes. Reply to one of my messages to send your reply to that session. /status lists what's waiting.");
+    }
+    return;
+  }
+  if (m.chat.id !== c.chat || (c.user && m.from?.id !== c.user)) return;
+  const text = m.text.trim();
+  const target = typeof m.reply_to_message?.message_id === "number" ? tgSent.get(m.reply_to_message.message_id) : undefined;
+  if (target) {
+    const s = tg.getSessions().find((x) => x.sid === target);
+    if (!s) return void (await say("That session has finished, so I can't send to it."));
+    const r = await (web.send ?? sendToSession)(s, text);
+    await say(r.ok ? `✓ sent to ${tgName(s)}` : `✗ not sent: ${r.error}`);
+    return;
+  }
+  if (text === "/status" || text === "/start") {
+    const views = buildViews(tg.getSessions(), clock()).filter((v) => !isHidden(v));
+    const lines = views.map((v) => `${v.state === "needs" ? "🟡" : v.state === "stalled" ? "⏳" : v.state === "working" ? "🟢" : "⚪"} ${tgName(v.s)} — ${STATE[v.state].word}${v.facts.needs ? `: ${capText(flatReply(v.facts.needs), 200)}` : ""}`);
+    await say(lines.length ? lines.join("\n") : "Nothing is working and nothing is waiting on you.");
+    return;
+  }
+  await say("Reply to one of my messages to send your text to that session. /status lists the sessions.");
+}
+let tgPolling = false;
+/** Read the bot's messages for as long as this fleet is the one talking to it. */
+async function tgPoll() {
+  if (tgPolling) return;
+  tgPolling = true;
+  let offset = 0;
+  try {
+    while (tg.on) {
+      const c = readTg();
+      if (!c.token) break;
+      const r = await tgCall(c.token, "getUpdates", { offset, timeout: 25, allowed_updates: ["message", "callback_query"] }, 35_000);
+      if (!r.ok) {
+        tg.status = r.error ?? "";
+        await new Promise((res) => setTimeout(res, 10_000));
+        continue;
+      }
+      tg.status = "";
+      for (const u of r.result ?? []) {
+        offset = Math.max(offset, u.update_id + 1);
+        await tgHandle(u).catch(() => {});
+      }
+    }
+  } finally {
+    tgPolling = false;
+  }
+}
+/** Only one fleet talks to the bot (Telegram allows one reader): the one holding the lock, taken over when it quits. */
+const tgLockPath = () => path.join(path.dirname(tgConfigPath()), "telegram.lock");
+export function tgClaim(): boolean {
+  if (!readTg().token) return (tg.on = false);
+  const file = tgLockPath();
+  try {
+    const pid = Number(fs.readFileSync(file, "utf8"));
+    if (pid && pid !== process.pid && alive(pid)) return (tg.on = false);
+  } catch {}
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, String(process.pid));
+    if (!tg.on) {
+      tg.on = true;
+      loadTgSent();
+      void tgPoll();
+    }
+  } catch {
+    tg.on = false;
+  }
+  return tg.on;
+}
+export function tgRelease() {
+  try {
+    if (Number(fs.readFileSync(tgLockPath(), "utf8")) === process.pid) fs.unlinkSync(tgLockPath());
+  } catch {}
+}
+/** A pull request's state, in the few words a message needs: "failing", "green", "merged", "live on staging", or "". */
+function prWord(pr: PrLink, cwd: string): string {
+  const st = prState.get(`${pr.repo}#${pr.number}`)?.state;
+  if (!st) return "";
+  if (st.state === "MERGED") {
+    const d = deploys().find((x) => x.repo === pr.repo);
+    return d && st.mergeSha && mergeLive(st.mergeSha, deployState.get(d.url)?.revision, cwd, pr.repo) ? `live on ${d.name}` : "merged";
+  }
+  return st.state !== "OPEN" ? "" : st.fail ? "failing" : !st.pending && st.pass ? "green" : "";
+}
+/** The messages for what changed in this scan. Called with what the bell rang for, so both agree on what is new. */
+export function tgEvents(sessions: Session[], asked: string[], stalled: string[]): [text: string, sid: string, asking?: boolean][] {
+  const out: [string, string, boolean?][] = [];
+  const bySid = new Map(sessions.map((s) => [s.sid, s]));
+  for (const sid of asked) {
+    const s = bySid.get(sid);
+    const q = s && factsOf(s).needs;
+    if (s) out.push([`🟡 ${tgName(s)} needs you${q ? `\n\n${capText(flatReply(q), 1500)}` : ""}`, sid, true]);
+  }
+  for (const sid of new Set(stalled.map((k) => k.split("/")[0]))) {
+    const s = bySid.get(sid);
+    if (s) out.push([`⏳ ${tgName(s)} looks stuck: nothing new for a while.\n\n↩ Reply to nudge it.`, sid]);
+  }
+  for (const s of sessions)
+    for (const pr of s.side?.prs.slice(0, PR_SHOWN) ?? []) {
+      const key = `${pr.repo}#${pr.number}`;
+      const word = prWord(pr, s.side?.cwd ?? s.cwd);
+      const was = tg.was.pr.get(key);
+      if (tg.was.ready && word && was !== undefined && word !== was) out.push([`${word === "failing" ? "❌" : word.startsWith("live") ? "🚀" : "✅"} ${tgName(s)}: #${pr.number} ${word === "green" ? "CI green" : word === "failing" ? "CI failing" : word}`, s.sid]);
+      if (word || was === undefined) tg.was.pr.set(key, word);
+    }
+  tg.was.ready = true;
+  return out;
+}
+
+let tgOn = false; // key t: the Telegram screen is showing
+let tgCheck = { at: 0, text: "" }; // the bot's name, checked when the screen opens
+/** Key t: pair with your own Telegram bot, or see that it is paired. */
+export function tgScreen(cols: number, rows: number): string[] {
+  const W = Math.max(40, cols);
+  const c = readTg();
+  const out: string[] = ["", fg(C.cyan, bold("  ◆ CLAUDE FLEET")) + fg(C.white, " on Telegram"), ""];
+  const say = (text: string, color: RGB = C.text) => out.push(fg(color, "  " + text));
+  if (tg.entry !== undefined || !c.token) {
+    say("Fleet can message you on Telegram, on every device, and you can reply to answer a session.");
+    say("Messages go through Telegram's servers.", C.dim);
+    out.push("");
+    say("1. In Telegram, open @BotFather and send /newbot. Pick any name; it gives you a token.");
+    say("2. Paste the token here and press Enter. It is kept in ~/.config/claude-fleet/telegram.json, readable only by you.");
+    out.push("");
+    out.push("  " + fg(C.white, "token: ") + fg(C.cyan, tg.entry === undefined ? "press Enter, then paste" : "•".repeat(Math.min(48, tg.entry.length)) + "▏"));
+    if (tg.status) out.push("", fg(C.red, "  " + tg.status));
+  } else if (!c.chat) {
+    const link = c.bot && c.pairCode ? `https://t.me/${c.bot}?start=${c.pairCode}` : undefined;
+    if (!link) say(tgCheck.text || "checking the token with Telegram…", C.dim);
+    else {
+      say("Scan this with your phone (or open the link) and tap Start to pair your chat:");
+      out.push("");
+      for (const line of qrRows(link) ?? []) out.push("  " + line);
+      out.push("", fg(C.text, "  " + link));
+    }
+    if (tg.status) out.push("", fg(C.red, "  " + tg.status));
+    out.push("", fg(C.dim, "  x forgets the token"));
+  } else {
+    say(`Paired with @${c.bot ?? "your bot"} ✓`, C.green);
+    out.push("");
+    say("You'll get a message when a session needs you or looks stuck, and when a pull request fails, goes green,");
+    say("merges or goes live. Tap ↩ Reply on a question, or reply to any message, to answer that session.");
+    say("/status lists what's waiting.");
+    out.push("", fg(C.dim, tg.on ? "  This fleet is talking to the bot." : "  Another fleet on this Mac is talking to the bot; this one takes over if it quits."));
+    if (tg.status) out.push("", fg(C.red, "  " + tg.status));
+    out.push("", fg(C.dim, "  s sends a test message · x unpairs and forgets the token"));
+  }
+  while (out.length < rows - 1) out.push("");
+  out.length = Math.max(0, rows - 1);
+  out.push(fg(C.dim, fit(tg.entry !== undefined ? "  Enter saves · Esc cancels" : "  any other key or click returns to the fleet", W)));
+  return out.map((l) => clipRow(l, W));
+}
+/** When the t screen opens, or a token was just saved: check the token, learn the bot's name, and make a pairing code. */
+export async function tgPrepare(): Promise<void> {
+  const c = readTg();
+  if (!c.token || c.chat) return;
+  tgCheck = { at: Date.now(), text: "checking the token with Telegram…" };
+  const me = await tgCall(c.token, "getMe");
+  if (!me.ok || typeof me.result?.username !== "string") {
+    tg.status = me.error ?? "Telegram did not accept the token";
+    tgCheck.text = "";
+    return;
+  }
+  tg.status = "";
+  writeTg({ ...readTg(), bot: me.result.username, pairCode: readTg().pairCode || Buffer.from(crypto.getRandomValues(new Uint8Array(12))).toString("base64url") });
+  if (tgWanted) tgClaim(); // never for the demo's made-up sessions
+}
+/** A key on the t screen. Returns false when the screen should close. */
+export function tgKey(key: string): boolean {
+  if (tg.entry !== undefined) {
+    if (key === "\x1b") tg.entry = undefined;
+    else if (key === "\r" || key === "\n") {
+      const token = tg.entry.trim();
+      tg.entry = undefined;
+      if (!TG_TOKEN.test(token)) tg.status = "That doesn't look like a bot token (digits, a colon, then letters).";
+      else {
+        writeTg({ token });
+        tg.status = "";
+        void tgPrepare();
+      }
+    } else if (key === "\x7f" || key === "\b") tg.entry = tg.entry.slice(0, -1);
+    else if (/^[\x20-\x7e]+$/.test(key)) tg.entry = (tg.entry + key).slice(0, 200);
+    return true;
+  }
+  const c = readTg();
+  if (!c.token && (key === "\r" || key === "\n")) {
+    tg.entry = "";
+    return true;
+  }
+  if (key === "x" && c.token) {
+    if (c.chat) void tgCall(c.token, "sendMessage", { chat_id: c.chat, text: "Unpaired from Claude Fleet. Bye 👋" });
+    writeTg({});
+    tg.on = false;
+    tg.status = "";
+    tgRelease();
+    return true;
+  }
+  if (key === "s" && c.chat) {
+    void tgSay("👋 Test from Claude Fleet. Notifications are working.");
+    return true;
+  }
+  return false;
 }
 
 // ───────────────────────── legend ─────────────────────────
@@ -5590,7 +6596,7 @@ export function legend(cols: number, rows: number): string[] {
     key("d", "list finished agents"),
     key("tab", "focus the next session"),
     key("esc", "leave focus; with none, quit"),
-    key("r", "open the one waiting on you"),
+    key("r w t", "open one waiting; phone page; Telegram"),
     key("b u", "bell on/off; retry usage now"),
     key("space", "seen it: clears the new marks"),
     key("?", "this legend"),
@@ -5710,7 +6716,14 @@ let sessions: Session[] = [];
 const needing = new Set<string>(); // sessions that were waiting on the person at the last scan
 const askedAt = new Map<string, number>(); // …and when each one's question was asked, the last time the bell rang for it
 const stalledNow = new Map<string, number>();
+let retakeAt = 0;
+let tgWanted = false; // set at launch for real sessions: talk to the Telegram bot when this fleet holds it
 function refresh() {
+  if (Date.now() >= retakeAt) {
+    retakeAt = Date.now() + 10_000; // when the fleet serving the page or talking to the bot quits, this one takes over
+    web.retake?.();
+    if (tgWanted) tgClaim();
+  }
   const now = clock();
   sessions = scan(now);
   prune(now);
@@ -5722,7 +6735,17 @@ function refresh() {
   // Ring once when a session starts waiting on the person, and once for each thing that newly stalls.
   const facts = sessions.map((s) => ({ s, f: factsOf(s) }));
   const asks = facts.filter((x) => x.f.needs).map((x): [string, number] => [x.s.sid, stateSince(x.s, x.f, "needs")]);
-  const rings = newAsks(needing, askedAt, asks).length + newStalls(stalledNow, facts.flatMap((x) => stallMarks(x.s, x.f, stallOf(x.s, x.f, now)))).length;
+  const asked = newAsks(needing, askedAt, asks);
+  const stalled = newStalls(stalledNow, facts.flatMap((x) => stallMarks(x.s, x.f, stallOf(x.s, x.f, now))));
+  const rings = asked.length + stalled.length;
+  if (tgWanted) {
+    const told = tgEvents(sessions, asked, stalled); // always, so what changed while another fleet held the bot is not news later
+    tg.paired = !!readTg().chat;
+    if (tg.on && tg.paired) {
+      for (const [text, sid, asking] of told) void tgSay(text, sid, asking);
+      tgSettle(new Set(asks.map(([sid]) => sid)));
+    }
+  }
   if (opt.bell && !opt.once) process.stdout.write("\x07".repeat(rings));
   noteScan(sessions, now);
   const partied = noteParties(sessions, now);
@@ -5752,10 +6775,19 @@ if (import.meta.main) {
     process.exit(0);
   }
 
+  // The phone page is always on (key w shows its link), except for made-up sessions (the demo and tests) or FLEET_WEB=0.
+  if (!process.env.FLEET_HOME && process.env.FLEET_WEB !== "0") startWeb(() => sessions);
+  // Telegram, once key t has paired a bot; likewise only for real sessions.
+  if (!process.env.FLEET_HOME) {
+    tgWanted = true;
+    tg.getSessions = () => sessions;
+    tgClaim();
+  }
+
   const out = process.stdout;
   let onScreen: string[] | undefined; // the frame the terminal shows, so the next writes only the rows that differ
   const draw = () => {
-    const lines = legendOn ? legend(out.columns || 140, out.rows || 45) : render(sessions, out.columns || 140, out.rows || 45, clock());
+    const lines = legendOn ? legend(out.columns || 140, out.rows || 45) : webOn ? webScreen(out.columns || 140, out.rows || 45) : tgOn ? tgScreen(out.columns || 140, out.rows || 45) : render(sessions, out.columns || 140, out.rows || 45, clock());
     out.write(frameDiff(onScreen, lines));
     onScreen = lines;
   };
@@ -5771,6 +6803,7 @@ if (import.meta.main) {
     if (process.stdin.isTTY) process.stdin.setRawMode(false);
   });
   const quit = () => {
+    tgRelease();
     restore();
     process.exit(0);
   };
@@ -5782,6 +6815,15 @@ if (import.meta.main) {
     else if (name === "win+") opt.windowMin = stepWindow(opt.windowMin, 1);
     else if (name === "win-") opt.windowMin = stepWindow(opt.windowMin, -1);
     else if (name === "reply") return reply();
+    else if (name === "telegram") {
+      tgOn = true;
+      tg.status = "";
+      if (!readTg().token) tg.entry = "";
+      else void tgPrepare();
+    } else if (name === "web") {
+      startWeb(() => sessions);
+      webOn = true;
+    }
     else if (name === "done") opt.showDone = !opt.showDone;
     else if (name === "all") opt.showAll = !opt.showAll;
     else if (name === "bell") opt.bell = !opt.bell;
@@ -5842,10 +6884,14 @@ if (import.meta.main) {
     clear();
     draw();
   });
-  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) process.on(signal, quit);
+  // Windows has no SIGTERM or SIGQUIT to listen for; Ctrl-Break and closing the window are its signals.
+  for (const signal of process.platform === "win32" ? (["SIGINT", "SIGBREAK", "SIGHUP"] as const) : (["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const))
+    try {
+      process.on(signal, quit);
+    } catch {}
 
   const KEYS: Record<string, string> = {
-    q: "quit", "\x03": "quit", "\x1b": "back", "\t": "next",
+    q: "quit", "\x03": "quit", "\x1b": "back", "\t": "next", w: "web", t: "telegram",
     "1": "mode:detail", "2": "mode:compact", "3": "mode:far", r: "reply",
     "+": "win+", "=": "win+", "-": "win-", _: "win-",
     d: "done", a: "all", b: "bell", u: "usage", " ": "seen", "?": "legend",
@@ -5856,11 +6902,24 @@ if (import.meta.main) {
     const handle = (events: InputEvent[]) => {
       const keys = events.filter((e) => e.kind === "key");
       if (keys.some((e) => e.kind === "key" && e.key === "\x03")) return quit(); // Ctrl-C quits from anywhere in a read
+      // The Telegram screen takes every key, a pasted token included; a click or a key it has no use for closes it.
+      if (tgOn) {
+        for (const e of events)
+          if ((e.kind === "key" && !tgKey(e.key)) || e.kind === "press") {
+            tgOn = false;
+            tg.entry = undefined;
+            clear();
+            break;
+          }
+        draw();
+        return;
+      }
       for (const e of events) {
         if (e.kind === "other" || (e.kind === "key" && keys.length > PASTE_KEYS)) continue;
         // The legend is closed by a key or a click, which then does nothing else. A button's release is not a click, so the click that opened it does not close it.
-        if (legendOn) {
+        if (legendOn || webOn) {
           legendOn = false;
+          webOn = false;
           clear();
           draw();
           continue;
