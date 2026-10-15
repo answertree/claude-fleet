@@ -6063,7 +6063,7 @@ export const webManifest = (token: string) => ({
   scope: "/",
   display: "standalone",
   orientation: "portrait",
-  background_color: "#050506", // the icon's own black, for the splash screen
+  background_color: "#000000", // the icon's own black, for the splash screen
   theme_color: "#0d1117",
   icons: [
     { src: "/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
