@@ -148,7 +148,7 @@ Fleet shows the sessions on all your machines at once, with nothing to set up be
 
 ## On your phone
 
-Fleet serves this page from the moment it starts. Press `w` and the dashboard shows its QR code; scan it and the same sessions open as a page on your phone that can also message them, refreshing every two seconds: who needs you (glowing), what each is doing, context, failures, background commands, pull requests with their CI and deploys, tasks, agents and the last few messages, with confetti when something merges. Add it to your home screen and it opens like an app.
+Fleet serves this page from the moment it starts. Press `w` and the dashboard shows its QR code; scan it and the same sessions open as a page on your phone that can also message them, refreshing every two seconds: who needs you (glowing), what each is doing, context, failures, background commands, pull requests with their CI and deploys, tasks, agents and the last few messages, with confetti when something merges. Add it to your home screen and it opens like an app, with the Fleet icon (from `icons/`).
 
 It is built to be safe to leave running:
 

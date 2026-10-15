@@ -4977,6 +4977,10 @@ describe("key w: the phone page", () => {
       expect(fs.statSync(process.env.FLEET_WEB_TOKEN_FILE!).mode & 0o777).toBe(0o600);
       const icon = await fetch(`${base}/apple-touch-icon.png`);
       expect([icon.status, icon.headers.get("content-type")]).toEqual([200, "image/png"]);
+      // The F from icons/, at the size each place asks for.
+      const touch = Buffer.from(await icon.arrayBuffer());
+      expect([touch.readUInt32BE(16), touch.equals(fs.readFileSync(path.join(import.meta.dir, "icons", "icon-180.png")))]).toEqual([180, true]);
+      expect((await fetch(`${base}/icon-maskable-512.png`)).status).toBe(200);
       // Installed as an app: the manifest opens at the link (so it needs the secret itself), and the page points at it.
       expect((await fetch(`${base}/manifest.webmanifest`)).status).toBe(403);
       const manifest = await (await fetch(`${base}/manifest.webmanifest?t=${token}`)).json();

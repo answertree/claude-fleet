@@ -5843,6 +5843,7 @@ export const WEB_PAGE = `<!doctype html>
 <meta name="referrer" content="no-referrer">
 <meta name="apple-mobile-web-app-title" content="Fleet">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon.ico">
 <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
 <title>Claude Fleet</title>
 <style>
@@ -6040,7 +6041,19 @@ export function webIcon(n: number): Buffer {
   iconPngs.set(n, png);
   return png;
 }
-const ICON_SIZES: Record<string, number> = { "/apple-touch-icon.png": 180, "/apple-touch-icon-precomposed.png": 180, "/favicon.ico": 32, "/icon-192.png": 192, "/icon-512.png": 512 };
+const ICON_SIZES: Record<string, number> = { "/apple-touch-icon.png": 180, "/apple-touch-icon-precomposed.png": 180, "/favicon.ico": 32, "/icon-192.png": 192, "/icon-512.png": 512, "/icon-maskable-512.png": 512 };
+/** The app icon: the files in icons/ beside fleet.ts (the F), or the drawn diamond if they are missing. */
+const iconFiles = new Map<string, Buffer | null>();
+export function appIcon(route: string): Buffer {
+  const name = route === "/icon-maskable-512.png" ? "icon-maskable-512.png" : `icon-${ICON_SIZES[route]}.png`;
+  if (!iconFiles.has(name))
+    try {
+      iconFiles.set(name, fs.readFileSync(path.join(import.meta.dir, "icons", name)));
+    } catch {
+      iconFiles.set(name, null);
+    }
+  return iconFiles.get(name) ?? webIcon(ICON_SIZES[route]);
+}
 /** The web app manifest. It carries the secret in its start address, so it is served only to a request that has the link. */
 export const webManifest = (token: string) => ({
   name: "Claude Fleet",
@@ -6050,12 +6063,12 @@ export const webManifest = (token: string) => ({
   scope: "/",
   display: "standalone",
   orientation: "portrait",
-  background_color: "#0d1117",
+  background_color: "#050506", // the icon's own black, for the splash screen
   theme_color: "#0d1117",
   icons: [
     { src: "/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
     { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
-    { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
+    { src: "/icon-maskable-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
   ],
 });
 
@@ -6244,7 +6257,7 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
           }
           if (req.method !== "GET") return new Response("not allowed", { status: 405, headers });
           // The icon is the only thing served without the secret: phones fetch it without the link's query.
-          if (ICON_SIZES[url.pathname]) return new Response(webIcon(ICON_SIZES[url.pathname]), { headers: { ...headers, "content-type": "image/png", "cache-control": "max-age=86400" } });
+          if (ICON_SIZES[url.pathname]) return new Response(appIcon(url.pathname), { headers: { ...headers, "content-type": "image/png", "cache-control": "max-age=86400" } });
           if (!sameToken(url.searchParams.get("t") ?? "", token)) return new Response("not without the link fleet showed you", { status: 403, headers });
           if (url.pathname === "/manifest.webmanifest") return Response.json(webManifest(token), { headers: { ...headers, "content-type": "application/manifest+json" } });
           if (url.pathname === "/") return new Response(WEB_PAGE.replace("__TOKEN__", token), { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
