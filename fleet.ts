@@ -23,6 +23,10 @@ import { spawn, spawnSync } from "node:child_process";
  * time it is used, not once at import: a test sets FLEET_HOME after its import of this file has already run,
  * and must never be left looking at the real sessions.
  */
+/** A full folder path, on macOS and Linux ("/Users/…") or on Windows ("C:\\Users\\…", "\\\\server\\share"). */
+export const absoluteDir = (p: string): boolean => /^(\/|[A-Za-z]:[\\/]|\\\\)/.test(p);
+/** A path's folders, whichever slash it uses. */
+export const foldersOf = (p: string): string[] => p.split(/[\\/]/).filter(Boolean);
 const claudeHome = (): string => process.env.FLEET_HOME || process.env.AGENT_FLEET_HOME || path.join(os.homedir(), ".claude");
 /** The time. FLEET_NOW (test only) pins it, in milliseconds since 1970, so a frame can be reproduced exactly. */
 export const clock = (): number => Number(process.env.FLEET_NOW) || Date.now();
@@ -906,7 +910,7 @@ const capMap = <K, V>(m: Map<K, V>, max: number) => {
 };
 /** What a line says beside the conversation: a pull request linked, a compaction, where the session works. */
 export function absorbSide(t: Tail, o: any, ts: number) {
-  if (typeof o?.cwd === "string" && o.cwd.startsWith("/") && !o.isSidechain) t.cwd = o.cwd;
+  if (typeof o?.cwd === "string" && absoluteDir(o.cwd) && !o.isSidechain) t.cwd = o.cwd;
   if (o?.type === "pr-link") {
     const repo = String(o.prRepository ?? "");
     const number = Number(o.prNumber);
@@ -1392,7 +1396,7 @@ function runFor(cmd: string, args: string[], sync: boolean, done: (out: string |
 }
 /** Ask git for a folder's state, at most every 30 seconds. --no-optional-locks keeps it from taking the index lock a session may need. */
 export function pollGit(cwd: string, now: number, sync = false) {
-  if (!cwd.startsWith("/")) return;
+  if (!absoluteDir(cwd)) return;
   const e = gitState.get(cwd);
   if (e && (e.busy || now - e.at < GIT_EVERY_MS)) return;
   const fx = fixture("FLEET_GIT_FIXTURE");
@@ -1482,7 +1486,7 @@ export function mergeLive(mergeSha: string, revision: string | undefined, cwd: s
   const key = `${mergeSha} ${revision}`;
   if (ancestry.get(key) !== undefined) return ancestry.get(key);
   if (fixture("FLEET_DEPLOY_FIXTURE")) return undefined;
-  if (!ancestry.has(key) && cwd.startsWith("/")) {
+  if (!ancestry.has(key) && absoluteDir(cwd)) {
     const r = spawnSync("git", ["--no-optional-locks", "-C", cwd, "merge-base", "--is-ancestor", mergeSha, revision], { timeout: 3000 });
     ancestry.set(key, r.status === 0 ? true : r.status === 1 ? false : undefined);
     if (ancestry.size > 500) ancestry.delete(ancestry.keys().next().value as string);
@@ -4369,7 +4373,7 @@ function headRows(b: Block, p: Paint): Row[] {
   const party = partyOn(s.sid, now);
   if (party) [...title].forEach((ch, i) => r1.put(g.icon + i, ch, ch === " " ? C.white : partyTone(i, now), true));
   else r1.put(g.icon, title, receded ? C.text : C.white, true);
-  const folders = s.cwd.replace(os.homedir(), "~").split("/").filter(Boolean);
+  const folders = foldersOf(s.cwd.replace(os.homedir(), "~"));
   const branch = s.mains.map((m) => m.branch).find(Boolean);
   const at = branch && branch !== "HEAD" ? ` ${ICON.at} ${branch}` : "";
   const where = folders.slice(-2).join("/") + at;
@@ -5326,7 +5330,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
     const b = buckets(tailsHere.map((t) => t.tools), now, S);
     const branch = s.mains.map((m) => m.branch).find(Boolean);
     const home = os.homedir();
-    const where = s.cwd.replace(home, "~").split("/").slice(-2).join("/") + (branch && branch !== "HEAD" ? ` ${ICON.at} ${branch}` : "");
+    const where = foldersOf(s.cwd.replace(home, "~")).slice(-2).join("/") + (branch && branch !== "HEAD" ? ` ${ICON.at} ${branch}` : "");
     const stalled = v.state === "stalled";
     // The lead glyph is the state: ▲ needs you, ◐ stalled, ● working, ▸ your turn, ○ idle, ✓ finished.
     const state = STATE[v.state];
@@ -5786,7 +5790,7 @@ export function webState(sessions: Session[], now: number) {
       return {
         sid: s.sid,
         name: s.name,
-        place: [s.cwd.replace(os.homedir(), "~").split("/").filter(Boolean).slice(-2).join("/"), branch && branch !== "HEAD" ? `@ ${branch}` : ""].filter(Boolean).join(" "),
+        place: [foldersOf(s.cwd.replace(os.homedir(), "~")).slice(-2).join("/"), branch && branch !== "HEAD" ? `@ ${branch}` : ""].filter(Boolean).join(" "),
         state: v.state,
         word: STATE[v.state].word,
         color: hexOf(STATE[v.state].color),
@@ -6080,6 +6084,7 @@ export function sendToSession(s: Session, raw: string): Promise<{ ok: boolean; v
   const text = cleanMessage(raw);
   const run = async () => {
     if (!text) return { ok: false, error: "nothing to send" };
+    if (process.platform === "win32") return { ok: false, error: "sending to a session needs tmux, so it does not work on Windows" };
     if (spawnSync(tmuxCmd(), ["-V"], { timeout: 3000 }).status !== 0) return { ok: false, error: "sending needs tmux, which is not installed" };
     if (s.jobId) {
       const server = ["-L", `fleet-send-${process.pid}`];
@@ -6879,7 +6884,11 @@ if (import.meta.main) {
     clear();
     draw();
   });
-  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const) process.on(signal, quit);
+  // Windows has no SIGTERM or SIGQUIT to listen for; Ctrl-Break and closing the window are its signals.
+  for (const signal of process.platform === "win32" ? (["SIGINT", "SIGBREAK", "SIGHUP"] as const) : (["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"] as const))
+    try {
+      process.on(signal, quit);
+    } catch {}
 
   const KEYS: Record<string, string> = {
     q: "quit", "\x03": "quit", "\x1b": "back", "\t": "next", w: "web", t: "telegram",

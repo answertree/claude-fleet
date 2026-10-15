@@ -148,6 +148,15 @@ It is built to be safe to leave running:
 - Otherwise it serves only the page, its data and its icons.
 - It stops when fleet quits. With several fleets open, the first serves the page and the others show the same link; when it quits, another takes the page over within ten seconds.
 
+## On Windows
+
+Fleet runs on Windows with Bun, best in Windows Terminal. A few things it gets from macOS or Linux tools are missing there:
+
+- The per-process CPU and memory figures (and the stall check that uses them) need `ps`, so they are left out; the machine's CPU and memory gauges still show.
+- Your Claude usage is read from `~/.claude/.credentials.json`, where Claude Code keeps your login on Windows.
+- Sending a message to a session (from the phone page or Telegram) needs tmux, so on Windows it says so instead. Everything else on the phone page and Telegram works.
+- The secret files in `~/.config/claude-fleet` are protected by your Windows user folder's permissions rather than Unix file modes.
+
 ## On Telegram
 
 Press `t` to pair fleet with a Telegram bot of your own; then it messages you on every device:

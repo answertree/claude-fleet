@@ -5123,3 +5123,10 @@ describe("key t: Telegram", () => {
     expect(F.readTg().token).toBeUndefined();
   });
 });
+
+describe("on Windows", () => {
+  test("a session's folder counts whichever way the path is written, and is shortened by either slash", () => {
+    for (const p of ["/Users/me/work/shop", "C:\\Users\\me\\work\\shop", "C:/Users/me/work/shop", "\\\\server\\share\\work\\shop"]) expect([p, F.absoluteDir(p), F.foldersOf(p).slice(-2).join("/")]).toEqual([p, true, "work/shop"]);
+    for (const p of ["work/shop", "~/work", ""]) expect(F.absoluteDir(p)).toBe(false);
+  });
+});
