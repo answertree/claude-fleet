@@ -1,10 +1,25 @@
+<p align="center"><img src="docs/logo.png" width="128" alt="Claude Fleet"></p>
+
 # Claude Fleet
 
-Every live Claude Code session on one terminal screen: what each one is doing, which ones are waiting on you, and what their agents, workflows and tasks are up to.
+Every live Claude Code session, on every one of your machines, on one screen: what each one is doing, which ones are waiting on you, and what their agents, workflows and tasks are up to. In your terminal, on your phone, and on Telegram, where you can answer them too.
 
 ![Claude Fleet in detail mode](docs/screenshot.svg)
 
-It is one TypeScript file with no dependencies. It reads the files Claude Code already keeps under `~/.claude`. The only thing it ever writes is one small file of usage figures, and not at all with `--no-usage` (see [Account usage and your login](#account-usage-and-your-login)). Every 30 seconds it asks `git` for the state of each session's checkout, and it asks GitHub, through your `gh` command, about each session's pull requests (`--no-prs` turns that off).
+## Everywhere
+
+- **Every machine.** Run fleet on each of your computers and each one shows the sessions on all of them, found through [Tailscale](https://tailscale.com) with nothing to set up. See [Every machine](#every-machine).
+- **Your phone.** Fleet serves a page for your phone, over Tailscale, from the moment it starts: press `w` and scan the QR code. Add it to your home screen and it opens like an app, and you can answer a session from it. See [On your phone](#on-your-phone).
+- **Telegram.** Pair your own bot with `t` and fleet messages you, on every device, when a session needs you, gets stuck, or a pull request changes. Tap ↩ Reply to answer, 📺 Screen to see the session's own terminal and tap a choice on it, or ask for anything the detail view shows: `/status`, `/menu`, `/tasks`, `/prs`, `/usage`, `/screen`, `/new` to start a session, a morning digest, quiet hours and a live pinned overview. See [On Telegram](#on-telegram).
+
+<p align="center">
+  <img src="docs/phone.png" width="300" alt="The phone page: a session waiting on you, with its question and an answer box">
+  &nbsp;&nbsp;
+  <img src="docs/telegram-screen.png" width="520" alt="What /screen sends on Telegram: one session, drawn by fleet">
+</p>
+<p align="center"><sub>The phone page, and a session as Telegram's <code>/screen</code> sends it (fleet draws the picture itself).</sub></p>
+
+It is one TypeScript file with no dependencies beyond [Bun](https://bun.sh). It reads the files Claude Code already keeps under `~/.claude`, and writes only its own small files: usage figures (not at all with `--no-usage`, see [Account usage and your login](#account-usage-and-your-login)), and under `~/.config/claude-fleet` the phone page's secret and, once you pair it, the Telegram bot's. Every 30 seconds it asks `git` for the state of each session's checkout, and it asks GitHub, through your `gh` command, about each session's pull requests (`--no-prs` turns that off).
 
 ## Try it
 
@@ -106,7 +121,9 @@ Every control has a key, and all but `tab` and `esc` are also buttons on the bot
 | Key | Does |
 | --- | --- |
 | `1` `2` `3` | View mode: detail, compact, timeline |
-| `r` | Open the session that has waited on you longest (or the one in focus) to answer it |
+| `r` | Open the session that has waited on you longest (or the one in focus) to answer it, if it is on this machine |
+| `w` | The phone page's QR code and link (the page itself is always on) |
+| `t` | Telegram: pair your bot, `s` sends a test message, `x` unpairs |
 | `+` `-` | Sparkline window: 5, 15, 30, 60 or 180 minutes (from another window given on the command line, the next of these up or down) |
 | `a` | Show idle and finished sessions too. The button carries how many there are |
 | `d` | List finished agents instead of counting them |
@@ -277,7 +294,7 @@ A dashboard whose own read fails shows the figures from that file, or failing th
 - **Text from a session is reduced to plain one-cell characters** before it is drawn, so nothing in it can push a column out of line: `✅` becomes `✓`, other emoji are dropped, and wide characters outside Latin (Chinese, Japanese, Korean) become `?`.
 - **Only the last 2 MB of each transcript is read,** so a long window on a very busy session can undercount early activity.
 - **Under 80 columns the layout is not designed.** Rows are cut at the right edge so that none wraps.
-- **Your screen shows prompt and reply text from every session.** Mind who can see it.
+- **Your screen shows prompt and reply text from every session.** Mind who can see it. So do the phone page (keep its link to yourself: it can also type into your sessions) and Telegram, whose servers carry the bot's messages.
 
 ## Development
 
