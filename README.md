@@ -136,9 +136,19 @@ Every control has a key, and all but `tab` and `esc` are also buttons on the bot
 
 Capturing clicks means a plain drag no longer selects text. Hold Shift (Option in iTerm2 and Terminal.app) while dragging, or start with `--no-mouse`.
 
+## Every machine
+
+Fleet shows the sessions on all your machines at once, with nothing to set up beyond running fleet on each. Every fleet finds your other computers through Tailscale (online, signed in as you, and not a phone or tablet), asks each one's fleet for its sessions every two seconds on port 4777, and draws them with its own. A machine that is off, asleep or not running fleet is simply not there, and appears when it is. Once there is more than one machine, each session says which it is on: before its folder in the detail and compact views, and at the head of its CPU row in the timeline.
+
+- **No secrets to copy.** A fleet answers another machine only after `tailscale whois` confirms the request comes from a device signed in to your own Tailscale account.
+- **What travels:** each machine's own sessions (never what it got from others), trimmed to the last three and a half hours, compressed, and not sent at all when nothing changed since the last ask.
+- **Messages and replies** to a session on another machine (from the phone page or Telegram) are passed to that machine's fleet, which types them in there. The `r` key can only open a session on this machine.
+- **Telegram** is one bot for all of them. Pair it on any machine; the pairing (token and chat) reaches the others, newest change winning, and unpairing does too. Of the fleets that can, the one with the lowest Tailscale address talks to the bot and notifies you about every machine's sessions; when it goes, the next takes over. A machine coming into view does not set off notifications for what was already waiting on it.
+- Machines must run the same version of fleet to see each other.
+
 ## On your phone
 
-Fleet serves this page from the moment it starts. Press `w` and the dashboard shows its QR code; scan it and the same sessions open as a page on your phone that can also message them, refreshing every two seconds: who needs you (glowing), what each is doing, context, failures, background commands, pull requests with their CI and deploys, tasks, agents and the last few messages, with confetti when something merges. Add it to your home screen and it opens like an app.
+Fleet serves this page from the moment it starts. Press `w` and the dashboard shows its QR code; scan it and the same sessions open as a page on your phone that can also message them, refreshing every two seconds: who needs you (glowing), what each is doing, context, failures, background commands, pull requests with their CI and deploys, tasks, agents and the last few messages, with confetti when something merges. Add it to your home screen and it opens like an app, with the Fleet icon (from `icons/`).
 
 It is built to be safe to leave running:
 
@@ -165,7 +175,27 @@ Press `t` to pair fleet with a Telegram bot of your own; then it messages you on
 - ⏳ when a session looks stuck (reply to nudge it);
 - ❌ ✅ 🚀 when a pull request's CI fails or goes green, when it merges, and when it is live on a deploy target.
 
-Reply to any of its messages to send your text to that session, and send `/status` for what is waiting. Replies reach a session the same way the phone page's messages do (see above).
+Reply to any of its messages to send your text to that session. Replies reach a session the same way the phone page's messages do (see above). Each notification also has **ℹ️ Details** (everything about that session) and **🔕 Mute** (no more notifications from it for 24 hours, on every machine).
+
+Everything the detail view shows is a command away, and Telegram lists them in its menu:
+
+- `/status`: every machine (CPU, memory, sessions), the counts, usage at a glance, and a button for each session. A session's button opens its card: question or what it is doing, folder and machine, context with its forecast, activity sparkline, workflows, pull requests with CI and deploys, failures, background commands, changes, tasks and agents, and its last reply. The card's buttons answer it, draw it, show the conversation, mute it, refresh it, or go back.
+- `/menu`: the same in sections, one button each, and the message changes in place: `/needs`, `/tasks`, `/agents`, `/workflows`, `/prs`, `/fails`, `/bg`, `/changes`, `/context`, `/activity`, `/machines`. Each also works as a command, narrowed by a session name: `/tasks checkout`.
+- `/session <name>`: one session's card.
+- `/usage`: each machine's Claude limits as bars, and a picture of this machine's gauges.
+- `/screen`, or `/screen <name>`: a picture of the fleet, or of one session, as the detail view draws it. Fleet draws the picture itself (in the public-domain unscii font), so it needs nothing installed, on any machine.
+
+More, from the same bot:
+
+- **📺 Screen** (on a question, and on every session's card): a picture of what the session's own terminal shows right now, with a button for each numbered choice on it (`1. Yes`, `2. …`, `3. No`), plus Enter and Esc. Tapping one presses that key in the session, so you can answer a permission prompt or a multiple-choice question from your phone. Like messages, it needs the session to be a background session or in tmux.
+- **⎋ Interrupt** on a session's card presses Esc in it (after you confirm), which stops what it is doing.
+- `/new <what to do>` starts a background Claude session: pick a folder (any your sessions run in, on any machine) and it runs `claude --bg` there. Another machine only starts one in a folder where it already has a session.
+- **Usage alerts**: a message when any machine's Claude account passes 80% and 95% of a limit, once per limit window.
+- `/live` pins an overview that updates itself every minute; `/live` again takes it away.
+- **Morning digest** at 08:00: what merged, went live, finished, failed or got stuck since the last one, what is waiting now, and usage. `/digest` sends one now; `/digest 7:30` moves it; `/digest off`.
+- `/quiet 23:00-07:00` holds everything but “needs you” during those hours; it shows in the digest instead. `/quiet off` ends it. Mutes, quiet hours, the digest time and the live message are shared by all your machines, like the pairing.
+
+Menus, cards, pictures and confirmations delete themselves ten minutes after you last used them, with the command that asked for them, so the chat stays tidy; notifications stay. The pairing is kept in `~/.config/claude-fleet/telegram.json`, so the bot carries on by itself after fleet restarts.
 
 Setting it up: in Telegram, open @BotFather, send `/newbot` and follow it; it gives you a token. Press `t` in fleet, paste the token and press Enter (it is shown as dots, and kept in `~/.config/claude-fleet/telegram.json`, readable only by you). Fleet then shows a QR code: scan it with your phone, or open the link, and tap Start. Only the chat that opens that link is paired; the bot ignores everyone else. On the `t` screen afterwards, `s` sends a test message and `x` unpairs and forgets the token.
 

@@ -4977,6 +4977,10 @@ describe("key w: the phone page", () => {
       expect(fs.statSync(process.env.FLEET_WEB_TOKEN_FILE!).mode & 0o777).toBe(0o600);
       const icon = await fetch(`${base}/apple-touch-icon.png`);
       expect([icon.status, icon.headers.get("content-type")]).toEqual([200, "image/png"]);
+      // The F from icons/, at the size each place asks for.
+      const touch = Buffer.from(await icon.arrayBuffer());
+      expect([touch.readUInt32BE(16), touch.equals(fs.readFileSync(path.join(import.meta.dir, "icons", "icon-180.png")))]).toEqual([180, true]);
+      expect((await fetch(`${base}/icon-maskable-512.png`)).status).toBe(200);
       // Installed as an app: the manifest opens at the link (so it needs the secret itself), and the page points at it.
       expect((await fetch(`${base}/manifest.webmanifest`)).status).toBe(403);
       const manifest = await (await fetch(`${base}/manifest.webmanifest?t=${token}`)).json();
@@ -5047,7 +5051,7 @@ describe("key t: Telegram", () => {
       async fetch(req) {
         const [, bot, method] = new URL(req.url).pathname.split("/");
         if (bot !== `bot${TOKEN}`) return Response.json({ ok: false, description: "Unauthorized" }, { status: 401 });
-        const body = await req.json();
+        const body = req.headers.get("content-type")?.startsWith("multipart/") ? Object.fromEntries((await req.formData()).entries()) : await req.json();
         calls.push([method, body]);
         if (method === "getMe") return Response.json({ ok: true, result: { username: "my_fleet_bot" } });
         return Response.json({ ok: true, result: { message_id: 100 + calls.length } });
@@ -5090,9 +5094,9 @@ describe("key t: Telegram", () => {
       expect([method, body.chat_id, body.reply_markup.inline_keyboard[0][0].text]).toEqual(["sendMessage", 42, "↩ Reply"]);
       const askId = 101;
       // A tap from someone else's chat is ignored.
-      await F.tgHandle({ callback_query: { id: "q0", from: { id: 666 }, message: { message_id: askId, chat: { id: 666 } } } });
+      await F.tgHandle({ callback_query: { id: "q0", data: "reply", from: { id: 666 }, message: { message_id: askId, chat: { id: 666 } } } });
       expect(calls.length).toBe(1);
-      await F.tgHandle({ callback_query: { id: "q1", from: { id: 7 }, message: { message_id: askId, chat: { id: 42 } } } });
+      await F.tgHandle({ callback_query: { id: "q1", data: "reply", from: { id: 7 }, message: { message_id: askId, chat: { id: 42 } } } });
       expect(calls.map(([m]) => m)).toEqual(["sendMessage", "answerCallbackQuery", "sendMessage"]);
       expect(calls[2][1].reply_markup.force_reply).toBe(true);
       const promptId = 103;
@@ -5108,6 +5112,119 @@ describe("key t: Telegram", () => {
       expect(sent.length).toBe(1);
     } finally {
       delete F.web.send;
+    }
+  });
+
+  test("everything in the detail view is a command or a menu away, and menus tidy themselves away", async () => {
+    F.writeTg({ token: TOKEN, chat: 42, user: 7, bot: "my_fleet_bot" });
+    F.tg.getSessions = () => [session];
+    const msg = (text: string, id = 50) => F.tgHandle({ message: { message_id: id, text, chat: { id: 42 }, from: { id: 7 } } });
+    calls.length = 0;
+    await msg("/tasks checkout");
+    expect(calls[0][0]).toBe("sendMessage");
+    expect(calls[0][1].text).toContain("<b>📋 Tasks</b> · “checkout”");
+    expect(calls[0][1].parse_mode).toBe("HTML");
+    const menuId = 101; // what the stand-in Telegram numbered that reply
+    // The menu: a section's button shows it in place of the message it is on, marked as the one showing.
+    calls.length = 0;
+    await F.tgHandle({ callback_query: { id: "q2", data: "v:prs", from: { id: 7 }, message: { message_id: menuId, chat: { id: 42 } } } });
+    const edit = calls.find(([m]) => m === "editMessageText")!;
+    expect(edit[1].message_id).toBe(menuId);
+    expect(JSON.stringify(edit[1].reply_markup)).toContain("• ⇡ PRs");
+    // Every command has its place in Telegram's menu, and /help lists them.
+    for (const x of F.TG_SECTIONS) expect(F.TG_COMMANDS.some((c) => c.command === x.key)).toBe(true);
+    // Ten minutes on, the menu and the command that asked for it are deleted; notifications are not.
+    calls.length = 0;
+    await F.tgSay("🟡 checkout flow needs you", "s1", true);
+    F.tgSweep(Date.now() + 11 * 60_000);
+    await Bun.sleep(50);
+    const deleted = calls.filter(([m]) => m === "deleteMessage").map(([, b]) => b.message_id);
+    expect(deleted).toContain(50); // the /tasks command
+    expect(deleted).toContain(menuId); // the reply, since turned into the PRs menu
+    expect(deleted).not.toContain(calls.find(([m]) => m === "sendMessage")![1].message_id);
+  });
+
+  test("a picture of the fleet is drawn by fleet itself and sent as a photo", async () => {
+    F.writeTg({ token: TOKEN, chat: 42, user: 7, bot: "my_fleet_bot" });
+    F.tg.getSessions = () => [session];
+    calls.length = 0;
+    await F.tgHandle({ callback_query: { id: "q3", data: "P", from: { id: 7 }, message: { message_id: 78, chat: { id: 42 } } } });
+    const [, body] = calls.find(([m]) => m === "sendPhoto")!;
+    const png = new Uint8Array(await (body.photo as Blob).arrayBuffer());
+    expect([...png.slice(1, 4)].map((b) => String.fromCharCode(b)).join("")).toBe("PNG");
+    expect(body.chat_id).toBe("42");
+  });
+
+  test("the picture's font draws every character the screen uses, with true shapes for the state marks", () => {
+    const png = F.pictureOf([F.fg([255, 0, 0], "▲ ● ○ ◐ ◆ ✓ ✗ ⠋ ▁▂▃█ ━ │ #412")], 30);
+    expect(png.readUInt32BE(16)).toBe(30 * 16); // width: 30 characters of 8 pixels, doubled
+    const cells = F.cellsOf(F.fg([1, 2, 3], "a") + F.bold("b") + "c");
+    expect(cells.map((x) => [x.ch, x.fg, x.bold])).toEqual([["a", [1, 2, 3], false], ["b", F.C.text, true], ["c", F.C.text, false]]);
+  });
+
+  test("quiet hours wrap past midnight, and a prompt's numbered choices become buttons", () => {
+    const at = (h: number, m = 0) => new Date(2026, 9, 15, h, m).getTime();
+    const q = { from: "23:00", to: "07:00" };
+    expect([F.inQuiet(q, at(23, 30)), F.inQuiet(q, at(3)), F.inQuiet(q, at(7)), F.inQuiet(q, at(12)), F.inQuiet(undefined, at(3))]).toEqual([true, true, false, false, false]);
+    expect(F.inQuiet({ from: "13:00", to: "14:00" }, at(13, 30))).toBe(true);
+    const screen = ["Bash command", "  npm test", "", " Do you want to proceed?", " ❯ 1. Yes", "   2. Yes, and don't ask again for npm test", "   3. No, and tell Claude what to do differently (esc)", ""].join("\n");
+    expect(F.screenOptions(screen).map((o) => o.key + " " + o.label)).toEqual(["1 Yes", "2 Yes, and don't ask again for npm test", "3 No, and tell Claude what to do differently (esc)"]);
+    expect(F.screenOptions("❯ ")).toEqual([]);
+  });
+
+  test("a tapped choice is pressed in the session, and /new starts one where you pick", async () => {
+    F.writeTg({ token: TOKEN, chat: 42, user: 7, bot: "my_fleet_bot" });
+    F.tg.getSessions = () => [session];
+    const pressed: [string, string][] = [];
+    const started: [string, string][] = [];
+    F.web.keys = async (s, key) => (pressed.push([s.sid, key]), { ok: true });
+    F.web.start = async (cwd, prompt) => (started.push([cwd, prompt]), { ok: true, id: "abc12345" });
+    try {
+      calls.length = 0;
+      await F.tgHandle({ callback_query: { id: "q4", data: "k:s1:1", from: { id: 7 }, message: { message_id: 90, chat: { id: 42 } } } });
+      expect(pressed).toEqual([["s1", "1"]]);
+      expect(calls.find(([m]) => m === "answerCallbackQuery")![1].text).toBe("✓ pressed 1 in checkout flow");
+      calls.length = 0;
+      await F.tgHandle({ message: { message_id: 91, text: "/new fix the refund test", chat: { id: 42 }, from: { id: 7 } } });
+      const picker = calls.find(([m]) => m === "sendMessage")![1];
+      const pick = picker.reply_markup.inline_keyboard[0][0];
+      expect(pick.text).toBe("📁 x");
+      await F.tgHandle({ callback_query: { id: "q5", data: pick.callback_data, from: { id: 7 }, message: { message_id: 92, chat: { id: 42 } } } });
+      expect(started).toEqual([["/x", "fix the refund test"]]);
+      expect(calls.filter(([m]) => m === "editMessageText").at(-1)![1].text).toContain("Started <code>abc12345</code>");
+      // A pick is used once.
+      await F.tgHandle({ callback_query: { id: "q6", data: pick.callback_data, from: { id: 7 }, message: { message_id: 92, chat: { id: 42 } } } });
+      expect(started.length).toBe(1);
+    } finally {
+      delete F.web.keys;
+      delete F.web.start;
+    }
+  });
+
+  test("the digest comes once at its time, and usage alerts once per limit, never for what was already high", async () => {
+    const now = Date.now();
+    const hhmm = new Date(now - 60_000).toTimeString().slice(0, 5);
+    F.writeTg({ token: TOKEN, chat: 42, user: 7, bot: "my_fleet_bot", digest: { at: hhmm } });
+    F.tg.getSessions = () => [];
+    F.tgLog("🎉 shop: #412 merged", now - 3600_000);
+    calls.length = 0;
+    await F.tgTick([], now, []);
+    await Bun.sleep(50);
+    const digest = calls.filter(([m, b]) => m === "sendMessage" && String(b.text).includes("☀️"));
+    expect(digest.length).toBe(1);
+    expect(digest[0][1].text).toContain("🎉 1 merged");
+    await F.tgTick([], now + 1000, []);
+    await Bun.sleep(50);
+    expect(calls.filter(([m, b]) => m === "sendMessage" && String(b.text).includes("☀️")).length).toBe(1);
+
+    F.peers.set("box", { host: "box", ip: "1.2.3.4", addr: "1.2.3.4:4777", sessions: [], at: now, fresh: false, busy: false, usage: [{ label: "5-hour", pct: 90, resets: "in 1h", resetsAt: now + 3600_000 }] });
+    try {
+      expect(F.usageAlerts(now)).toEqual([]); // already high when first seen
+      F.peers.get("box")!.usage = [{ label: "weekly", pct: 82, resets: "Mon", resetsAt: now + 86_400_000 }];
+      expect(F.usageAlerts(now)).toEqual(["🟠 box: weekly usage at 82% · Mon"]);
+      expect(F.usageAlerts(now)).toEqual([]);
+    } finally {
+      F.peers.clear();
     }
   });
 
@@ -5128,5 +5245,97 @@ describe("on Windows", () => {
   test("a session's folder counts whichever way the path is written, and is shortened by either slash", () => {
     for (const p of ["/Users/me/work/shop", "C:\\Users\\me\\work\\shop", "C:/Users/me/work/shop", "\\\\server\\share\\work\\shop"]) expect([p, F.absoluteDir(p), F.foldersOf(p).slice(-2).join("/")]).toEqual([p, true, "work/shop"]);
     for (const p of ["work/shop", "~/work", ""]) expect(F.absoluteDir(p)).toBe(false);
+  });
+});
+
+describe("every machine", () => {
+  const tail = (over: Record<string, unknown> = {}) => {
+    const t = F.newTail("/x/main.jsonl") as any;
+    Object.assign(t, { lastT: Date.now(), mtime: Date.now(), tools: [Date.now() - 7 * 3600_000, Date.now() - 1000] }, over);
+    t.tokens.set("m1", [Date.now() - 1000, 50]);
+    t.tokens.set("old", [Date.now() - 7 * 3600_000, 50]);
+    t.prs.set("o/r#1", { repo: "o/r", number: 1, url: "https://github.com/o/r/pull/1", t: Date.now() });
+    return t;
+  };
+  const session = (sid: string, name: string, extra: Record<string, unknown> = {}) => ({ sid, pid: 999999, name, kind: "bg", status: "busy", cwd: "/Users/me/work", startedAt: Date.now(), mains: [tail()], agents: [], workflows: [], ...extra }) as any;
+
+  test("a machine's sessions travel whole: Maps come back, the reader's own state stays behind, old times are trimmed", () => {
+    const [back] = F.decodeSessions(F.encodeSessions([session("aaaaaaaa-0000-4000-8000-000000000001", "shop")], Date.now()));
+    const t = back.mains[0];
+    expect([back.name, t.tokens instanceof Map, t.prs instanceof Map, [...t.tokens.values()].map((v) => v[1]), t.tools.length, typeof t.decoder.write]).toEqual(["shop", true, true, [50], 1, "function"]);
+    expect(back.remote!.use.known).toBe(false);
+    expect((t as any).path).toBeUndefined(); // how this machine reads its files stays here
+    // What a session changed keeps its file names; an agent that finished before any window can show it is left behind.
+    const old = { id: "a1", label: "old", type: "x", model: "m", done: true, tail: tail({ lastT: Date.now() - 5 * 3600_000, mtime: Date.now() - 5 * 3600_000 }) };
+    const fresh = { id: "a2", label: "fresh", type: "x", model: "m", done: true, tail: tail() };
+    const [s2] = F.decodeSessions(F.encodeSessions([session("aaaaaaaa-0000-4000-8000-000000000003", "shop", { side: { prs: [], bg: [], fails: [], edits: [{ path: "/w/a.ts", t: 1 }], compactions: 0 }, agents: [old, fresh] })], Date.now()));
+    expect([s2.side!.edits[0].path, s2.agents.map((a) => a.label)]).toEqual(["/w/a.ts", ["fresh"]]);
+  });
+
+  test("another machine is answered only when Tailscale vouches for it, with this machine's own sessions, and can send to them", async () => {
+    process.env.FLEET_WEB_HOST = "127.0.0.1";
+    process.env.FLEET_WEB_PORT = "5077";
+    process.env.FLEET_WEB_TOKEN_FILE = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "fleet-peer-")), "web-token");
+    for (const k of ["server", "url", "error", "shared", "retake"] as const) delete (F.web as any)[k];
+    const trust = F.peerNet.trust;
+    const discover = F.peerNet.discover;
+    const sent: [string, string][] = [];
+    F.web.send = async (s, text) => (sent.push([s.sid, text]), { ok: true, via: "test" });
+    const here = session("aaaaaaaa-0000-4000-8000-000000000001", "shop");
+    const elsewhere = session("aaaaaaaa-0000-4000-8000-000000000002", "theirs", { remote: { host: "box", ip: "1.2.3.4", addr: "1.2.3.4:4777", use: { cpu: 0, rss: 0, known: false } } });
+    const web = F.startWeb(() => [here, elsewhere], () => Date.now());
+    try {
+      F.peerNet.trust = async () => false;
+      expect((await fetch("http://127.0.0.1:5077/peer/state")).status).toBe(403);
+      F.peerNet.trust = async (ip) => ip === "127.0.0.1";
+      const first = await fetch("http://127.0.0.1:5077/peer/state");
+      const j: any = await first.json();
+      // Asked again with nothing changed, it answers in a few bytes.
+      expect((await fetch("http://127.0.0.1:5077/peer/state", { headers: { "if-none-match": first.headers.get("etag")! } })).status).toBe(304);
+      expect([j.proto, j.sessions.map((s: any) => s.name)]).toEqual([F.PEER_PROTO, ["shop"]]); // never the sessions it got from others
+      expect((await fetch("http://127.0.0.1:5077/peer/send", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sid: elsewhere.sid, text: "x" }) })).status).toBe(404);
+      // A new session only in a folder where one already runs on this machine, never anywhere a request names.
+      expect((await fetch("http://127.0.0.1:5077/peer/new", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: "/etc", prompt: "x" }) })).status).toBe(404);
+
+      // This fleet, seen from another: it finds the machine, reads its sessions, and says which machine each is on.
+      F.tailnet.ip = "100.64.0.9";
+      F.tailnet.at = 0;
+      F.peerNet.discover = async () => void (F.tailnet.found = [{ host: "studio", ip: "127.0.0.1" }]);
+      F.wantPeers(true);
+      F.pollPeers(Date.now());
+      await Bun.sleep(50);
+      F.pollPeers(Date.now());
+      for (let i = 0; i < 40 && !F.peerSessions().length; i++) await Bun.sleep(25);
+      const remote = F.peerSessions();
+      expect(remote.map((s) => [s.name, s.remote!.host, s.remote!.addr])).toEqual([["shop", "studio", "127.0.0.1:5077"]]);
+      expect([F.manyMachines(), F.machineOf(remote[0])]).toEqual([true, "studio"]);
+      // The first read of a machine is not news; the next is.
+      expect([...F.takeFreshPeers()]).toEqual([here.sid]);
+      expect(F.takeFreshPeers().size).toBe(0);
+      // A message to a session over there is typed in by that machine's fleet.
+      expect(await F.sendToSession(remote[0], "go ahead")).toEqual({ ok: true, via: "studio test" });
+      expect(sent).toEqual([[here.sid, "go ahead"]]);
+    } finally {
+      web.server?.stop();
+      F.wantPeers(false);
+      F.peers.clear();
+      F.tailnet.found = [];
+      F.peerNet.trust = trust;
+      F.peerNet.discover = discover;
+      delete F.web.send;
+      delete process.env.FLEET_WEB_HOST;
+      delete process.env.FLEET_WEB_PORT;
+      delete process.env.FLEET_WEB_TOKEN_FILE;
+    }
+  });
+
+  test("one fleet on the network talks to the Telegram bot: the lowest address of those that can", () => {
+    const now = Date.now();
+    expect(F.tgLeader("100.64.0.5", [{ ip: "100.64.0.9", tgReady: true, at: now }], now)).toBe(true);
+    expect(F.tgLeader("100.64.0.9", [{ ip: "100.64.0.5", tgReady: true, at: now }], now)).toBe(false);
+    expect(F.tgLeader("100.64.0.9", [{ ip: "100.64.0.5", tgReady: false, at: now }], now)).toBe(true); // it has no bot
+    expect(F.tgLeader("100.64.0.9", [{ ip: "100.64.0.5", tgReady: true, at: now - 60_000 }], now)).toBe(true); // it has gone
+    expect(F.tgLeader("100.64.0.10", [{ ip: "100.64.0.9", tgReady: true, at: now }], now)).toBe(false); // by number, not by text
+    expect(F.tgLeader(undefined, [{ ip: "100.64.0.5", tgReady: true, at: now }], now)).toBe(true); // no tailnet: just this machine
   });
 });
