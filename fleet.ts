@@ -5962,6 +5962,7 @@ export function webState(sessions: Session[], now: number) {
   return {
     now,
     counts,
+    five: fiveHourLine(now), // the five-hour limit's forecast, always said
     hidden: all.length - shown.length,
     machine: { cpu: Math.round(machine.cpu), mem: Math.round((machine.memUsed / machine.memTotal) * 100), memText: `${gb(machine.memUsed)} of ${gb(machine.memTotal)}`, load: Number(machine.load.toFixed(1)) },
     account: acct ? { limits: acct.limits.map((l) => ({ label: l.label, pct: Math.round(l.pct), resetsAt: l.resetsAt, resets: l.resetsAt ? (l.resetsAt - now < 24 * 3600_000 ? `resets in ${ago(l.resetsAt - now)}` : `resets ${new Date(l.resetsAt).toLocaleString("en-GB", { weekday: "short", hour: "2-digit", minute: "2-digit" })}`) : "" })), reason: acct.reason || undefined } : undefined,
@@ -6030,25 +6031,29 @@ export const WEB_PAGE = `<!doctype html>
 <title>Claude Fleet</title>
 <style>
 :root{--bg:#0d1117;--card:#151b23;--line:#262d37;--text:#c6cdd7;--dim:#6b7380;--faint:#3a404a;--white:#f5f7fa;--amber:#e5b544;--green:#50c878;--red:#f0625c;--cyan:#56cdd6;--purple:#be94ff;--blue:#61aaff}
-*{box-sizing:border-box;min-width:0}html,body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;-webkit-text-size-adjust:100%;overflow-x:hidden;overflow-wrap:anywhere}
+*{box-sizing:border-box;min-width:0}html,body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;font-variant-numeric:tabular-nums;-webkit-text-size-adjust:100%;overflow-x:hidden;overflow-wrap:anywhere}
 main,header,.gauges,#quip{max-width:720px;margin-left:auto;margin-right:auto}
 body{padding:calc(env(safe-area-inset-top) + 18px) max(12px,env(safe-area-inset-right)) calc(24px + env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left))}
-header{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:6px}
-h1{font-size:15px;margin:0;color:var(--cyan);letter-spacing:.08em}h1 b{color:var(--white)}
-#clock{color:var(--dim);font-size:12px}
-#quip{color:var(--white);font-size:16px;margin:4px 0 10px}
+header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+h1{display:flex;align-items:center;gap:9px;font-size:21px;font-weight:700;margin:0;color:var(--white);letter-spacing:-.01em}h1 img{width:30px;height:30px;border-radius:8px}
+#clock{color:var(--white);font-size:21px;font-weight:600}
+#quip{color:var(--text);font-size:15px;margin:2px 0 12px}
 #quip .needs{color:var(--amber)}
-.gauges{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:6px 14px;margin-bottom:14px;color:var(--dim);font-size:12px}
-.g{display:flex;align-items:center;gap:6px}.g .bar{flex:1;height:4px;background:var(--faint);border-radius:2px;overflow:hidden}.g .bar i{display:block;height:100%;background:#60aab6}
-.card{background:var(--card);border:1px solid var(--line);border-left:5px solid var(--c);border-radius:10px;padding:10px 12px 12px;margin-bottom:12px;position:relative;overflow:hidden}
+.gauges{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:0 0 16px}
+.gt{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:9px 6px 8px;text-align:center}.gt svg{display:block;margin:0 auto}
+.gt b{display:block;color:var(--text);font-size:12px;font-weight:600;margin-top:4px}.gt small{display:block;color:var(--dim);font-size:10.5px;line-height:1.25;margin-top:1px}.gt.hot small{color:var(--red);font-weight:600}
+.five{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 12px;margin:-6px 0 16px;font-size:13px;color:var(--text)}.five.hot{border-color:#5a2a28;color:#ff9d97}
+.card{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--c);border-radius:16px;padding:12px 14px 14px;margin-bottom:12px;position:relative;overflow:hidden}
 .card.needs{background:#2a2108;border-color:#5a4512;box-shadow:0 0 0 1px #5a4512,0 0 24px #e5b54433;animation:glow 2s ease-in-out infinite}
 @keyframes glow{50%{box-shadow:0 0 0 1px #8a6a1a,0 0 34px #e5b54466}}
-.head{display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px 8px;align-items:baseline}
-.name{color:var(--white);font-weight:700;letter-spacing:.14em;text-transform:uppercase;font-size:13px;word-break:break-word}
-.state{color:var(--c);font-weight:700;letter-spacing:.12em;font-size:11px;white-space:nowrap}
-.place{color:var(--dim);font-size:11px;margin-top:1px}
-.sub{color:var(--white);margin:6px 0 4px}.card.needs .sub{font-weight:700}
-.spark{display:flex;align-items:flex-end;gap:1px;height:28px;margin:8px 0 2px}.spark i{flex:1;background:#5b7fbf;border-radius:1px;min-height:1px;opacity:.9}
+.top{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center}
+.head{display:flex;flex-wrap:wrap;gap:6px 8px;align-items:center}
+.name{color:var(--white);font-weight:650;font-size:17px;letter-spacing:-.01em;word-break:break-word}
+.state{color:var(--c);font-weight:700;letter-spacing:.03em;font-size:11px;white-space:nowrap;padding:2px 8px;border-radius:999px;background:color-mix(in srgb,var(--c) 16%,transparent)}
+.place{color:var(--dim);font-size:12px;margin-top:2px}
+.sub{color:var(--white);margin:8px 0 2px;font-size:15px}.card.needs .sub{font-weight:600}
+.ctxring{text-align:center;color:var(--dim);font-size:10.5px;line-height:1.2}.ctxring svg{display:block;margin:0 auto 2px}
+.spark{display:block;width:100%;height:36px;margin:8px 0 4px}
 .row{display:flex;gap:8px;align-items:flex-start;font-size:12px;color:var(--dim);margin-top:3px}.row .lead{flex:none;width:1.2em;text-align:center}.row>span:last-child{flex:1}
 .ctx{display:flex;height:6px;margin-top:6px;border-radius:3px;overflow:hidden;background:var(--faint);flex:1}.ctx i{display:block;height:100%}
 details{margin-top:8px}summary{cursor:pointer;color:var(--dim);font-size:12px;list-style:none}summary::-webkit-details-marker{display:none}summary::before{content:"▸ ";color:var(--faint)}details[open] summary::before{content:"▾ "}
@@ -6059,7 +6064,7 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--dim);font-size:12px;li
 .r.wf .nm{color:var(--text)}.r.wf.live .nm{color:var(--white);font-weight:700}.r .right{color:var(--dim);white-space:nowrap;font-size:11px}
 .r .sub{grid-column:2/4;display:flex;gap:8px;align-items:center;min-width:0;color:var(--dim);font-size:11px;margin-top:1px}
 .r .what{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.r .tool{color:var(--cyan)}.r .steps{letter-spacing:1px}
-.r.more,.r.done-line{display:block;color:var(--dim);font-size:11px}.mini{display:flex;align-items:flex-end;gap:1px;height:12px;width:64px;flex:none}.mini i{flex:1;min-height:1px;border-radius:1px}
+.r.more,.r.done-line{display:block;color:var(--dim);font-size:11px}.mini{display:block;width:64px;height:14px;flex:none}
 .pulse{animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.3}}
 .tasks div,.agents div{font-size:12px;margin:2px 0}.st-in_progress{color:var(--white)}.st-pending{color:var(--dim)}
 .foot{color:var(--faint);font-size:11px;text-align:center;margin-top:16px}.stale{color:var(--red)}
@@ -6067,13 +6072,14 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--dim);font-size:12px;li
 @keyframes fall{to{transform:translateY(260px) rotate(540deg)}}
 .party{color:var(--amber);font-weight:700;margin-top:4px}
 .empty{color:var(--dim);text-align:center;margin:40px 0}
-.send{display:flex;gap:6px;margin-top:6px;align-items:flex-end}.send textarea{flex:1;min-height:42px;max-height:40vh;resize:vertical;background:var(--bg);color:var(--white);border:1px solid var(--line);border-radius:8px;padding:8px;font:16px/1.35 ui-monospace,Menlo,monospace}
-.send button{background:var(--cyan);color:#0d1117;border:0;border-radius:8px;padding:10px 14px;font:700 14px ui-monospace,Menlo,monospace}.send button:disabled{opacity:.5}
+.send{display:flex;gap:6px;margin-top:6px;align-items:flex-end}.send textarea{flex:1;min-height:42px;max-height:40vh;resize:vertical;background:var(--bg);color:var(--white);border:1px solid var(--line);border-radius:8px;padding:8px;font:16px/1.35 -apple-system,system-ui,sans-serif}
+.send button{background:var(--cyan);color:#0d1117;border:0;border-radius:10px;padding:10px 16px;font:700 15px -apple-system,system-ui,sans-serif}.send button:disabled{opacity:.5}
 .sent{font-size:12px;margin-top:4px;color:var(--dim)}.sent.ok{color:var(--green)}.sent.err{color:var(--red)}
 </style></head><body>
-<header><h1>◆ CLAUDE <b>FLEET</b></h1><span id="clock"></span></header>
+<header><h1><img src="/icon-192.png" alt="">Claude Fleet</h1><span id="clock"></span></header>
 <div id="quip">Waking the fleet…</div>
 <div class="gauges" id="gauges"></div>
+<div class="five" id="five"></div>
 <main id="cards"></main>
 <div class="foot" id="foot"></div>
 <script>
@@ -6081,7 +6087,42 @@ const token = new URLSearchParams(location.search).get("t") || "";
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
 const segs = (list) => { const s = el("span"); for (const x of list) { const p = el("span", "", x.t); if (x.c) p.style.color = x.c; if (x.b) p.style.fontWeight = "700"; s.append(p); } return s; };
 const row = (lead, color, content) => { const r = el("div", "row"); const l = el("span", "lead", lead); l.style.color = color; r.append(l, typeof content === "string" ? el("span", "", content) : content); return r; };
-const gauge = (label, pct, extra) => { const g = el("div", "g"); const b = el("span", "bar"); const i = el("i"); i.style.width = Math.min(100, pct) + "%"; if (pct >= 80) i.style.background = "#f0625c"; else if (pct >= 60) i.style.background = "#f5f7fa"; b.append(i); g.append(el("span", "", label), b, el("span", "", pct + "%" + (extra ? " " + extra : ""))); return g; };
+const NS = "http://www.w3.org/2000/svg";
+const svgEl = (tag, attrs) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); return e; };
+// A ring: a faint track, then each part as an arc in its colour, and the figure in the middle.
+function ring(size, width, parts, label) {
+  const r = (size - width) / 2, c = 2 * Math.PI * r;
+  const svg = svgEl("svg", { width: size, height: size, viewBox: "0 0 " + size + " " + size });
+  svg.append(svgEl("circle", { cx: size / 2, cy: size / 2, r, fill: "none", stroke: "#262d37", "stroke-width": width }));
+  let at = 0;
+  for (const p of parts) {
+    const len = Math.max(0, Math.min(1, p.frac)) * c;
+    if (len < 0.5) continue;
+    svg.append(svgEl("circle", { cx: size / 2, cy: size / 2, r, fill: "none", stroke: p.color, "stroke-width": width, "stroke-dasharray": len + " " + (c - len), "stroke-dashoffset": -at, transform: "rotate(-90 " + size / 2 + " " + size / 2 + ")", "stroke-linecap": parts.length === 1 ? "round" : "butt" }));
+    at += len;
+  }
+  const t = svgEl("text", { x: size / 2, y: size / 2 + 4, "text-anchor": "middle", fill: "#f5f7fa", "font-size": Math.round(size * 0.24), "font-weight": "650", "font-family": "-apple-system,system-ui,sans-serif" });
+  t.textContent = label;
+  svg.append(t);
+  return svg;
+}
+const tone = (pct) => (pct >= 80 ? "#f0625c" : pct >= 60 ? "#f5f7fa" : "#56cdd6");
+function gaugeTile(label, pct, sub, hot) {
+  const g = el("div", "gt" + (hot ? " hot" : ""));
+  g.append(ring(50, 6, pct === undefined ? [] : [{ frac: pct / 100, color: tone(pct) }], pct === undefined ? "–" : pct + "%"), el("b", "", label), el("small", "", sub || ""));
+  return g;
+}
+// Activity as a smooth area, in the card's colour.
+function sparkSvg(values, colour) {
+  const n = values.length || 1, w = 300, h = 36, max = Math.max(1, ...values);
+  const pts = values.map((v, i) => [(i / Math.max(1, n - 1)) * w, h - 2 - Math.sqrt(v / max) * (h - 4)]);
+  const svg = svgEl("svg", { class: "spark", viewBox: "0 0 " + w + " " + h, preserveAspectRatio: "none" });
+  if (!pts.length) return svg;
+  const line = pts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ");
+  svg.append(svgEl("path", { d: line + " L" + w + " " + h + " L0 " + h + " Z", fill: colour, "fill-opacity": "0.18" }));
+  svg.append(svgEl("path", { d: line, fill: "none", stroke: colour, "stroke-width": "1.6", "vector-effect": "non-scaling-stroke", "stroke-linejoin": "round" }));
+  return svg;
+}
 function quip(d) {
   const c = d.counts, n = d.sessions.length;
   const parts = [];
@@ -6096,11 +6137,15 @@ function quip(d) {
 // The roster, as the detail view lists it: the main thread, each workflow with its agents under it, other agents.
 const GLYPH = { active: ["●", "#50c878", "pulse"], tool: ["◐", "#f5f7fa"], quiet: ["○", "#6b7380"], done: ["✓", "#50c878"], stalled: ["◐", "#f0625c"] };
 function mini(values, color) {
-  const m = el("span", "mini"), n = 24, step = values.length / n, cols = [];
-  for (let i = 0; i < n; i++) { let v = 0; for (let j = Math.floor(i * step); j < Math.floor((i + 1) * step); j++) v += values[j] || 0; cols.push(v); }
-  const max = Math.max(1, ...cols);
-  for (const v of cols) { const b = el("i"); b.style.height = (v ? Math.max(18, Math.sqrt(v / max) * 100) : 0) + "%"; b.style.background = color; m.append(b); }
-  return m;
+  // A small activity line, like the card's own, in the agent's colour.
+  const n = (values || []).length || 1, w = 64, h = 14, max = Math.max(1, ...(values || [0]));
+  const svg = svgEl("svg", { width: w, height: h, viewBox: "0 0 " + w + " " + h, class: "mini" });
+  const pts = (values || []).map((v, i) => [(i / Math.max(1, n - 1)) * w, h - 1 - Math.sqrt(v / max) * (h - 2)]);
+  if (!pts.length) return svg;
+  const line = pts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ");
+  svg.append(svgEl("path", { d: line + " L" + w + " " + h + " L0 " + h + " Z", fill: color, "fill-opacity": "0.2" }));
+  svg.append(svgEl("path", { d: line, fill: "none", stroke: color, "stroke-width": "1.3", "stroke-linejoin": "round" }));
+  return svg;
 }
 function rrow(cls, glyph, name, right, what, spark, color) {
   const r = el("div", "r " + cls);
@@ -6150,12 +6195,23 @@ function roster(R) {
 }
 function card(s) {
   const c = el("section", "card" + (s.state === "needs" ? " needs" : "")); c.style.setProperty("--c", s.color);
-  const head = el("div", "head"); head.append(el("div", "name", s.name), el("div", "state", s.word.toUpperCase() + (s.time ? " · " + s.time : ""))); c.append(head);
-  if (s.place) c.append(el("div", "place", s.place));
+  // The head: name and state, where it is; its context as a ring, split by what fills it, on the right.
+  const top = el("div", "top"), left = el("div");
+  const head = el("div", "head"); head.append(el("div", "name", s.name), el("div", "state", s.word + (s.time ? " · " + s.time : ""))); left.append(head);
+  if (s.place) left.append(el("div", "place", s.place));
+  top.append(left);
+  if (s.ctx) {
+    const total = s.ctx.split.reduce((n, p) => n + p.tokens, 0) || 1;
+    const parts = s.ctx.split.map((p) => ({ frac: (p.tokens / total) * (s.ctx.pct / 100), color: p.color }));
+    const box = el("div", "ctxring"); box.append(ring(52, 6, parts.length ? parts : [{ frac: s.ctx.pct / 100, color: tone(s.ctx.pct) }], s.ctx.pct + "%"), el("div", "", "of " + s.ctx.max));
+    top.append(box);
+  }
+  c.append(top);
+
   c.append(el("div", "sub", (s.sub.source === "prompt" ? "▸ " : s.sub.source === "reply" ? "◆ " : "") + (s.sub.text || "")));
   if (s.party) { c.append(el("div", "party", "✦ " + s.party + " ✦")); const f = el("div", "confetti"); const cols = ["#e5b544", "#50c878", "#56cdd6", "#be94ff", "#f0625c", "#61aaff"]; for (let i = 0; i < 28; i++) { const p = el("i"); p.style.left = (i * 37 % 100) + "%"; p.style.background = cols[i % cols.length]; p.style.animationDelay = (i % 9) * 0.25 + "s"; f.append(p); } c.append(f); }
-  const max = Math.max(1, ...s.spark); const sp = el("div", "spark"); for (const v of s.spark) { const i = el("i"); i.style.height = (v ? Math.max(8, Math.sqrt(v / max) * 100) : 0) + "%"; sp.append(i); } c.append(sp);
-  if (s.ctx) { const bar = el("span", "ctx"); const total = s.ctx.split.reduce((n, p) => n + p.tokens, 0) || 1; for (const p of s.ctx.split) { const i = el("i"); i.style.width = (p.tokens / total) * s.ctx.pct + "%"; i.style.background = p.color; bar.append(i); } const r = row("◫", "#6b7380", bar); r.append(el("span", "", s.ctx.pct + "% of " + s.ctx.max + (s.ctx.runway ? " · " + s.ctx.runway : ""))); c.append(r); }
+  c.append(sparkSvg(s.spark, s.state === "needs" ? "#e5b544" : s.state === "stalled" ? "#f0625c" : "#6b9bff"));
+  if (s.ctx && s.ctx.runway) c.append(row("◷", "#6b7380", s.ctx.runway));
   if (s.fails) c.append(row("✗", "#f0625c", s.fails.n + " failed · " + s.fails.last + " · " + s.fails.ago));
   for (const b of s.bg) c.append(row("↻", "#56cdd6", b.desc + " · " + b.ago));
   for (const p of s.prs) c.append(row("⇡", "#c6cdd7", segs(p)));
@@ -6191,8 +6247,13 @@ async function tick() {
     if (!r.ok) throw new Error(r.status);
     const d = await r.json(); last = Date.now();
     const q = document.getElementById("quip"); q.replaceChildren(); quip(d).forEach(([text, cls], i) => { if (i) q.append(" · "); q.append(el("span", cls || "", text)); });
-    const g = document.getElementById("gauges"); g.replaceChildren(gauge("cpu", d.machine.cpu), gauge("mem", d.machine.mem, d.machine.memText));
-    if (d.account) for (const l of d.account.limits) g.append(gauge(l.label, l.pct, l.resets));
+    // The gauges as rings: the five-hour and weekly limits (with when each resets), this machine's CPU and memory.
+    const g = document.getElementById("gauges");
+    const lim = (re) => (d.account ? d.account.limits.find((l) => re.test(l.label)) : undefined);
+    const five = lim(/5/), week = lim(/7|week/i);
+    g.replaceChildren(gaugeTile("5 hours", five ? five.pct : undefined, five ? five.resets : "no figures", !!(d.five && d.five.urgent)), gaugeTile("week", week ? week.pct : undefined, week ? week.resets : ""), gaugeTile("cpu", d.machine.cpu, "load " + d.machine.load), gaugeTile("memory", d.machine.mem, d.machine.memText));
+    // The five-hour forecast, always.
+    const f5 = document.getElementById("five"); f5.textContent = d.five ? d.five.text : ""; f5.className = "five" + (d.five && d.five.urgent ? " hot" : "");
     const cards = document.getElementById("cards");
     // Never redraw under your thumbs: while you are typing a message the cards hold still.
     if (document.activeElement && document.activeElement.tagName === "TEXTAREA" && cards.contains(document.activeElement)) return;
@@ -8491,7 +8552,7 @@ export const GLASSES_PAGE = `<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>Claude Fleet</title>
-<style>body{margin:0;padding:24px;background:#000;color:#4be37a;font:15px/1.5 ui-monospace,Menlo,monospace}h1{font-size:17px;margin:0 0 12px}p{margin:6px 0;color:#9adbb0}</style>
+<style>body{margin:0;padding:24px;background:#000;color:#4be37a;font:16px/1.5 -apple-system,system-ui,sans-serif}h1{font-size:17px;margin:0 0 12px}p{margin:6px 0;color:#9adbb0}</style>
 </head><body>
 <h1>◆ Claude Fleet on your glasses</h1>
 <p id="s">Waiting for the Even app…</p>
