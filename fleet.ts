@@ -1513,16 +1513,51 @@ export function mergeLive(mergeSha: string, revision: string | undefined, cwd: s
 }
 const comparing = new Set<string>();
 
+/** Each repository's worktrees and the branch each has out, read every 30 seconds when a session's branch is not the one in its folder. */
+export const worktreeState = new Map<string, { at: number; list?: { path: string; branch: string }[]; busy?: boolean }>();
+export function parseWorktrees(text: string): { path: string; branch: string }[] {
+  const out: { path: string; branch: string }[] = [];
+  for (const block of text.split("\n\n")) {
+    const p = /^worktree (.+)$/m.exec(block)?.[1];
+    const b = /^branch refs\/heads\/(.+)$/m.exec(block)?.[1];
+    if (p && b) out.push({ path: p, branch: b });
+  }
+  return out;
+}
+function pollWorktrees(cwd: string, now: number, sync = false) {
+  const e = worktreeState.get(cwd);
+  if (e && (e.busy || now - e.at < GIT_EVERY_MS)) return;
+  worktreeState.set(cwd, { at: e?.at ?? 0, list: e?.list, busy: true });
+  runFor("git", ["--no-optional-locks", "-C", cwd, "worktree", "list", "--porcelain"], sync, (out) => worktreeState.set(cwd, { at: clock(), list: out === undefined ? undefined : parseWorktrees(out) }));
+}
+/** The checkout a session is working on. A session that moves between worktrees still records the folder it started in,
+ *  with the branch it is on now: when that branch is not the one out in the folder, it is the worktree that has it out,
+ *  and when no worktree has it (removed after a merge, say) there is none, rather than another checkout's figures. */
+export function gitDirOf(s: Session): string | undefined {
+  const base = s.side?.cwd ?? s.cwd;
+  const branch = s.mains.map((m) => m.branch).find(Boolean);
+  const here = gitState.get(base)?.state;
+  if (!branch || branch === "HEAD" || !here || here.branch === branch) return base;
+  return worktreeState.get(base)?.list?.find((w) => w.branch === branch)?.path;
+}
 /** Start the reads a frame will want: each session's git state, and with --prs its newest pull requests. */
 export function pollSides(sessions: Session[], now: number, sync = false) {
   for (const s of sessions) {
     if (!s.side) continue;
-    pollGit(s.side.cwd ?? s.cwd, now, sync);
+    const base = s.side.cwd ?? s.cwd;
+    pollGit(base, now, sync);
+    const dir = gitDirOf(s);
+    if (dir !== base) pollWorktrees(base, now, sync);
+    if (dir && dir !== base) pollGit(dir, now, sync);
     if (opt.prs) for (const pr of s.side.prs.slice(0, PR_SHOWN)) pollPr(pr, now, sync);
   }
   if (opt.prs) pollDeploys(now, sync);
 }
-const gitOf = (s: Session): GitState | undefined => (s.remote ? s.remote.git : gitState.get(s.side?.cwd ?? s.cwd)?.state);
+export const gitOf = (s: Session): GitState | undefined => {
+  if (s.remote) return s.remote.git;
+  const dir = gitDirOf(s);
+  return dir ? gitState.get(dir)?.state : undefined;
+};
 
 /** The side facts across a session's transcripts. */
 export function sideOf(mains: Tail[], now: number): Side {
@@ -6081,6 +6116,9 @@ details.tasks[open]>summary::before,details.wfg[open]>summary::before,details.ta
 @keyframes fall{to{transform:translateY(260px) rotate(540deg)}}
 .party{color:var(--amber);font-weight:700;margin-top:4px}
 .empty{color:var(--dim);text-align:center;margin:40px 0}
+.card.done{touch-action:pan-y;user-select:none;-webkit-user-select:none}.swipe-hint{color:var(--dim);font-size:11.5px;margin-top:8px;text-align:right}
+.shelf{display:block;margin:6px auto 12px;background:transparent;color:var(--text);border:1px solid var(--line);border-radius:999px;padding:9px 16px;font:600 13.5px -apple-system,system-ui,sans-serif}
+.card.gone{opacity:.62}.putback{display:block;margin-left:auto !important;background:transparent;color:var(--cyan);border:1px solid #2f3946;border-radius:999px;padding:4px 11px;font:600 12.5px -apple-system,system-ui,sans-serif;margin:-2px 0 6px 8px}
 .send{display:flex;gap:6px;margin-top:6px;align-items:flex-end}.send textarea{flex:1;min-height:42px;max-height:40vh;resize:vertical;background:var(--bg);color:var(--white);border:1px solid var(--line);border-radius:8px;padding:8px;font:16px/1.35 -apple-system,system-ui,sans-serif}
 .send button{background:var(--cyan);color:#0d1117;border:0;border-radius:10px;padding:10px 16px;font:700 15px -apple-system,system-ui,sans-serif}.send button:disabled{opacity:.5}
 .talk p.cut{cursor:pointer}.talk p .more{color:var(--cyan);font-size:12px;margin-left:6px;font-weight:600}
@@ -6335,7 +6373,8 @@ function taskList(T) {
   return d;
 }
 function card(s) {
-  const c = el("section", "card" + (s.state === "needs" ? " needs" : "")); c.style.setProperty("--c", s.color);
+  const c = el("section", "card" + (s.state === "needs" ? " needs" : "") + (isDone(s) ? " done" : "")); c.style.setProperty("--c", s.color);
+  if (isDone(s) && !putAway()[s.sid]) swipeAway(c, s.sid);
   // The head: name and state, where it is; its context as a ring, split by what fills it, on the right.
   const top = el("div", "top"), left = el("div");
   const head = el("div", "head"); head.append(el("div", "name", s.name), el("div", "state", s.word + (s.time ? " · " + s.time : ""))); left.append(head);
@@ -6358,8 +6397,8 @@ function card(s) {
   for (const p of s.prs) c.append(row("⇡", "#c6cdd7", segs(p)));
   if (s.changes) c.append(row("±", "#6b7380", segs(s.changes)));
   const R = s.roster;
-  if (R && (R.main || R.workflows.length || R.agents.length || R.finished)) c.append(roster(R));
   if (s.tasks && s.tasks.total) c.append(taskList(s.tasks));
+  if (R && (R.main || R.workflows.length || R.agents.length || R.finished)) c.append(roster(R));
   if (s.talk.length) { const d = el("details", "talk"); if (s.state === "needs") d.open = true; d.append(el("summary", "", "conversation")); for (const m of s.talk) d.append(talkLine(s.sid, m)); c.append(d); }
   const m = el("details", "message"); if (s.state === "needs") m.open = true; m.append(el("summary", "", s.state === "needs" ? "answer" : "send a message"));
   const f = el("form", "send"); const ta = el("textarea"); ta.rows = 2; ta.placeholder = s.state === "needs" ? "your answer…" : "type to " + s.name + "…"; ta.value = drafts.get(s.sid) || ""; ta.dataset.sid = s.sid;
@@ -6379,15 +6418,51 @@ function card(s) {
     const n = notes.get(s.sid); note.className = "sent " + n.cls; note.textContent = n.text; go.disabled = false; ta.blur(); tick();
   });
   c.append(m);
+  if (isDone(s) && !putAway()[s.sid]) c.append(el("div", "swipe-hint", "⟷ swipe to put away"));
   return c;
 }
 let last = 0, open = new Map();
+// Finished cards a swipe has put away, by session, kept on this phone.
+const isDone = (s) => s.state === "justDone" || s.state === "finished";
+let showGone = false, swiping = false;
+function putAway() { try { return JSON.parse(localStorage.getItem("fleet-put-away") || "{}") || {}; } catch { return {}; } }
+function savePutAway(a) { try { localStorage.setItem("fleet-put-away", JSON.stringify(a)); } catch {} }
+// A finished card follows a sideways swipe; far enough and it slides off and is put away. Up and down still scrolls.
+function swipeAway(c, sid) {
+  let x0 = null, y0 = 0, dx = 0, locked = false;
+  const reset = () => { x0 = null; locked = false; swiping = false; };
+  c.addEventListener("pointerdown", (e) => { if (e.target.closest("button,textarea,summary,a,input,.talk")) return; x0 = e.clientX; y0 = e.clientY; dx = 0; locked = false; });
+  c.addEventListener("pointermove", (e) => {
+    if (x0 === null) return;
+    dx = e.clientX - x0; const dy = e.clientY - y0;
+    if (!locked) {
+      if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx)) return reset();
+      if (Math.abs(dx) < 10) return;
+      locked = true; swiping = true; try { c.setPointerCapture(e.pointerId); } catch {}
+    }
+    c.style.transition = "none"; c.style.transform = "translateX(" + dx + "px)"; c.style.opacity = String(1 - Math.min(0.7, Math.abs(dx) / c.offsetWidth));
+  });
+  const end = () => {
+    if (!locked) return reset();
+    c.style.transition = "transform .22s ease, opacity .22s ease";
+    if (Math.abs(dx) > c.offsetWidth * 0.33) {
+      c.style.transform = "translateX(" + Math.sign(dx) * c.offsetWidth * 1.2 + "px)"; c.style.opacity = "0";
+      setTimeout(() => { const a = putAway(); a[sid] = Date.now(); savePutAway(a); reset(); tick(); }, 220);
+    } else { c.style.transform = ""; c.style.opacity = ""; reset(); }
+  };
+  c.addEventListener("pointerup", end); c.addEventListener("pointercancel", end);
+}
 const drafts = new Map(), notes = new Map();
-async function tick() {
+// Asked twice a second; the page is only redrawn when what fleet says has changed, or when you have done something.
+let lastText = "";
+async function tick(force = true) {
   try {
     const r = await fetch("api/state?t=" + encodeURIComponent(token), { cache: "no-store" });
     if (!r.ok) throw new Error(r.status);
-    const d = await r.json(); last = Date.now();
+    const text = await r.text(); last = Date.now();
+    if (!force && text === lastText) return;
+    lastText = text;
+    const d = JSON.parse(text);
     const q = document.getElementById("quip"); q.replaceChildren(); quip(d).forEach(([text, cls], i) => { if (i) q.append(" · "); q.append(el("span", cls || "", text)); });
     // The gauges as rings: the five-hour and weekly limits (with when each resets), this machine's CPU and memory.
     const g = document.getElementById("gauges");
@@ -6398,20 +6473,34 @@ async function tick() {
     fivePanel(d.five);
     const cards = document.getElementById("cards");
     // Never redraw under your thumbs: while you are typing a message the cards hold still.
-    if (document.activeElement && document.activeElement.tagName === "TEXTAREA" && cards.contains(document.activeElement)) return;
+    if (document.activeElement && document.activeElement.tagName === "TEXTAREA" && cards.contains(document.activeElement)) return void (lastText = "");
     for (const det of cards.querySelectorAll("details")) open.set(det.closest(".card")?.dataset.sid + det.className, det.open);
-    cards.replaceChildren(...d.sessions.map((s) => { const c = card(s); c.dataset.sid = s.sid; for (const det of c.querySelectorAll("details")) { const k = s.sid + det.className; if (open.has(k)) det.open = open.get(k); } return c; }));
-    if (!d.sessions.length) cards.replaceChildren(el("div", "empty", "No sessions working and nothing waiting on you."));
+    if (swiping) return void (lastText = ""); // nor under a card being swiped away
+    const build = (s) => { const c = card(s); c.dataset.sid = s.sid; for (const det of c.querySelectorAll("details")) { const k = s.sid + det.className; if (open.has(k)) det.open = open.get(k); } return c; };
+    // Finished sessions swiped away stay away (on this phone) until they start again; a button at the bottom shows them.
+    const away = putAway();
+    for (const sid of Object.keys(away)) { const s = d.sessions.find((x) => x.sid === sid); if (!s || !isDone(s)) delete away[sid]; }
+    savePutAway(away);
+    const shown = d.sessions.filter((s) => !away[s.sid]), gone = d.sessions.filter((s) => away[s.sid]);
+    const list = shown.map(build);
+    if (!shown.length) list.push(el("div", "empty", gone.length ? "Nothing else here: everything left has finished." : "No sessions working and nothing waiting on you."));
+    if (gone.length) {
+      const b = el("button", "shelf", showGone ? "Hide completed" : "Show " + gone.length + " completed"); b.type = "button";
+      b.addEventListener("click", () => { showGone = !showGone; tick(); });
+      list.push(b);
+      if (showGone) for (const s of gone) { const c = build(s); c.classList.add("gone"); const pb = el("button", "putback", "Put back"); pb.type = "button"; pb.addEventListener("click", () => { const a = putAway(); delete a[s.sid]; savePutAway(a); tick(); }); c.prepend(pb); list.push(c); }
+    }
+    cards.replaceChildren(...list);
     document.getElementById("clock").textContent = new Date(d.now).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    document.getElementById("foot").textContent = (d.hidden ? d.hidden + " idle or finished not shown · " : "") + "refreshes every 2s";
+    document.getElementById("foot").textContent = (d.hidden ? d.hidden + " idle or finished not shown · " : "") + "live";
     document.title = (d.counts.needs ? "▲" + d.counts.needs + " " : "") + "Claude Fleet";
   } catch (e) { document.getElementById("foot").replaceChildren(el("span", "stale", "can't reach fleet — is it still running?")); }
 }
-tick(); setInterval(tick, 2000);
+tick(); setInterval(() => tick(false), 500);
 </script></body></html>`;
 
 /** The web server, once key w has started it: where it listens and the link to open. */
-export const web: { url?: string; host?: string; onTailnet?: boolean; server?: { stop: (closeActive?: boolean) => void }; error?: string; send?: typeof sendToSession; keys?: typeof keysToSession; peek?: typeof peekSession; start?: typeof startSession; shared?: boolean; retake?: () => void; yieldPort?: () => void; older?: boolean } = {};
+export const web: { watchedAt: number; url?: string; host?: string; onTailnet?: boolean; server?: { stop: (closeActive?: boolean) => void }; error?: string; send?: typeof sendToSession; keys?: typeof keysToSession; peek?: typeof peekSession; start?: typeof startSession; shared?: boolean; retake?: () => void; yieldPort?: () => void; older?: boolean } = { watchedAt: 0 };
 const sameToken = (a: string, b: string) => a.length === b.length && crypto.timingSafeEqual ? (() => { try { return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b)); } catch { return false; } })() : a === b;
 /** This Mac's Tailscale IPv4 address, when it has one. */
 function tailnetAddress(): string | undefined {
@@ -6728,9 +6817,9 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
           if (!sameToken(url.searchParams.get("t") ?? "", token)) return new Response("not without the link fleet showed you", { status: 403, headers });
           if (url.pathname === "/manifest.webmanifest") return Response.json(webManifest(token), { headers: { ...headers, "content-type": "application/manifest+json" } });
           if (url.pathname === "/") return new Response(WEB_PAGE.replace("__TOKEN__", token), { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
-          if (url.pathname === "/api/state") return Response.json(webState(getSessions(), now()), { headers });
+          if (url.pathname === "/api/state") return (web.watchedAt = Date.now()), Response.json(webState(getSessions(), now()), { headers });
           if (url.pathname === "/glasses") return new Response(GLASSES_PAGE, { headers: { ...headers, "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" } });
-          if (url.pathname === "/api/glasses") return Response.json(glassesState(getSessions(), now()), { headers });
+          if (url.pathname === "/api/glasses") return (web.watchedAt = Date.now()), Response.json(glassesState(getSessions(), now()), { headers });
           return new Response("not found", { status: 404, headers });
         },
       });
@@ -8326,7 +8415,13 @@ export async function serveWorker(): Promise<never> {
     svcLog(u.kind === "current" ? "usage figures read" : `usage figures not read: ${u.reason || u.kind}`);
   }
   refresh();
-  setInterval(refresh, 2000);
+  // Every two seconds, as the terminal does; twice a second while the phone page or the glasses are looking.
+  let readAt = Date.now();
+  setInterval(() => {
+    if (Date.now() - readAt < (Date.now() - web.watchedAt < 10_000 ? 450 : 1950)) return;
+    readAt = Date.now();
+    refresh();
+  }, 500);
   // Back to the code on disk when it changes: stop, and the supervisor starts the new one.
   const me = import.meta.path;
   const born = fs.statSync(me).mtimeMs;
