@@ -5428,3 +5428,59 @@ describe("key i: in the background", () => {
     }
   });
 });
+
+describe("a background job waiting on you", () => {
+  test("a question it records counts, even while it still says it is working; once answered or finished it does not", () => {
+    expect(F.jobWaiting({ state: "blocked", needs: "" })).toBe(true);
+    expect(F.jobWaiting({ state: "working", needs: "answer: Tea or coffee? (Tea · Coffee)" })).toBe(true);
+    expect(F.jobWaiting({ state: "working", needs: "" })).toBe(false);
+    expect(F.jobWaiting({ state: "done", needs: "answer: Tea or coffee? (Tea · Coffee)" })).toBe(false);
+    const s = { sid: "s1", name: "tea", kind: "bg", status: "busy", cwd: "/x", startedAt: 0, pid: 1, mains: [], agents: [], workflows: [], job: { state: "working", detail: "", needs: "answer: Tea or coffee? (Tea · Coffee)" } } as any;
+    expect(F.factsOf(s).needs).toBe("answer: Tea or coffee? (Tea · Coffee)");
+  });
+});
+
+describe("on your glasses", () => {
+  test("text for the glasses keeps only what their font can draw", () => {
+    expect(F.glassesSafe("✓ merged · ✗ 2 failing ⇡ #412 ↻ CI ≡ wf ⏳ ⠋ ok 🚀")).toBe("merged · x 2 failing ↑ #412 ~ CI = wf ◐ ● ok");
+  });
+
+  test("the page, its data and Even's SDK are served; the page and data need the link, the SDK (public code) does not", async () => {
+    process.env.FLEET_WEB_HOST = "127.0.0.1";
+    process.env.FLEET_WEB_PORT = "5177";
+    process.env.FLEET_WEB_TOKEN_FILE = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "fleet-glasses-")), "web-token");
+    for (const k of ["server", "url", "error", "shared", "retake"] as const) delete (F.web as any)[k];
+    const pressed: [string, string][] = [];
+    F.web.keys = async (s, key) => (pressed.push([s.sid, key]), { ok: true });
+    F.web.peek = async () => ({ ok: true, screen: "Tea or coffee?\n ❯ 1. Tea\n   2. Coffee\n" });
+    const session = { sid: "s1", name: "tea time", kind: "bg", status: "busy", cwd: "/x", startedAt: 0, pid: 1, mains: [], agents: [], workflows: [], job: { state: "working", detail: "", needs: "answer: Tea or coffee?" } } as any;
+    const web = F.startWeb(() => [session], () => Date.now());
+    try {
+      const url = new URL(web.url!);
+      const token = url.searchParams.get("t")!;
+      const base = `${url.protocol}//${url.host}`;
+      expect((await fetch(`${base}/glasses`)).status).toBe(403);
+      const page = await fetch(`${base}/glasses?t=${token}`);
+      expect([page.status, page.headers.get("content-security-policy")?.includes("script-src 'self'")]).toEqual([200, true]);
+      expect(await page.text()).toContain('from "/glasses/sdk.js"');
+      const sdk = await fetch(`${base}/glasses/sdk.js`);
+      expect([sdk.status, sdk.headers.get("content-type")]).toEqual([200, "text/javascript; charset=utf-8"]);
+      expect(await sdk.text()).toContain("waitForEvenAppBridge");
+      const data: any = await (await fetch(`${base}/api/glasses?t=${token}`)).json();
+      expect(data.sessions.map((s: any) => [s.mark, s.name, s.needs])).toEqual([["▲", "tea time", "answer: Tea or coffee?"]]);
+      // The answer screen: the choices on the session's screen, and a tap pressing one there.
+      const post = (p: string, body: unknown) => fetch(`${base}${p}?t=${token}`, { method: "POST", headers: { "content-type": "application/json", origin: base }, body: JSON.stringify(body) });
+      expect(await (await post("/api/choices", { sid: "s1" })).json()).toEqual({ ok: true, options: [{ key: "1", label: "Tea" }, { key: "2", label: "Coffee" }] });
+      expect((await post("/api/keys", { sid: "s1", key: "2" })).status).toBe(200);
+      expect(pressed).toEqual([["s1", "2"]]);
+      expect((await fetch(`${base}/api/keys?t=${token}`, { method: "POST", headers: { "content-type": "application/json", origin: "https://evil.example" }, body: JSON.stringify({ sid: "s1", key: "1" }) })).status).toBe(403);
+    } finally {
+      web.server?.stop();
+      delete F.web.keys;
+      delete F.web.peek;
+      delete process.env.FLEET_WEB_HOST;
+      delete process.env.FLEET_WEB_PORT;
+      delete process.env.FLEET_WEB_TOKEN_FILE;
+    }
+  });
+});
