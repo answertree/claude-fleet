@@ -751,6 +751,27 @@ setTimeout(() => { throw new Error("boom in a scan"); }, 5);`;
     }
   });
 
+  test("the phone page gets both sides of the recent conversation, interleaved, oldest first", () => {
+    const home = path.join(root, "both");
+    fs.rmSync(home, { recursive: true, force: true });
+    const sid = "both0000-0000-4000-8000-000000000001";
+    const file = path.join(home, "projects", "-p", `${sid}.jsonl`);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.mkdirSync(path.join(home, "sessions"), { recursive: true });
+    fs.writeFileSync(path.join(home, "sessions", "1.json"), JSON.stringify({ pid: process.pid, sessionId: sid, name: "b", kind: "bg", status: "busy", cwd: "/w", startedAt: NOW - 60 * MIN }));
+    const rows = [1, 2, 3, 4].flatMap((i) => [prompt(NOW - (10 - 2 * i) * MIN, `ask ${i}`), reply(NOW - (9 - 2 * i) * MIN, `Answer ${i}`)]);
+    fs.writeFileSync(file, rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const saved = process.env.FLEET_HOME;
+    process.env.FLEET_HOME = home;
+    try {
+      const talk = F.webState(F.scan(NOW).filter((x) => x.sid === sid), NOW).sessions[0].talk as any[];
+      expect(talk.map((m) => m.text)).toEqual(["ask 1", "Answer 1", "ask 2", "Answer 2", "ask 3", "Answer 3", "ask 4", "Answer 4"]);
+      expect(talk.map((m) => m.who).slice(0, 2)).toEqual(["you", "claude"]);
+    } finally {
+      process.env.FLEET_HOME = saved;
+    }
+  });
+
   test("a transcript replaced by a different file at the same path is read afresh", () => {
     const home = path.join(root, "replaced");
     fs.rmSync(home, { recursive: true, force: true });
