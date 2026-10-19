@@ -6053,16 +6053,16 @@ export const WEB_PAGE = `<!doctype html>
 <html lang="en" style="background:#0d1117"><head>
 <meta charset="utf-8">
 <style>html,body{background:#0d1117}
-#splash{position:fixed;inset:0;z-index:50;background:radial-gradient(120% 80% at 50% 38%,#18212d 0%,var(--bg) 62%);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;transition:opacity .16s ease-out,transform .16s ease-out}
+#splash{position:fixed;inset:0;z-index:50;background:radial-gradient(120% 80% at 50% 38%,#18212d 0%,var(--bg) 62%);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;perspective:800px;transition:opacity .24s ease-out,transform .24s ease-out}
 #splash.gone{opacity:0;transform:scale(1.04);pointer-events:none}
-#splash .logo{position:relative;width:192px;height:192px;border-radius:48px;overflow:hidden;box-shadow:0 10px 40px #000a,0 0 0 1px #ffffff14;animation:float 3s ease-in-out infinite}
+#splash .logo{position:relative;width:192px;height:192px;border-radius:48px;overflow:hidden;will-change:transform;box-shadow:0 1px 2px #0009,0px 6px 12px #0007,0px 18px 36px #0008,0px 40px 80px #000b,0px 26px 90px #3a5bff33,0 0 0 1px #ffffff14;animation:tilt 2.4s ease-in-out .225s infinite}
 #splash .logo img{width:100%;height:100%;display:block}
 #splash .logo b i{background:linear-gradient(115deg,transparent 36%,#ffffff30 43%,#fffffff0 50%,#ffffff30 57%,transparent 64%)}
 #splash .logo b{position:absolute;inset:0;overflow:hidden;-webkit-mask:url(__LOGO_MASK__) center/100% 100% no-repeat;mask:url(__LOGO_MASK__) center/100% 100% no-repeat}
-#splash .logo i{position:absolute;inset:-40%;background:linear-gradient(115deg,transparent 38%,#ffffff10 44%,#ffffffb0 50%,#ffffff10 56%,transparent 62%);transform:translateX(-70%);animation:shine 1.6s cubic-bezier(.4,0,.2,1) .15s infinite}
+#splash .logo i{position:absolute;inset:-40%;background:linear-gradient(115deg,transparent 38%,#ffffff10 44%,#ffffffb0 50%,#ffffff10 56%,transparent 62%);transform:translateX(-70%);animation:shine 2.4s cubic-bezier(.4,0,.2,1) .225s infinite}
 @keyframes shine{0%{transform:translateX(-70%)}60%,100%{transform:translateX(70%)}}
-@keyframes float{50%{transform:translateY(-4px)}}
-#splash .title{font-size:22px;font-weight:700;letter-spacing:-.01em;background:linear-gradient(100deg,#8a95a5 30%,#fff 50%,#8a95a5 70%);background-size:250% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:sheen 1.6s linear .15s infinite}
+@keyframes tilt{0%,90%,100%{transform:rotateY(0) rotateX(0) translateY(0);box-shadow:0 1px 2px #0009,0px 6px 12px #0007,0px 18px 36px #0008,0px 40px 80px #000b,0px 26px 90px #3a5bff33,0 0 0 1px #ffffff14}25%{transform:rotateY(-10deg) rotateX(5deg) translateY(-3px);box-shadow:0 1px 2px #0009,5px 6px 12px #0007,10px 18px 36px #0008,16px 40px 80px #000b,8px 26px 90px #3a5bff33,0 0 0 1px #ffffff14}58%{transform:rotateY(9deg) rotateX(-3deg) translateY(-3px);box-shadow:0 1px 2px #0009,-4px 6px 12px #0007,-8px 18px 36px #0008,-14px 40px 80px #000b,-7px 26px 90px #3a5bff33,0 0 0 1px #ffffff14}}
+#splash .title{font-size:22px;font-weight:700;letter-spacing:-.01em;background:linear-gradient(100deg,#8a95a5 30%,#fff 50%,#8a95a5 70%);background-size:250% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:sheen 2.4s linear .225s infinite}
 @keyframes sheen{0%{background-position:120% 0}60%,100%{background-position:-130% 0}}
 #splash .what{color:var(--dim);font-size:13px;min-height:1.4em}</style>
 __STARTUP__
@@ -6446,9 +6446,9 @@ function leaveSplash() {
   if (!sp || leaving) return;
   leaving = true;
   const a = sp.querySelector(".logo i").getAnimations()[0];
-  const local = a ? Number(a.currentTime) - 150 : 960, phase = local < 0 ? local : local % 1600;
-  const wait = phase < 0 ? 960 - phase : phase < 960 ? 960 - phase : 0;
-  setTimeout(() => { sp.classList.add("gone"); setTimeout(() => sp.remove(), 200); }, wait + 400);
+  const local = a ? Number(a.currentTime) - 225 : 1440, phase = local < 0 ? local : local % 2400; // its delay, a cycle, the end of its sweep
+  const wait = phase < 0 ? 1440 - phase : phase < 1440 ? 1440 - phase : 0;
+  setTimeout(() => { sp.classList.add("gone"); setTimeout(() => sp.remove(), 300); }, wait + 400);
 }
 // Finished cards a swipe has put away, by session, kept on this phone.
 const isDone = (s) => s.state === "justDone" || s.state === "finished";
