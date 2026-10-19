@@ -5962,6 +5962,7 @@ export function webState(sessions: Session[], now: number) {
   return {
     now,
     counts,
+    five: fiveHourLine(now), // the five-hour limit's forecast, always said
     hidden: all.length - shown.length,
     machine: { cpu: Math.round(machine.cpu), mem: Math.round((machine.memUsed / machine.memTotal) * 100), memText: `${gb(machine.memUsed)} of ${gb(machine.memTotal)}`, load: Number(machine.load.toFixed(1)) },
     account: acct ? { limits: acct.limits.map((l) => ({ label: l.label, pct: Math.round(l.pct), resetsAt: l.resetsAt, resets: l.resetsAt ? (l.resetsAt - now < 24 * 3600_000 ? `resets in ${ago(l.resetsAt - now)}` : `resets ${new Date(l.resetsAt).toLocaleString("en-GB", { weekday: "short", hour: "2-digit", minute: "2-digit" })}`) : "" })), reason: acct.reason || undefined } : undefined,
@@ -6030,25 +6031,29 @@ export const WEB_PAGE = `<!doctype html>
 <title>Claude Fleet</title>
 <style>
 :root{--bg:#0d1117;--card:#151b23;--line:#262d37;--text:#c6cdd7;--dim:#6b7380;--faint:#3a404a;--white:#f5f7fa;--amber:#e5b544;--green:#50c878;--red:#f0625c;--cyan:#56cdd6;--purple:#be94ff;--blue:#61aaff}
-*{box-sizing:border-box;min-width:0}html,body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;-webkit-text-size-adjust:100%;overflow-x:hidden;overflow-wrap:anywhere}
+*{box-sizing:border-box;min-width:0}html,body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;font-variant-numeric:tabular-nums;-webkit-text-size-adjust:100%;overflow-x:hidden;overflow-wrap:anywhere}
 main,header,.gauges,#quip{max-width:720px;margin-left:auto;margin-right:auto}
 body{padding:calc(env(safe-area-inset-top) + 18px) max(12px,env(safe-area-inset-right)) calc(24px + env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left))}
-header{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:6px}
-h1{font-size:15px;margin:0;color:var(--cyan);letter-spacing:.08em}h1 b{color:var(--white)}
-#clock{color:var(--dim);font-size:12px}
-#quip{color:var(--white);font-size:16px;margin:4px 0 10px}
+header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+h1{display:flex;align-items:center;gap:9px;font-size:21px;font-weight:700;margin:0;color:var(--white);letter-spacing:-.01em}h1 img{width:30px;height:30px;border-radius:8px}
+#clock{color:var(--white);font-size:21px;font-weight:600}
+#quip{color:var(--text);font-size:15px;margin:2px 0 12px}
 #quip .needs{color:var(--amber)}
-.gauges{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:6px 14px;margin-bottom:14px;color:var(--dim);font-size:12px}
-.g{display:flex;align-items:center;gap:6px}.g .bar{flex:1;height:4px;background:var(--faint);border-radius:2px;overflow:hidden}.g .bar i{display:block;height:100%;background:#60aab6}
-.card{background:var(--card);border:1px solid var(--line);border-left:5px solid var(--c);border-radius:10px;padding:10px 12px 12px;margin-bottom:12px;position:relative;overflow:hidden}
+.gauges{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:0 0 16px}
+.gt{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:9px 6px 8px;text-align:center}.gt svg{display:block;margin:0 auto}
+.gt b{display:block;color:var(--text);font-size:12px;font-weight:600;margin-top:4px}.gt small{display:block;color:var(--dim);font-size:10.5px;line-height:1.25;margin-top:1px}.gt.hot small{color:var(--red);font-weight:600}
+.five{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 12px;margin:-6px 0 16px;font-size:13px;color:var(--text)}.five.hot{border-color:#5a2a28;color:#ff9d97}
+.card{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--c);border-radius:16px;padding:12px 14px 14px;margin-bottom:12px;position:relative;overflow:hidden}
 .card.needs{background:#2a2108;border-color:#5a4512;box-shadow:0 0 0 1px #5a4512,0 0 24px #e5b54433;animation:glow 2s ease-in-out infinite}
 @keyframes glow{50%{box-shadow:0 0 0 1px #8a6a1a,0 0 34px #e5b54466}}
-.head{display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px 8px;align-items:baseline}
-.name{color:var(--white);font-weight:700;letter-spacing:.14em;text-transform:uppercase;font-size:13px;word-break:break-word}
-.state{color:var(--c);font-weight:700;letter-spacing:.12em;font-size:11px;white-space:nowrap}
-.place{color:var(--dim);font-size:11px;margin-top:1px}
-.sub{color:var(--white);margin:6px 0 4px}.card.needs .sub{font-weight:700}
-.spark{display:flex;align-items:flex-end;gap:1px;height:28px;margin:8px 0 2px}.spark i{flex:1;background:#5b7fbf;border-radius:1px;min-height:1px;opacity:.9}
+.top{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center}
+.head{display:flex;flex-wrap:wrap;gap:6px 8px;align-items:center}
+.name{color:var(--white);font-weight:650;font-size:17px;letter-spacing:-.01em;word-break:break-word}
+.state{color:var(--c);font-weight:700;letter-spacing:.03em;font-size:11px;white-space:nowrap;padding:2px 8px;border-radius:999px;background:color-mix(in srgb,var(--c) 16%,transparent)}
+.place{color:var(--dim);font-size:12px;margin-top:2px}
+.sub{color:var(--white);margin:8px 0 2px;font-size:15px}.card.needs .sub{font-weight:600}
+.ctxring{text-align:center;color:var(--dim);font-size:10.5px;line-height:1.2}.ctxring svg{display:block;margin:0 auto 2px}
+.spark{display:block;width:100%;height:36px;margin:8px 0 4px}
 .row{display:flex;gap:8px;align-items:flex-start;font-size:12px;color:var(--dim);margin-top:3px}.row .lead{flex:none;width:1.2em;text-align:center}.row>span:last-child{flex:1}
 .ctx{display:flex;height:6px;margin-top:6px;border-radius:3px;overflow:hidden;background:var(--faint);flex:1}.ctx i{display:block;height:100%}
 details{margin-top:8px}summary{cursor:pointer;color:var(--dim);font-size:12px;list-style:none}summary::-webkit-details-marker{display:none}summary::before{content:"▸ ";color:var(--faint)}details[open] summary::before{content:"▾ "}
@@ -6059,7 +6064,7 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--dim);font-size:12px;li
 .r.wf .nm{color:var(--text)}.r.wf.live .nm{color:var(--white);font-weight:700}.r .right{color:var(--dim);white-space:nowrap;font-size:11px}
 .r .sub{grid-column:2/4;display:flex;gap:8px;align-items:center;min-width:0;color:var(--dim);font-size:11px;margin-top:1px}
 .r .what{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.r .tool{color:var(--cyan)}.r .steps{letter-spacing:1px}
-.r.more,.r.done-line{display:block;color:var(--dim);font-size:11px}.mini{display:flex;align-items:flex-end;gap:1px;height:12px;width:64px;flex:none}.mini i{flex:1;min-height:1px;border-radius:1px}
+.r.more,.r.done-line{display:block;color:var(--dim);font-size:11px}.mini{display:block;width:64px;height:14px;flex:none}
 .pulse{animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.3}}
 .tasks div,.agents div{font-size:12px;margin:2px 0}.st-in_progress{color:var(--white)}.st-pending{color:var(--dim)}
 .foot{color:var(--faint);font-size:11px;text-align:center;margin-top:16px}.stale{color:var(--red)}
@@ -6067,13 +6072,14 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--dim);font-size:12px;li
 @keyframes fall{to{transform:translateY(260px) rotate(540deg)}}
 .party{color:var(--amber);font-weight:700;margin-top:4px}
 .empty{color:var(--dim);text-align:center;margin:40px 0}
-.send{display:flex;gap:6px;margin-top:6px;align-items:flex-end}.send textarea{flex:1;min-height:42px;max-height:40vh;resize:vertical;background:var(--bg);color:var(--white);border:1px solid var(--line);border-radius:8px;padding:8px;font:16px/1.35 ui-monospace,Menlo,monospace}
-.send button{background:var(--cyan);color:#0d1117;border:0;border-radius:8px;padding:10px 14px;font:700 14px ui-monospace,Menlo,monospace}.send button:disabled{opacity:.5}
+.send{display:flex;gap:6px;margin-top:6px;align-items:flex-end}.send textarea{flex:1;min-height:42px;max-height:40vh;resize:vertical;background:var(--bg);color:var(--white);border:1px solid var(--line);border-radius:8px;padding:8px;font:16px/1.35 -apple-system,system-ui,sans-serif}
+.send button{background:var(--cyan);color:#0d1117;border:0;border-radius:10px;padding:10px 16px;font:700 15px -apple-system,system-ui,sans-serif}.send button:disabled{opacity:.5}
 .sent{font-size:12px;margin-top:4px;color:var(--dim)}.sent.ok{color:var(--green)}.sent.err{color:var(--red)}
 </style></head><body>
-<header><h1>◆ CLAUDE <b>FLEET</b></h1><span id="clock"></span></header>
+<header><h1><img src="/icon-192.png" alt="">Claude Fleet</h1><span id="clock"></span></header>
 <div id="quip">Waking the fleet…</div>
 <div class="gauges" id="gauges"></div>
+<div class="five" id="five"></div>
 <main id="cards"></main>
 <div class="foot" id="foot"></div>
 <script>
@@ -6081,7 +6087,42 @@ const token = new URLSearchParams(location.search).get("t") || "";
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
 const segs = (list) => { const s = el("span"); for (const x of list) { const p = el("span", "", x.t); if (x.c) p.style.color = x.c; if (x.b) p.style.fontWeight = "700"; s.append(p); } return s; };
 const row = (lead, color, content) => { const r = el("div", "row"); const l = el("span", "lead", lead); l.style.color = color; r.append(l, typeof content === "string" ? el("span", "", content) : content); return r; };
-const gauge = (label, pct, extra) => { const g = el("div", "g"); const b = el("span", "bar"); const i = el("i"); i.style.width = Math.min(100, pct) + "%"; if (pct >= 80) i.style.background = "#f0625c"; else if (pct >= 60) i.style.background = "#f5f7fa"; b.append(i); g.append(el("span", "", label), b, el("span", "", pct + "%" + (extra ? " " + extra : ""))); return g; };
+const NS = "http://www.w3.org/2000/svg";
+const svgEl = (tag, attrs) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); return e; };
+// A ring: a faint track, then each part as an arc in its colour, and the figure in the middle.
+function ring(size, width, parts, label) {
+  const r = (size - width) / 2, c = 2 * Math.PI * r;
+  const svg = svgEl("svg", { width: size, height: size, viewBox: "0 0 " + size + " " + size });
+  svg.append(svgEl("circle", { cx: size / 2, cy: size / 2, r, fill: "none", stroke: "#262d37", "stroke-width": width }));
+  let at = 0;
+  for (const p of parts) {
+    const len = Math.max(0, Math.min(1, p.frac)) * c;
+    if (len < 0.5) continue;
+    svg.append(svgEl("circle", { cx: size / 2, cy: size / 2, r, fill: "none", stroke: p.color, "stroke-width": width, "stroke-dasharray": len + " " + (c - len), "stroke-dashoffset": -at, transform: "rotate(-90 " + size / 2 + " " + size / 2 + ")", "stroke-linecap": parts.length === 1 ? "round" : "butt" }));
+    at += len;
+  }
+  const t = svgEl("text", { x: size / 2, y: size / 2 + 4, "text-anchor": "middle", fill: "#f5f7fa", "font-size": Math.round(size * 0.24), "font-weight": "650", "font-family": "-apple-system,system-ui,sans-serif" });
+  t.textContent = label;
+  svg.append(t);
+  return svg;
+}
+const tone = (pct) => (pct >= 80 ? "#f0625c" : pct >= 60 ? "#f5f7fa" : "#56cdd6");
+function gaugeTile(label, pct, sub, hot) {
+  const g = el("div", "gt" + (hot ? " hot" : ""));
+  g.append(ring(50, 6, pct === undefined ? [] : [{ frac: pct / 100, color: tone(pct) }], pct === undefined ? "–" : pct + "%"), el("b", "", label), el("small", "", sub || ""));
+  return g;
+}
+// Activity as a smooth area, in the card's colour.
+function sparkSvg(values, colour) {
+  const n = values.length || 1, w = 300, h = 36, max = Math.max(1, ...values);
+  const pts = values.map((v, i) => [(i / Math.max(1, n - 1)) * w, h - 2 - Math.sqrt(v / max) * (h - 4)]);
+  const svg = svgEl("svg", { class: "spark", viewBox: "0 0 " + w + " " + h, preserveAspectRatio: "none" });
+  if (!pts.length) return svg;
+  const line = pts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ");
+  svg.append(svgEl("path", { d: line + " L" + w + " " + h + " L0 " + h + " Z", fill: colour, "fill-opacity": "0.18" }));
+  svg.append(svgEl("path", { d: line, fill: "none", stroke: colour, "stroke-width": "1.6", "vector-effect": "non-scaling-stroke", "stroke-linejoin": "round" }));
+  return svg;
+}
 function quip(d) {
   const c = d.counts, n = d.sessions.length;
   const parts = [];
@@ -6096,11 +6137,15 @@ function quip(d) {
 // The roster, as the detail view lists it: the main thread, each workflow with its agents under it, other agents.
 const GLYPH = { active: ["●", "#50c878", "pulse"], tool: ["◐", "#f5f7fa"], quiet: ["○", "#6b7380"], done: ["✓", "#50c878"], stalled: ["◐", "#f0625c"] };
 function mini(values, color) {
-  const m = el("span", "mini"), n = 24, step = values.length / n, cols = [];
-  for (let i = 0; i < n; i++) { let v = 0; for (let j = Math.floor(i * step); j < Math.floor((i + 1) * step); j++) v += values[j] || 0; cols.push(v); }
-  const max = Math.max(1, ...cols);
-  for (const v of cols) { const b = el("i"); b.style.height = (v ? Math.max(18, Math.sqrt(v / max) * 100) : 0) + "%"; b.style.background = color; m.append(b); }
-  return m;
+  // A small activity line, like the card's own, in the agent's colour.
+  const n = (values || []).length || 1, w = 64, h = 14, max = Math.max(1, ...(values || [0]));
+  const svg = svgEl("svg", { width: w, height: h, viewBox: "0 0 " + w + " " + h, class: "mini" });
+  const pts = (values || []).map((v, i) => [(i / Math.max(1, n - 1)) * w, h - 1 - Math.sqrt(v / max) * (h - 2)]);
+  if (!pts.length) return svg;
+  const line = pts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ");
+  svg.append(svgEl("path", { d: line + " L" + w + " " + h + " L0 " + h + " Z", fill: color, "fill-opacity": "0.2" }));
+  svg.append(svgEl("path", { d: line, fill: "none", stroke: color, "stroke-width": "1.3", "stroke-linejoin": "round" }));
+  return svg;
 }
 function rrow(cls, glyph, name, right, what, spark, color) {
   const r = el("div", "r " + cls);
@@ -6150,12 +6195,23 @@ function roster(R) {
 }
 function card(s) {
   const c = el("section", "card" + (s.state === "needs" ? " needs" : "")); c.style.setProperty("--c", s.color);
-  const head = el("div", "head"); head.append(el("div", "name", s.name), el("div", "state", s.word.toUpperCase() + (s.time ? " · " + s.time : ""))); c.append(head);
-  if (s.place) c.append(el("div", "place", s.place));
+  // The head: name and state, where it is; its context as a ring, split by what fills it, on the right.
+  const top = el("div", "top"), left = el("div");
+  const head = el("div", "head"); head.append(el("div", "name", s.name), el("div", "state", s.word + (s.time ? " · " + s.time : ""))); left.append(head);
+  if (s.place) left.append(el("div", "place", s.place));
+  top.append(left);
+  if (s.ctx) {
+    const total = s.ctx.split.reduce((n, p) => n + p.tokens, 0) || 1;
+    const parts = s.ctx.split.map((p) => ({ frac: (p.tokens / total) * (s.ctx.pct / 100), color: p.color }));
+    const box = el("div", "ctxring"); box.append(ring(52, 6, parts.length ? parts : [{ frac: s.ctx.pct / 100, color: tone(s.ctx.pct) }], s.ctx.pct + "%"), el("div", "", "of " + s.ctx.max));
+    top.append(box);
+  }
+  c.append(top);
+
   c.append(el("div", "sub", (s.sub.source === "prompt" ? "▸ " : s.sub.source === "reply" ? "◆ " : "") + (s.sub.text || "")));
   if (s.party) { c.append(el("div", "party", "✦ " + s.party + " ✦")); const f = el("div", "confetti"); const cols = ["#e5b544", "#50c878", "#56cdd6", "#be94ff", "#f0625c", "#61aaff"]; for (let i = 0; i < 28; i++) { const p = el("i"); p.style.left = (i * 37 % 100) + "%"; p.style.background = cols[i % cols.length]; p.style.animationDelay = (i % 9) * 0.25 + "s"; f.append(p); } c.append(f); }
-  const max = Math.max(1, ...s.spark); const sp = el("div", "spark"); for (const v of s.spark) { const i = el("i"); i.style.height = (v ? Math.max(8, Math.sqrt(v / max) * 100) : 0) + "%"; sp.append(i); } c.append(sp);
-  if (s.ctx) { const bar = el("span", "ctx"); const total = s.ctx.split.reduce((n, p) => n + p.tokens, 0) || 1; for (const p of s.ctx.split) { const i = el("i"); i.style.width = (p.tokens / total) * s.ctx.pct + "%"; i.style.background = p.color; bar.append(i); } const r = row("◫", "#6b7380", bar); r.append(el("span", "", s.ctx.pct + "% of " + s.ctx.max + (s.ctx.runway ? " · " + s.ctx.runway : ""))); c.append(r); }
+  c.append(sparkSvg(s.spark, s.state === "needs" ? "#e5b544" : s.state === "stalled" ? "#f0625c" : "#6b9bff"));
+  if (s.ctx && s.ctx.runway) c.append(row("◷", "#6b7380", s.ctx.runway));
   if (s.fails) c.append(row("✗", "#f0625c", s.fails.n + " failed · " + s.fails.last + " · " + s.fails.ago));
   for (const b of s.bg) c.append(row("↻", "#56cdd6", b.desc + " · " + b.ago));
   for (const p of s.prs) c.append(row("⇡", "#c6cdd7", segs(p)));
@@ -6191,8 +6247,13 @@ async function tick() {
     if (!r.ok) throw new Error(r.status);
     const d = await r.json(); last = Date.now();
     const q = document.getElementById("quip"); q.replaceChildren(); quip(d).forEach(([text, cls], i) => { if (i) q.append(" · "); q.append(el("span", cls || "", text)); });
-    const g = document.getElementById("gauges"); g.replaceChildren(gauge("cpu", d.machine.cpu), gauge("mem", d.machine.mem, d.machine.memText));
-    if (d.account) for (const l of d.account.limits) g.append(gauge(l.label, l.pct, l.resets));
+    // The gauges as rings: the five-hour and weekly limits (with when each resets), this machine's CPU and memory.
+    const g = document.getElementById("gauges");
+    const lim = (re) => (d.account ? d.account.limits.find((l) => re.test(l.label)) : undefined);
+    const five = lim(/5/), week = lim(/7|week/i);
+    g.replaceChildren(gaugeTile("5 hours", five ? five.pct : undefined, five ? five.resets : "no figures", !!(d.five && d.five.urgent)), gaugeTile("week", week ? week.pct : undefined, week ? week.resets : ""), gaugeTile("cpu", d.machine.cpu, "load " + d.machine.load), gaugeTile("memory", d.machine.mem, d.machine.memText));
+    // The five-hour forecast, always.
+    const f5 = document.getElementById("five"); f5.textContent = d.five ? d.five.text : ""; f5.className = "five" + (d.five && d.five.urgent ? " hot" : "");
     const cards = document.getElementById("cards");
     // Never redraw under your thumbs: while you are typing a message the cards hold still.
     if (document.activeElement && document.activeElement.tagName === "TEXTAREA" && cards.contains(document.activeElement)) return;
@@ -6528,7 +6589,6 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
           if (url.pathname === "/api/state") return Response.json(webState(getSessions(), now()), { headers });
           if (url.pathname === "/glasses") return new Response(GLASSES_PAGE, { headers: { ...headers, "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" } });
           if (url.pathname === "/api/glasses") return Response.json(glassesState(getSessions(), now()), { headers });
-          if (url.pathname === "/api/glasses/tiles") return Response.json(glassesTiles(getSessions(), now(), Math.max(0, Number(url.searchParams.get("sel")) || 0)), { headers });
           return new Response("not found", { status: 404, headers });
         },
       });
@@ -7973,12 +8033,6 @@ export function rasterOf(lines: string[], cols: number, scale = 2, bg: RGB = PIC
   });
   return { px, W, H };
 }
-/** A rectangle of a raster, as a PNG of its own. */
-export function cropPng(r: { px: Uint8Array; W: number }, x: number, y: number, w: number, h: number): Buffer {
-  const out = new Uint8Array(w * h * 3);
-  for (let row = 0; row < h; row++) out.set(r.px.subarray(((y + row) * r.W + x) * 3, ((y + row) * r.W + x + w) * 3), row * w * 3);
-  return pngOf(w, h, out);
-}
 /** The fleet as a picture: every session, or one focused as a click on it would, in the detail view. */
 export function fleetPicture(sessions: Session[], now: number, focus?: string, cols = 110, rows = 44): Buffer {
   const was = { focusSid, mode: opt.mode };
@@ -8394,6 +8448,25 @@ export const glassesSafe = (s: string) =>
     .replace(/[^\x20-\x7e -ÿ‐-‧←-↙─-◿☀-⛿]/g, "")
     .replace(/[ \t]+/g, " ")
     .trim();
+/** A session's numbers for the glasses' graphs: activity, context over time, tasks, workflows, agents, pull requests. */
+function chartOf(s: ReturnType<typeof webState>["sessions"][number], full: Session | undefined, now: number, win: Win) {
+  const main = full ? factsOf(full).main : undefined;
+  const top = main?.ctx ? ctxMax(main.ctx) : 0;
+  return {
+    spark: s.spark,
+    out: full ? human(tokensIn(tailsOf(full), win)) : "",
+    tools: s.tools,
+    // Context over the last quarter hour, as [how far along (0 to 1), how full (0 to 1)].
+    ctx: top && main ? main.ctxLog.map(([t, used]) => [Math.round(Math.max(0, 1 - (now - t) / CTX_LOG_MS) * 1000) / 1000, Math.round(Math.min(1, used / top) * 1000) / 1000]) : [],
+    tasks: s.tasks ? { done: s.tasks.done, doing: s.tasks.open.filter((t) => t.status === "in_progress").length, total: s.tasks.total } : undefined,
+    workflows: s.roster.workflows.filter((w) => w.outcome === "running").slice(0, 3).map((w) => ({ name: glassesSafe(w.name), phase: glassesSafe(w.phases.find((p) => p.state === "now")?.name ?? ""), done: w.done, doing: w.doing, total: w.total })),
+    agents: [...s.roster.workflows.filter((w) => w.outcome === "running").flatMap((w) => w.agents), ...s.roster.agents].filter((a) => a.state !== "done").slice(0, 6).map((a) => ({ label: glassesSafe(a.label), state: a.state, spark: a.spark })),
+    prs: (full?.side?.prs ?? []).slice(0, 3).map((pr) => {
+      const st = prState.get(`${pr.repo}#${pr.number}`)?.state;
+      return { n: pr.number, state: st?.state ?? "", pass: st?.pass ?? 0, fail: st?.fail ?? 0, pending: st?.pending ?? 0 };
+    }),
+  };
+}
 /** The roster in lines the glasses can draw: each workflow with up to four of its agents, then other agents. */
 function glassesRoster(r: ReturnType<typeof rosterOfView>): string[] {
   const mark = (st: string) => (st === "active" ? "●" : st === "tool" ? "◐" : st === "stalled" ? "◐!" : st === "done" ? "■" : "○");
@@ -8414,9 +8487,14 @@ const GLASSES_MARK: Record<string, string> = { needs: "▲", stalled: "◐", wor
 export function glassesState(sessions: Session[], now: number) {
   const st = webState(sessions, now);
   const order = ["needs", "stalled", "working", "justDone", "yourTurn", "idle", "finished"];
+  const five = fiveHourLine(now);
+  const week = st.account?.limits.find((l) => /7|week/i.test(l.label));
+  const win = laneWindow(now, 150);
   return {
     clock: new Date(now).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }),
     counts: st.counts,
+    // For the glasses' header: the five-hour forecast, always; the week; this machine; how many machines.
+    header: { five: glassesSafe(five.text), urgent: five.urgent, week: week ? week.pct : undefined, cpu: st.machine.cpu, mem: st.machine.mem, machines: manyMachines() ? peers.size + 1 : 1, window: opt.windowMin },
     sessions: [...st.sessions]
       .sort((a, b) => order.indexOf(a.state) - order.indexOf(b.state))
       .map((s) => {
@@ -8432,7 +8510,7 @@ export function glassesState(sessions: Session[], now: number) {
           time: glassesSafe(s.time ?? ""),
           needs: s.needs ? glassesSafe(capText(flatReply(s.needs), 400)) : undefined,
           now: glassesSafe(capText(s.sub.text || "", 300)),
-          ctx: s.ctx ? { pct: s.ctx.pct, runway: s.ctx.runway ? glassesSafe(s.ctx.runway) : undefined } : undefined,
+          ctx: s.ctx ? { pct: s.ctx.pct, max: s.ctx.max, runway: s.ctx.runway ? glassesSafe(s.ctx.runway) : undefined } : undefined,
           tasks: s.tasks?.total ? `${s.tasks.done}/${s.tasks.total}` : undefined,
           doing: s.tasks?.open.find((t) => t.status === "in_progress")?.text,
           agents: s.agents.length,
@@ -8440,93 +8518,32 @@ export function glassesState(sessions: Session[], now: number) {
           prs: s.prs.map((p) => glassesSafe(segText(p))),
           said: said ? glassesSafe(capText(said.text, 500)) : undefined,
           roster: glassesRoster(s.roster),
+          // What the phone draws the graphs from.
+          chart: chartOf(s, full, now, win),
         };
       }),
   };
 }
 
-// ── the slide: everything on one screen, drawn by fleet ──
-// The glasses' home is a picture: a header (counts, the time, usage and the machine), then two rows a session (its
-// state, name and machine; its question or what it is doing, its activity, context, tasks and workflows), the one
-// the ring has chosen lit as a bar. Drawn at 576 by 288 on black (off), in four greys, and sent as the four 288 by
-// 144 tiles the glasses allow, only those that changed.
-const G_HI: RGB = [255, 255, 255];
-const G_MID: RGB = [180, 180, 180];
-const G_LO: RGB = [110, 110, 110];
-const G_FAINT: RGB = [60, 60, 60];
-const SLIDE_COLS = 72;
-const SLIDE_ROWS = 18;
-const SPARKS = "▁▂▃▄▅▆▇█";
-const sparkOf = (values: number[], n: number) => {
-  if (!values.length) return " ".repeat(n);
-  const step = values.length / n;
-  const cols = Array.from({ length: n }, (_, i) => sum(values.slice(Math.floor(i * step), Math.floor((i + 1) * step))));
-  const max = Math.max(1, ...cols);
-  return cols.map((v) => (v ? SPARKS[Math.min(7, Math.floor((v / max) * 7.999))] : " ")).join("");
-};
-const meterOf = (pct: number, n: number) => "█".repeat(Math.round((Math.min(100, pct) / 100) * n)) + "░".repeat(n - Math.round((Math.min(100, pct) / 100) * n));
-/** One slide row: left text and right text in their colours, padded to the width; `lit` draws it as a bright bar. */
-function slideRow(left: [string, RGB][], right: [string, RGB][], lit = false): string {
-  const rw = right.reduce((n, [t]) => n + width(t), 0);
-  let room = SLIDE_COLS - rw - (rw ? 1 : 0);
-  const parts: [string, RGB][] = [];
-  for (const [t, c] of left) {
-    const cut = cutTo(t, Math.max(0, room));
-    if (!cut) break;
-    parts.push([cut, c]);
-    room -= width(cut);
+/**
+ * The five-hour limit in one line, whatever is known: when it fills at this pace ("full ~16:40, in ~2h"), or where
+ * it will be at the reset ("~64% by 18:00"), or that it is full, or that there are no figures.
+ */
+export function fiveHourLine(now = clock()): { text: string; urgent: boolean } {
+  const acct = opt.usage ? accountView(now) : undefined;
+  const l = acct?.limits.find((x) => x.windowMs === 5 * 3600_000) ?? acct?.limits[0];
+  if (!l) return { text: `5h: no usage figures${acct?.reason ? ` (${glassesSafe(acct.reason).slice(0, 30)})` : ""}`, urgent: false };
+  const pct = Math.round(l.pct);
+  const at = (t: number) => new Date(t).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  if (pct >= 100) return { text: `5h full · resets ${l.resetsAt ? at(l.resetsAt) : "soon"}`, urgent: true };
+  if (l.fullIn) return { text: `5h ${pct}% · full ~${at(now + l.fullIn)}, in ~${roughly(l.fullIn / 60_000)}`, urgent: true };
+  const tick = l.tick ?? 0;
+  if (tick > 0.03 && pct > 0 && l.resetsAt) {
+    const toFull = ((100 - pct) / pct) * tick * l.windowMs;
+    if (now + toFull < l.resetsAt) return { text: `5h ${pct}% · on pace to fill ~${at(now + toFull)}`, urgent: true };
+    return { text: `5h ${pct}% · ~${Math.min(99, Math.round(pct / tick))}% by ${at(l.resetsAt)} reset`, urgent: false };
   }
-  const lw = parts.reduce((n, [t]) => n + width(t), 0);
-  const all: [string, RGB][] = [...parts, [" ".repeat(Math.max(0, SLIDE_COLS - lw - rw)), G_MID], ...right];
-  if (lit) return `\x1b[48;2;255;255;255m` + all.map(([t]) => fg([0, 0, 0], t)).join("") + `\x1b[49m`;
-  return all.map(([t, c]) => fg(c, t)).join("");
-}
-/** The slide, as screen rows: `sel` is the session the ring has chosen. */
-export function glassesSlide(sessions: Session[], now: number, sel = 0): string[] {
-  const st = glassesState(sessions, now);
-  const w = webState(sessions, now);
-  const c = st.counts;
-  const rows: string[] = [];
-  rows.push(slideRow([["◆ CLAUDE FLEET", G_HI]], [[st.clock, G_HI]]));
-  const counts: [string, RGB][] = [];
-  const add = (n: number, text: string, colour: RGB) => n && counts.push([`${counts.length ? "   " : ""}${text}`, colour]);
-  add(c.needs, `▲ ${c.needs} need${c.needs === 1 ? "s" : ""} you`, G_HI);
-  add(c.stalled, `◐ ${c.stalled} stuck`, G_HI);
-  add(c.working, `● ${c.working} working`, G_MID);
-  add(c.agents, `${c.agents} agent${c.agents === 1 ? "" : "s"}`, G_LO);
-  add(c.workflows, `≡ ${c.workflows} workflow${c.workflows === 1 ? "" : "s"}`, G_LO);
-  rows.push(slideRow(counts.length ? counts : [["all quiet", G_MID]], []));
-  const usage: [string, RGB][] = [];
-  for (const l of (w.account?.limits ?? []).slice(0, 2)) usage.push([`${usage.length ? "   " : ""}${l.label} ${meterOf(l.pct, 8)} ${l.pct}%`, l.pct >= 80 ? G_HI : G_LO]);
-  rows.push(slideRow([...usage, [`${usage.length ? "   " : ""}cpu ${w.machine.cpu}%  mem ${w.machine.mem}%`, G_LO]], [[manyMachines() ? `${peers.size + 1} machines` : selfHost(), G_FAINT]]));
-  rows.push(fg(G_FAINT, "─".repeat(SLIDE_COLS)));
-  const list = st.sessions;
-  const roomy = list.length <= 4; // few sessions: a blank row between them
-  const shown = roomy ? 4 : 6;
-  const first = Math.max(0, Math.min(sel - 2, list.length - shown));
-  for (const [i, s] of list.slice(first, first + shown).entries()) {
-    const lit = first + i === sel;
-    if (roomy && i) rows.push("");
-    const name = s.name.toUpperCase() + (s.host ? ` · ${s.host}` : "");
-    rows.push(slideRow([[`${s.mark} `, s.state === "needs" ? G_HI : G_MID], [name, G_HI]], [[`${s.word.toLowerCase()}${s.time ? ` ${s.time}` : ""}`, s.state === "needs" || s.state === "stalled" ? G_HI : G_MID]], lit));
-    const ws = w.sessions.find((x) => x.sid === s.sid);
-    const wf = ws?.roster.workflows.find((x) => x.outcome === "running");
-    const facts = [s.ctx ? `${s.ctx.pct}%` : "", s.tasks ? `☐${s.tasks}` : "", wf ? `≡${wf.done}/${wf.total}` : ""].filter(Boolean).join(" ");
-    rows.push(slideRow([[`  ${s.needs ? `? ${s.needs}` : s.now || ""}`, s.needs ? G_HI : G_MID]], [[sparkOf(ws?.spark ?? [], 10), G_LO], [facts ? ` ${facts}` : "", G_LO]], lit));
-  }
-  if (!list.length) rows.push("", slideRow([["  Nothing working, nothing waiting on you.", G_MID]], []));
-  while (rows.length < SLIDE_ROWS - 1) rows.push("");
-  const more = list.length > shown ? `${sel + 1}/${list.length}` : list.length ? `${list.length} session${list.length === 1 ? "" : "s"}` : "";
-  rows[SLIDE_ROWS - 1] = slideRow([["ring: choose   tap: open   2× tap: exit", G_FAINT]], [[more, G_FAINT]]);
-  return rows.slice(0, SLIDE_ROWS);
-}
-/** The slide as the four tiles the glasses show, each with a fingerprint, so only those that changed are sent. */
-export function glassesTiles(sessions: Session[], now: number, sel = 0): { key: string; png: string }[] {
-  const r = rasterOf(glassesSlide(sessions, now, sel), SLIDE_COLS, 1, [0, 0, 0]);
-  return [0, 1, 2, 3].map((i) => {
-    const png = cropPng(r, (i % 2) * 288, Math.floor(i / 2) * 144, 288, 144);
-    return { key: Bun.hash(png).toString(36), png: png.toString("base64") };
-  });
+  return { text: `5h ${pct}%${l.resetsAt ? ` · resets ${at(l.resetsAt)}` : ""}`, urgent: false };
 }
 
 export const GLASSES_PAGE = `<!doctype html>
@@ -8535,7 +8552,7 @@ export const GLASSES_PAGE = `<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>Claude Fleet</title>
-<style>body{margin:0;padding:24px;background:#000;color:#4be37a;font:15px/1.5 ui-monospace,Menlo,monospace}h1{font-size:17px;margin:0 0 12px}p{margin:6px 0;color:#9adbb0}</style>
+<style>body{margin:0;padding:24px;background:#000;color:#4be37a;font:16px/1.5 -apple-system,system-ui,sans-serif}h1{font-size:17px;margin:0 0 12px}p{margin:6px 0;color:#9adbb0}</style>
 </head><body>
 <h1>◆ Claude Fleet on your glasses</h1>
 <p id="s">Waiting for the Even app…</p>
@@ -8549,12 +8566,12 @@ const W = 576, H = 288;
 const QUICK = ["yes, go ahead", "continue", "looks good, carry on", "stop and tell me where you are"];
 const cut = (s, n) => (s && s.length > n ? s.slice(0, n - 1) + "…" : s || "");
 const bar = (pct, n) => "━".repeat(Math.round((pct / 100) * n)) + "─".repeat(n - Math.round((pct / 100) * n));
-let data = { sessions: [], counts: {}, clock: "" }, view = "slide", sel = 0, pickAt = 0, sid = null, page = 0, pages = [""], choices = [], started = false, busy = false, sending = false, tileKeys = [];
+let data = { sessions: [], counts: {}, clock: "" }, view = "slide", sel = 0, pickAt = 0, sid = null, page = 0, pages = [""], choices = [], started = false, busy = false, sending = false;
 
 const bridge = await waitForEvenAppBridge();
 say("Connected: Claude Fleet is on your glasses.");
 
-const text = (id, name, x, y, w, h, content, capture, z) => new TextContainerProperty({ xPosition: x, yPosition: y, width: w, height: h, borderWidth: 0, borderColor: 0, paddingLength: 4, containerID: id, containerName: name, content: cut(content, 1000), isEventCapture: capture ? 1 : 0, ...(z !== undefined ? { zOrderIndex: z } : {}) });
+const text0 = (id, name, x, y, w, h, content, capture, z) => new TextContainerProperty({ xPosition: x, yPosition: y, width: w, height: h, borderWidth: 0, borderColor: 0, paddingLength: 4, containerID: id, containerName: name, content: cut(content, 1000), isEventCapture: capture ? 1 : 0, ...(z !== undefined ? { zOrderIndex: z } : {}) });
 // A list sits directly under what is above it: the glasses centre a list's items in its height, so it is only as tall as they are.
 const list = (id, name, y, h, items) => new ListContainerProperty({ xPosition: 0, yPosition: y, width: W, height: Math.min(h, items.length * 40 + 8), borderWidth: 0, borderColor: 0, paddingLength: 4, containerID: id, containerName: name, isEventCapture: 1, itemContainer: new ListItemContainerProperty({ itemCount: items.length, itemWidth: 0, isItemSelectBorderEn: 1, itemName: items.map((i) => cut(i, 64)) }) });
 // Input is ignored for a moment after a screen appears: a new list sends an event of its own (it reads as a tap), and
@@ -8571,32 +8588,371 @@ async function show(p) {
 const upgrade = (id, name, content) => bridge.textContainerUpgrade(new TextContainerUpgrade({ containerID: id, containerName: name, content: cut(content, 1000) }));
 const current = () => data.sessions.find((s) => s.sid === sid);
 
-// ── the slide: fleet draws everything as one picture, in four tiles; an empty text layer behind takes the ring ──
-async function slide() {
-  view = "slide";
-  tileKeys = [];
-  const tiles = [0, 1, 2, 3].map((i) => new ImageContainerProperty({ xPosition: (i % 2) * 288, yPosition: Math.floor(i / 2) * 144, width: 288, height: 144, containerID: 10 + i, containerName: "tile" + i, zOrderIndex: i + 2 }));
-  await show({ containerTotalNum: 5, textObject: [text(1, "input", 0, 0, W, H, " ", true, 1)], imageObject: tiles });
-  await sendTiles();
+// ── drawn on the phone: the slide and a session's dashboard, on a canvas in the system font, sent as four tiles ──
+const FONT = '-apple-system, "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif';
+// Greys come out brighter on the glasses than on a screen: the low tones are kept low, so what matters stands out.
+const COL = { hi: "#ffffff", mid: "#b0b0b0", lo: "#686868", faint: "#2c2c2c", fill: "#0e0e0e" };
+const canvas = document.createElement("canvas");
+canvas.width = W;
+canvas.height = H;
+const g = canvas.getContext("2d");
+const tileCanvases = [0, 1, 2, 3].map(() => Object.assign(document.createElement("canvas"), { width: 288, height: 144 }));
+let sentTiles = ["", "", "", ""];
+const setFont = (px, weight) => (g.font = (weight || 400) + " " + px + "px " + FONT);
+function fitText(s, maxW) {
+  s = s || "";
+  if (!maxW || g.measureText(s).width <= maxW) return s;
+  while (s.length && g.measureText(s + "…").width > maxW) s = s.slice(0, -1);
+  return s + "…";
 }
-async function sendTiles() {
-  if (sending || view !== "slide") return;
-  sending = true;
-  try {
-    const r = await fetch(q("/api/glasses/tiles", "&sel=" + sel), { cache: "no-store" });
-    if (!r.ok) throw new Error(r.status);
-    const tiles = await r.json();
-    // Only the tiles that changed, one at a time (the glasses take one image at once).
-    for (let i = 0; i < tiles.length; i++) {
-      if (tiles[i].key === tileKeys[i] || view !== "slide") continue;
-      const bytes = Uint8Array.from(atob(tiles[i].png), (c) => c.charCodeAt(0));
-      await bridge.updateImageRawData(new ImageRawDataUpdate({ containerID: 10 + i, containerName: "tile" + i, imageData: bytes }));
-      tileKeys[i] = tiles[i].key;
+function text(s, x, y, px, colour, weight, maxW) {
+  setFont(px, weight);
+  g.fillStyle = colour;
+  const t = fitText(s, maxW);
+  g.fillText(t, x, y);
+  return g.measureText(t).width;
+}
+function textR(s, right, y, px, colour, weight, maxW) {
+  setFont(px, weight);
+  const t = fitText(s, maxW);
+  const w = g.measureText(t).width;
+  g.fillStyle = colour;
+  g.fillText(t, right - w, y);
+  return w;
+}
+function wrapText(s, maxW, px, lines) {
+  setFont(px);
+  const out = [];
+  let line = "";
+  for (const word of (s || "").split(" ")) {
+    const next = line ? line + " " + word : word;
+    if (g.measureText(next).width > maxW && line) {
+      out.push(line);
+      line = word;
+      if (out.length === lines) break;
+    } else line = next;
+  }
+  if (out.length < lines && line) out.push(line);
+  if (out.length === lines && (s || "").length > out.join(" ").length) out[lines - 1] = fitText(out[lines - 1] + " …", maxW);
+  return out;
+}
+function rrect(x, y, w, h, r) {
+  g.beginPath();
+  g.moveTo(x + r, y);
+  g.arcTo(x + w, y, x + w, y + h, r);
+  g.arcTo(x + w, y + h, x, y + h, r);
+  g.arcTo(x, y + h, x, y, r);
+  g.arcTo(x, y, x + w, y, r);
+  g.closePath();
+}
+function pill(x, y, w, h, frac, colour) {
+  rrect(x, y, w, h, h / 2);
+  g.fillStyle = COL.faint;
+  g.fill();
+  if (frac > 0) {
+    rrect(x, y, Math.max(h, w * Math.min(1, frac)), h, h / 2);
+    g.fillStyle = colour;
+    g.fill();
+  }
+}
+// The state, drawn: ▲ needs you, ● working, half a circle stalled, a tick just finished, ▶ your turn, ○ quiet.
+function stateIcon(state, x, cy, r, colour) {
+  g.fillStyle = g.strokeStyle = colour;
+  g.lineWidth = 2;
+  g.beginPath();
+  if (state === "needs") { g.moveTo(x + r, cy - r); g.lineTo(x + 2 * r, cy + r * 0.8); g.lineTo(x, cy + r * 0.8); g.closePath(); g.fill(); }
+  else if (state === "working") { g.arc(x + r, cy, r * 0.8, 0, Math.PI * 2); g.fill(); }
+  else if (state === "stalled") { g.arc(x + r, cy, r * 0.8, 0, Math.PI * 2); g.stroke(); g.beginPath(); g.arc(x + r, cy, r * 0.8, Math.PI / 2, Math.PI * 1.5); g.fill(); }
+  else if (state === "justDone") { g.moveTo(x, cy); g.lineTo(x + r * 0.7, cy + r * 0.7); g.lineTo(x + r * 2, cy - r * 0.8); g.stroke(); }
+  else if (state === "yourTurn") { g.moveTo(x + r * 0.3, cy - r * 0.8); g.lineTo(x + r * 1.8, cy); g.lineTo(x + r * 0.3, cy + r * 0.8); g.closePath(); g.fill(); }
+  else { g.arc(x + r, cy, r * 0.75, 0, Math.PI * 2); g.stroke(); }
+}
+function resample(values, n) {
+  if (!values || !values.length) return [];
+  const step = values.length / n;
+  return Array.from({ length: n }, (_, i) => { let v = 0; for (let j = Math.floor(i * step); j < Math.floor((i + 1) * step); j++) v += values[j] || 0; return v; });
+}
+// Activity as rounded bars, scaled to the busiest.
+function bars(values, x, y, w, h, colour, gap) {
+  const n = Math.max(1, Math.min(values.length || 1, Math.floor(w / 4)));
+  const cols = resample(values, n);
+  const max = Math.max(1, ...cols);
+  const bw = w / n;
+  g.fillStyle = COL.faint;
+  g.fillRect(x, y + h - 1, w, 1);
+  g.fillStyle = colour;
+  cols.forEach((v, i) => {
+    if (!v) return;
+    const bh = Math.max(2, Math.sqrt(v / max) * (h - 2));
+    rrect(x + i * bw, y + h - 1 - bh, Math.max(1.5, bw - (gap ?? 1.5)), bh, Math.min(2, bw / 2));
+    g.fill();
+  });
+}
+// A sparkline: a smooth line with a soft fill under it.
+function spark(values, x, y, w, h, colour) {
+  const n = Math.max(2, Math.min(40, (values || []).length));
+  const cols = resample(values || [], n);
+  const max = Math.max(1, ...cols);
+  const pts = cols.map((v, i) => [x + (i / (n - 1)) * w, y + h - (Math.sqrt(v / max) * (h - 2) + 1)]);
+  g.beginPath();
+  g.moveTo(pts[0][0], y + h);
+  for (const [px, py] of pts) g.lineTo(px, py);
+  g.lineTo(x + w, y + h);
+  g.closePath();
+  g.fillStyle = COL.fill;
+  g.fill();
+  g.beginPath();
+  pts.forEach(([px, py], i) => (i ? g.lineTo(px, py) : g.moveTo(px, py)));
+  g.strokeStyle = colour;
+  g.lineWidth = 1.5;
+  g.stroke();
+}
+// Context over the last quarter hour, filled, against the window's size.
+function area(points, x, y, w, h) {
+  g.fillStyle = COL.faint;
+  g.fillRect(x, y, w, 1);
+  g.fillRect(x, y + h - 1, w, 1);
+  if (!points || !points.length) return;
+  const pts = points.map(([fx, fy]) => [x + fx * w, y + h - 1 - fy * (h - 2)]);
+  pts.push([x + w, pts[pts.length - 1][1]]);
+  g.beginPath();
+  g.moveTo(pts[0][0], y + h - 1);
+  for (const [px, py] of pts) g.lineTo(px, py);
+  g.lineTo(pts[pts.length - 1][0], y + h - 1);
+  g.closePath();
+  g.fillStyle = "#121212";
+  g.fill();
+  g.beginPath();
+  pts.forEach(([px, py], i) => (i ? g.lineTo(px, py) : g.moveTo(px, py)));
+  g.strokeStyle = COL.hi;
+  g.lineWidth = 2;
+  g.stroke();
+}
+function ring(frac, cx, cy, r, colour) {
+  g.lineWidth = 3;
+  g.strokeStyle = COL.faint;
+  g.beginPath();
+  g.arc(cx, cy, r, 0, Math.PI * 2);
+  g.stroke();
+  g.strokeStyle = colour;
+  g.beginPath();
+  g.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.min(1, frac));
+  g.stroke();
+}
+// Done bright, going mid, still to come an outline.
+function segments(done, doing, total, x, y, w, h) {
+  if (!total) return;
+  const n = Math.min(total, Math.floor(w / 6));
+  const sw = w / n;
+  for (let i = 0; i < n; i++) {
+    const k = ((i + 0.5) * total) / n;
+    rrect(x + i * sw, y, sw - 2, h, 2);
+    if (k <= done) { g.fillStyle = COL.hi; g.fill(); }
+    else if (k <= done + doing) { g.fillStyle = COL.lo; g.fill(); }
+    else { g.strokeStyle = COL.faint; g.lineWidth = 1; g.stroke(); }
+  }
+}
+const prWord = (p) => (p.state === "MERGED" ? "merged" : p.state === "CLOSED" ? "closed" : p.fail ? p.fail + " failing" : p.pending ? "CI " + p.pass + "/" + (p.pass + p.fail + p.pending) : p.state ? "CI green" : "");
+const loud = (s) => s.state === "needs" || s.state === "stalled" || s.state === "justDone";
+
+function drawSlide() {
+  g.fillStyle = "#000";
+  g.fillRect(0, 0, W, H);
+  g.textBaseline = "alphabetic";
+  const h = data.header || {};
+  const c = data.counts || {};
+  text("Claude Fleet", 10, 24, 19, COL.hi, 600);
+  textR(data.clock || "", W - 10, 24, 19, COL.hi, 600);
+  // Counts, each with its shape.
+  let x = 10;
+  const count = (state, n, label, colour) => {
+    if (!n) return;
+    stateIcon(state, x, 39, 5, colour);
+    x += 16 + text(n + " " + label, x + 14, 44, 13, colour, 500) + 8;
+  };
+  count("needs", c.needs, c.needs === 1 ? "needs you" : "need you", COL.hi);
+  count("stalled", c.stalled, "stuck", COL.hi);
+  count("working", c.working, "working", COL.mid);
+  if (c.agents) x += text(c.agents + (c.agents === 1 ? " agent" : " agents"), x, 44, 13, COL.lo) + 14;
+  if (c.workflows) text("≡ " + c.workflows + (c.workflows === 1 ? " workflow" : " workflows"), x, 44, 13, COL.lo);
+  if (!c.needs && !c.stalled && !c.working) text("all quiet", 10, 44, 13, COL.mid);
+  // The five-hour limit, always, with its forecast.
+  const pct = (h.five || "").match(/(\\d+)%/);
+  text("5h", 10, 63, 12, COL.lo, 600);
+  if (pct) {
+    pill(30, 55, 110, 6, Number(pct[1]) / 100, h.urgent ? COL.hi : COL.mid);
+    text((h.five || "").replace(/^5h\\s*/, ""), 148, 63, 12, h.urgent ? COL.hi : COL.mid, h.urgent ? 600 : 400, 250);
+  } else text((h.five || "").replace(/^5h:?\\s*/, ""), 30, 63, 12, COL.lo, 400, 300);
+  textR([h.week !== undefined ? "7d " + h.week + "%" : "", "cpu " + (h.cpu ?? 0) + "%", "mem " + (h.mem ?? 0) + "%", h.machines > 1 ? h.machines + " machines" : ""].filter(Boolean).join("  ·  "), W - 10, 63, 12, COL.lo);
+  g.fillStyle = COL.faint;
+  g.fillRect(10, 71, W - 20, 1);
+  // The sessions, as many lines each as there is room for.
+  const list = data.sessions || [];
+  // Five or more: one row each, so all of them are on the screen at once. Fewer: richer cards.
+  if (list.length >= 5) return drawRows(list);
+  const lines = list.length <= 2 ? 4 : 3;
+  const cardH = 8 + lines * 19;
+  const top = 77, bottom = 270;
+  const fit = Math.max(1, Math.floor((bottom - top + 4) / (cardH + 4)));
+  const first = Math.max(0, Math.min(sel - Math.floor(fit / 2), list.length - fit));
+  list.slice(first, first + fit).forEach((s, i) => {
+    const y = top + i * (cardH + 4);
+    if (first + i === sel) {
+      rrect(4, y, W - 8, cardH, 8);
+      g.strokeStyle = COL.hi;
+      g.lineWidth = 2;
+      g.stroke();
+      rrect(4, y + 6, 4, cardH - 12, 2);
+      g.fillStyle = COL.hi;
+      g.fill();
     }
-  } catch {
-    say("Can't reach fleet: is it running?");
-  } finally {
-    sending = false;
+    const ch = s.chart || {};
+    stateIcon(s.state, 14, y + 15, 6, loud(s) ? COL.hi : COL.mid);
+    const stateText = s.word.toLowerCase() + (s.time ? " " + s.time : "");
+    const sw = textR(stateText, W - 14, y + 20, 13, loud(s) ? COL.hi : COL.mid, loud(s) ? 600 : 400);
+    const nw = text(s.name, 32, y + 20, 16, COL.hi, 600, W - 60 - sw - 60);
+    if (s.host) text(s.host, 40 + nw, y + 20, 12, COL.lo, 400, 120);
+    // Line two: the question or what it is doing; activity and context to the right.
+    text(s.needs ? "? " + s.needs : s.now, 32, y + 39, 13, s.needs ? COL.hi : COL.mid, s.needs ? 500 : 400, W - 32 - 170);
+    spark(ch.spark, W - 160, y + 28, 90, 14, COL.mid);
+    if (s.ctx) {
+      ring(s.ctx.pct / 100, W - 52, y + 34, 7, s.ctx.pct >= 80 ? COL.hi : COL.mid);
+      text(s.ctx.pct + "%", W - 41, y + 39, 11, COL.lo);
+    }
+    if (lines >= 3) {
+      const wf = (ch.workflows || [])[0];
+      let x3 = 32;
+      if (wf) {
+        x3 += text("≡ " + wf.name + (wf.phase ? " · " + wf.phase : ""), x3, y + 58, 12, COL.lo, 400, 220) + 8;
+        segments(wf.done, wf.doing, wf.total, x3, y + 50, Math.min(110, wf.total * 10), 7);
+        x3 += Math.min(110, wf.total * 10) + 8;
+        x3 += text(wf.done + "/" + wf.total, x3, y + 58, 12, COL.lo) + 12;
+      } else if (s.doing) x3 += text("◐ " + s.doing, x3, y + 58, 12, COL.lo, 400, 260) + 12;
+      const extra = [s.agents ? s.agents + " agents" : "", ...(ch.prs || []).map((p) => "#" + p.n + " " + prWord(p)), s.fails ? s.fails + " failed" : ""].filter(Boolean).join("  ·  ");
+      if (extra) text(extra, x3, y + 58, 12, COL.lo, 400, W - 14 - x3);
+    }
+    if (lines >= 4 && s.said && !s.needs) text("Claude: " + s.said, 32, y + 77, 12, COL.lo, 400, W - 46);
+  });
+  if (!list.length) text("Nothing working, nothing waiting on you.", 32, 120, 15, COL.mid);
+  text("ring: choose   ·   tap: open   ·   double tap: exit", 10, 284, 11, COL.lo);
+  if (list.length > fit) textR(sel + 1 + " of " + list.length, W - 10, 284, 11, COL.lo);
+}
+
+// Five or more sessions: one row each: state, name and machine, what it needs or does, activity, context, state and time.
+function drawRows(list) {
+  const top = 77, rowH = 31;
+  const fit = Math.floor((272 - top) / rowH);
+  const first = Math.max(0, Math.min(sel - Math.floor(fit / 2), list.length - fit));
+  list.slice(first, first + fit).forEach((s, i) => {
+    const y = top + i * rowH;
+    if (first + i === sel) {
+      rrect(4, y, W - 8, rowH - 3, 7);
+      g.strokeStyle = COL.hi;
+      g.lineWidth = 2;
+      g.stroke();
+      rrect(4, y + 5, 4, rowH - 13, 2);
+      g.fillStyle = COL.hi;
+      g.fill();
+    }
+    const ch = s.chart || {};
+    const base = y + 19;
+    stateIcon(s.state, 14, base - 5, 5, loud(s) ? COL.hi : COL.mid);
+    const stateText = s.word.toLowerCase() + (s.time ? " " + s.time : "");
+    textR(stateText, W - 12, base, 12, loud(s) ? COL.hi : COL.lo, loud(s) ? 600 : 400, 112);
+    const nw = text(s.name, 30, base, 14, COL.hi, 600, 150);
+    const right = W - 12 - 112 - 14 - 92; // fixed columns, so the graphs line up row to row
+    text(s.needs ? "? " + s.needs : s.now, 38 + nw, base, 12, s.needs ? COL.hi : COL.lo, s.needs ? 500 : 400, right - 38 - nw - 6);
+    spark(ch.spark, right, base - 12, 60, 13, COL.mid);
+    if (s.ctx) ring(s.ctx.pct / 100, right + 80, base - 5, 6, s.ctx.pct >= 80 ? COL.hi : COL.mid);
+  });
+  text("ring: choose   ·   tap: open   ·   double tap: exit", 10, 284, 11, COL.lo);
+  if (list.length > fit) textR(sel + 1 + " of " + list.length, W - 10, 284, 11, COL.lo);
+}
+
+function drawDetail() {
+  g.fillStyle = "#000";
+  g.fillRect(0, 0, W, H);
+  const s = current();
+  if (!s) { text("That session has finished.", 20, 140, 18, COL.hi, 600); return; }
+  const ch = s.chart || {};
+  const h = data.header || {};
+  stateIcon(s.state, 10, 17, 7, loud(s) ? COL.hi : COL.mid);
+  const stateText = s.word.toLowerCase() + (s.time ? " " + s.time : "");
+  const sw = textR(stateText, W - 10, 22, 14, loud(s) ? COL.hi : COL.mid, 600);
+  text(s.name, 30, 23, 19, COL.hi, 600, W - 50 - sw);
+  textR(h.five || "", W - 10, 40, 11, h.urgent ? COL.hi : COL.lo, h.urgent ? 600 : 400, 280);
+  text(s.host ? s.host : "", 10, 40, 11, COL.lo, 400, 260);
+  wrapText(s.needs ? "? " + s.needs : s.now, W - 20, 14, 2).forEach((l, i) => text(l, 10, 59 + i * 17, 14, s.needs ? COL.hi : COL.mid, s.needs ? 500 : 400));
+  g.fillStyle = COL.faint;
+  g.fillRect(10, 84, W - 20, 1);
+  // Left: activity, context, tasks.
+  const L = 10, LW = 268;
+  text("Activity", L, 101, 12, COL.lo, 600);
+  textR((ch.tools || 0) + " tools · " + (ch.out || "0") + " out · " + (h.window || 30) + "m", L + LW, 101, 12, COL.mid);
+  bars(ch.spark || [], L, 107, LW, 46, COL.mid);
+  text("Context", L, 170, 12, COL.lo, 600);
+  if (s.ctx) textR(s.ctx.pct + "% of " + (s.ctx.max || "?") + (s.ctx.runway ? " · " + s.ctx.runway : ""), L + LW, 170, 12, s.ctx.pct >= 80 ? COL.hi : COL.mid);
+  area(ch.ctx || [], L, 176, LW, 40);
+  if (ch.tasks && ch.tasks.total) {
+    text("Tasks", L, 235, 12, COL.lo, 600);
+    textR(ch.tasks.done + " of " + ch.tasks.total + " done", L + LW, 235, 12, COL.mid);
+    segments(ch.tasks.done, ch.tasks.doing, ch.tasks.total, L, 241, LW, 8);
+    if (s.doing) text("◐ " + s.doing, L, 266, 12, COL.mid, 400, LW);
+  }
+  // Right: workflows, agents, pull requests, failures, then what Claude said, as room allows.
+  const R = 298, RW = 268;
+  let y = 101;
+  for (const wf of (ch.workflows || []).slice(0, 2)) {
+    const tw = textR((wf.phase ? wf.phase + " · " : "") + wf.done + "/" + wf.total, R + RW, y, 12, COL.mid);
+    text("≡ " + wf.name, R, y, 13, COL.hi, 600, RW - tw - 8);
+    segments(wf.done, wf.doing, wf.total, R, y + 6, RW, 8);
+    y += 30;
+  }
+  if ((ch.agents || []).length) {
+    text("Agents " + ch.agents.length, R, y, 12, COL.lo, 600);
+    y += 17;
+    for (const a of ch.agents.slice(0, Math.max(0, Math.floor((246 - y) / 17) + 1))) {
+      if (y > 246) break;
+      stateIcon(a.state === "active" ? "working" : a.state === "stalled" ? "stalled" : a.state === "tool" ? "stalled" : "idle", R, y - 4, 4, a.state === "stalled" ? COL.hi : COL.mid);
+      text(a.label, R + 13, y, 12, COL.mid, 400, RW - 100);
+      spark(a.spark, R + RW - 80, y - 11, 80, 12, COL.lo);
+      y += 17;
+    }
+  }
+  for (const p of (ch.prs || []).slice(0, 2)) {
+    if (y > 262) break;
+    const word = prWord(p);
+    text("#" + p.n + "  " + word, R, y + 4, 12, p.fail ? COL.hi : COL.mid, p.fail ? 600 : 400, 150);
+    const total = p.pass + p.fail + p.pending;
+    if (p.state === "OPEN" && total) {
+      g.fillStyle = COL.faint; g.fillRect(R + RW - 100, y - 3, 100, 6);
+      g.fillStyle = COL.mid; g.fillRect(R + RW - 100, y - 3, (100 * p.pass) / total, 6);
+      g.fillStyle = COL.hi; g.fillRect(R + RW - 100 + (100 * p.pass) / total, y - 3, (100 * p.fail) / total, 6);
+    }
+    y += 18;
+  }
+  if (s.fails && y <= 262) { text("✕ " + s.fails + " failed", R, y + 4, 12, COL.hi, 600); y += 18; }
+  if (s.said && !s.needs && y <= 252) {
+    text("Claude", R, y + 4, 12, COL.lo, 600);
+    y += 19;
+    for (const l of wrapText(s.said, RW, 12, Math.floor((270 - y) / 15) + 1)) { text(l, R, y, 12, COL.mid); y += 15; }
+  }
+  text("scroll: read   ·   tap: answer   ·   double tap: back", 10, 284, 11, COL.lo);
+}
+
+// The canvas, in four tiles; only those that changed go to the glasses, one at a time.
+async function sendCanvas() {
+  for (let i = 0; i < 4; i++) {
+    const t = tileCanvases[i];
+    const tg = t.getContext("2d");
+    tg.fillStyle = "#000";
+    tg.fillRect(0, 0, 288, 144);
+    tg.drawImage(canvas, (i % 2) * 288, Math.floor(i / 2) * 144, 288, 144, 0, 0, 288, 144);
+    const url = t.toDataURL("image/png");
+    if (url === sentTiles[i] || (view !== "slide" && view !== "detail")) continue;
+    const bytes = Uint8Array.from(atob(url.split(",")[1]), (c) => c.charCodeAt(0));
+    await bridge.updateImageRawData(new ImageRawDataUpdate({ containerID: 10 + i, containerName: "tile" + i, imageData: bytes }));
+    sentTiles[i] = url;
   }
 }
 
@@ -8644,12 +9000,12 @@ async function session(id) {
   if (!s) return slide();
   pages = paginate(bodyLines(s));
   page = Math.min(page, pages.length - 1);
-  await show({ containerTotalNum: 3, textObject: [text(1, "head", 0, 0, W, HEAD, headText(s), false), text(2, "body", 0, HEAD, W, H - HEAD - FOOT, pages[page], true), text(3, "foot", 0, H - FOOT, W, FOOT, footText(), false)] });
+  await show({ containerTotalNum: 3, textObject: [text0(1, "head", 0, 0, W, HEAD, headText(s), false), text0(2, "body", 0, HEAD, W, H - HEAD - FOOT, pages[page], true), text0(3, "foot", 0, H - FOOT, W, FOOT, footText(), false)] });
 }
 
 // ── answering: the choices on its own screen, Esc, Enter and quick replies ──
 const BASIC = () => [{ label: "Esc · stop or cancel", key: "X" }, { label: "Enter", key: "E" }, ...QUICK.map((x) => ({ label: "“" + x + "”", text: x }))];
-const answerPage = (note) => ({ containerTotalNum: 2, textObject: [text(1, "head", 0, 0, W, 36, cut(note, 52) + "   ·   2× tap: back", false)], listObject: [list(2, "choices", 36, H - 36, choices.map((c) => c.label))] });
+const answerPage = (note) => ({ containerTotalNum: 2, textObject: [text0(1, "head", 0, 0, W, 36, cut(note, 52) + "   ·   2× tap: back", false)], listObject: [list(2, "choices", 36, H - 36, choices.map((c) => c.label))] });
 async function answer() {
   const s = current();
   if (!s) return slide();
@@ -8673,11 +9029,11 @@ async function pick(i) {
   if (!c || !s) return;
   busy = true;
   const r = c.key ? await post("/api/keys", { sid, key: c.key }) : await post("/api/send", { sid, text: c.text });
-  await show({ containerTotalNum: 1, textObject: [text(1, "done", 0, 0, W, H, (r.ok ? "■ " + (c.key ? "Pressed " + (c.key === "X" ? "Esc" : c.key === "E" ? "Enter" : c.key) : "Sent") + " in " + s.name : "x Not done: " + (r.error || "fleet did not answer")), true)] });
+  await show({ containerTotalNum: 1, textObject: [text0(1, "done", 0, 0, W, H, (r.ok ? "■ " + (c.key ? "Pressed " + (c.key === "X" ? "Esc" : c.key === "E" ? "Enter" : c.key) : "Sent") + " in " + s.name : "x Not done: " + (r.error || "fleet did not answer")), true)] });
   setTimeout(async () => {
     busy = false;
     await refresh();
-    await session(sid);
+    await detail(sid);
   }, 1600);
 }
 
@@ -8699,13 +9055,39 @@ async function refresh() {
     say("Can't reach fleet: is it running?");
   }
 }
-// Every few seconds: the slide's changed tiles, or the open session's text in place.
+
+// The slide and a session's dashboard: four image tiles over an empty text layer that takes the ring and taps.
+const tileContainers = () => [0, 1, 2, 3].map((i) => new ImageContainerProperty({ xPosition: (i % 2) * 288, yPosition: Math.floor(i / 2) * 144, width: 288, height: 144, containerID: 10 + i, containerName: "tile" + i, zOrderIndex: i + 2 }));
+async function showCanvasView(name) {
+  view = name;
+  sentTiles = ["", "", "", ""];
+  await show({ containerTotalNum: 5, textObject: [text0(1, "input", 0, 0, W, H, " ", true, 1)], imageObject: tileContainers() });
+  await redraw();
+}
+async function redraw() {
+  if (sending) return;
+  sending = true;
+  try {
+    if (view === "slide") drawSlide();
+    else if (view === "detail") drawDetail();
+    else return;
+    await sendCanvas();
+  } finally {
+    sending = false;
+  }
+}
+const slide = () => showCanvasView("slide");
+const detail = (id) => { sid = id; page = 0; return showCanvasView("detail"); };
+
+// Every few seconds: the slide or dashboard redrawn (only changed tiles go), or the open text page in place.
 async function tick() {
   if (busy) return;
   await refresh();
   sel = Math.min(sel, Math.max(0, data.sessions.length - 1));
-  if (view === "slide") await sendTiles();
-  else if (view === "session") {
+  if (view === "slide" || view === "detail") {
+    if (view === "detail" && !current()) return slide();
+    await redraw();
+  } else if (view === "session") {
     const s = current();
     if (!s) return slide();
     const next = paginate(bodyLines(s));
@@ -8724,19 +9106,21 @@ bridge.onEvenHubEvent(async (e) => {
   const types = [typeOf(e.listEvent), typeOf(e.textEvent), typeOf(e.sysEvent)];
   if (types.includes(E.SYSTEM_EXIT_EVENT) || types.includes(E.ABNORMAL_EXIT_EVENT)) return;
   if (Date.now() < settleUntil) return;
-  if (e.listEvent) pickAt = e.listEvent.currentSelectItemIndex ?? 0; // the answer list's own choice; the slide keeps its session
+  if (e.listEvent) pickAt = e.listEvent.currentSelectItemIndex ?? 0;
   if (types.includes(E.DOUBLE_CLICK_EVENT)) {
-    if (view === "answer") return session(sid);
-    if (view === "session") return slide();
+    if (view === "answer" || view === "session") return detail(sid);
+    if (view === "detail") return slide();
     return bridge.shutDownPageContainer(1);
   }
   const down = types.includes(E.SCROLL_BOTTOM_EVENT), up = types.includes(E.SCROLL_TOP_EVENT);
   if (down || up) {
     if (view === "slide") {
       sel = Math.max(0, Math.min(data.sessions.length - 1, sel + (down ? 1 : -1)));
-      return sendTiles();
+      return redraw();
     }
+    if (view === "detail") { page = 0; return session(sid); } // the text, to read in full
     if (view === "session") {
+      if (up && page === 0) return detail(sid);
       page = Math.max(0, Math.min(pages.length - 1, page + (down ? 1 : -1)));
       await upgrade(2, "body", pages[page]);
       return upgrade(3, "foot", footText());
@@ -8745,8 +9129,8 @@ bridge.onEvenHubEvent(async (e) => {
   }
   if (types.includes(E.CLICK_EVENT)) {
     settleUntil = Date.now() + 800; // the other half of this tap
-    if (view === "slide" && data.sessions[sel]) { page = 0; return session(data.sessions[sel].sid); }
-    if (view === "session") return answer();
+    if (view === "slide" && data.sessions[sel]) return detail(data.sessions[sel].sid);
+    if (view === "detail" || view === "session") return answer();
     if (view === "answer") return pick(pickAt);
   }
 });
