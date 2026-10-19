@@ -6056,7 +6056,6 @@ export const WEB_PAGE = `<!doctype html>
 #splash{position:fixed;inset:0;z-index:50;background:radial-gradient(120% 80% at 50% 38%,#18212d 0%,var(--bg) 62%);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;perspective:800px;transition:opacity .24s ease-out,transform .24s ease-out}
 #splash.gone{opacity:0;transform:scale(1.04);pointer-events:none}
 #splash .tilt{position:relative;will-change:transform}
-#splash .ring{position:absolute;inset:-9px;border-radius:57px;padding:1px;opacity:0;background:conic-gradient(from var(--a,200deg),transparent 0deg,#ffffffd8 16deg,#ffffff30 40deg,transparent 64deg,transparent 170deg,#8fb8ff70 200deg,transparent 250deg);-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask:linear-gradient(#000 0 0) content-box exclude,linear-gradient(#000 0 0)}
 #splash .logo{position:relative;width:192px;height:192px;border-radius:48px;overflow:hidden;will-change:transform;box-shadow:0 1px 2px #0009,0px 6px 12px #0007,0px 18px 36px #0008,0px 40px 80px #000b,0px 26px 90px #3a5bff33,0 0 0 1px #ffffff14}
 #splash .logo img{width:100%;height:100%;display:block}
 #splash .logo b i.s{background:linear-gradient(115deg,transparent 36%,#ffffff30 43%,#fffffff0 50%,#ffffff30 57%,transparent 64%)}
@@ -6145,13 +6144,14 @@ details.tasks[open]>summary::before,details.wfg[open]>summary::before,details.ta
 .live{margin-top:8px;padding-left:10px;border-left:2px solid #2f3946}.live:empty{display:none}.live p{margin:6px 0;font-size:13px;white-space:pre-wrap}.live .you{color:var(--blue)}.live .st{color:var(--dim);font-size:12.5px;margin:4px 0}
 .sent{font-size:12px;margin-top:4px;color:var(--dim)}.sent.ok{color:var(--green)}.sent.err{color:var(--red)}
 </style></head><body>
-<div id="splash"><div class="tilt"><div class="ring"></div><div class="logo"><img src="__ICON__" alt=""><i class="d"></i><i class="s"></i><b><i class="d"></i><i class="s"></i></b></div></div><div class="title">Claude Fleet</div><div class="what" id="splash-what">Reaching your Mac…</div></div>
+<div id="splash"><div class="tilt"><div class="logo"><img src="__ICON__" alt=""><i class="d"></i><i class="s"></i><b><i class="d"></i><i class="s"></i></b></div></div><div class="title">Claude Fleet</div><div class="what" id="splash-what">Reaching your Mac…</div></div>
 <script>
 // The splash's motion, from one thing: how far the logo has turned. Two lights reflect off it, a sharp one and a
-// diffuse one from another side, so where each shows follows the turn exactly; the shadows, the title's sheen and
-// a fine border standing just off the logo too.
+// diffuse one from another side, so where each shows follows the turn; the shadows and the title's sheen too. The
+// lights go one way, left to right: they follow the furthest the logo has turned this time round, so as it swings
+// back they are already gone (the sharp one off the right edge, the diffuse one fading), and each turn starts afresh.
 (() => {
-  const sp = document.getElementById("splash"), tilt = sp.querySelector(".tilt"), logo = sp.querySelector(".logo"), ring = sp.querySelector(".ring"), title = sp.querySelector(".title");
+  const sp = document.getElementById("splash"), tilt = sp.querySelector(".tilt"), logo = sp.querySelector(".logo"), title = sp.querySelector(".title");
   const sharp = sp.querySelectorAll(".logo i.s"), soft = sp.querySelectorAll(".logo i.d");
   const DELAY = 225, CYCLE = 2400, L = 192;
   const YAW = [[0, 0], [0.15, -5], [0.55, 14], [0.9, 0], [1, 0]], PITCH = [[0, 0], [0.15, 2], [0.55, -4], [0.9, 0], [1, 0]];
@@ -6162,12 +6162,11 @@ details.tasks[open]>summary::before,details.wfg[open]>summary::before,details.ta
     const t = ms - DELAY, p = t < 0 ? 0 : (t % CYCLE) / CYCLE;
     const yaw = still ? 0 : along(YAW, p), pitch = still ? 0 : along(PITCH, p), lift = clamp(yaw / 14), x = -yaw * 1.4;
     tilt.style.transform = "rotateY(" + yaw + "deg) rotateX(" + pitch + "deg) translateY(" + -3 * lift + "px)";
-    ring.style.setProperty("--a", 200 + yaw * 9 + "deg"); // the border catches the lights as it turns, unseen at rest
-    ring.style.opacity = clamp(Math.abs(yaw) / 8);
     logo.style.boxShadow = "0 1px 2px #0009," + x * 0.3 + "px " + (6 + 2 * lift) + "px 12px #0007," + x * 0.6 + "px " + (18 + 4 * lift) + "px 36px #0008," + x + "px " + (40 + 8 * lift) + "px 80px #000b," + x * 0.5 + "px 26px 90px #3a5bff33,0 0 0 1px #ffffff14";
-    const xs = -0.6 + yaw * (1.75 / 14); // the sharp light: off the face at rest, across it as the logo turns
+    const furthest = p <= 0.55 ? Math.max(0, yaw) : 14; // the turn grows to its peak at 0.55 of the way round, then eases back
+    const xs = -0.6 + furthest * (2.1 / 14); // the sharp light: off the left edge at rest, clear off the right at the peak
     for (const e of sharp) e.style.transform = "translateX(" + (xs - 0.5) * L + "px)";
-    const xd = 0.2 + yaw * 0.03, yd = 0.32 - pitch * 0.05, od = clamp(yaw / 10); // the diffuse one, as the face turns to it
+    const xd = 0.2 + furthest * 0.03, yd = 0.32 - pitch * 0.05, od = clamp(yaw / 10); // the diffuse one, as the face turns to it
     for (const e of soft) { e.style.transform = "translate(" + (xd - 0.5) * L + "px," + (yd - 0.5) * L + "px)"; e.style.opacity = od; }
     title.style.backgroundPosition = 120 - 250 * clamp((xs + 0.1) / 1.25) + "% 0";
   }
