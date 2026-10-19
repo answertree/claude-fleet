@@ -2740,18 +2740,18 @@ export interface Facts {
   now: string; // one-line summary of what it is doing: the now-line
 }
 /**
- * Whether a background job is waiting on you. It says "blocked", or it records a question (`needs`) while it has
- * not finished: a question asked with AskUserQuestion is recorded while the job still says "working", and the
- * question is cleared as soon as it is answered.
+ * Whether a background job is waiting on you: it records a question (`needs`) and has not finished. The question is
+ * recorded while the job may still say "working", and cleared as soon as it is answered. "blocked" alone is not
+ * you: a job says it while it waits on its own background tasks (workflows, commands, monitors), with no question.
  */
-export const jobWaiting = (job: { state: string; needs: string }): boolean => job.state === "blocked" || (!!job.needs && !["done", "failed", "stopped", "error", "cancelled"].includes(job.state));
+export const jobWaiting = (job: { state: string; needs: string }): boolean => !!job.needs && !["done", "failed", "stopped", "error", "cancelled"].includes(job.state);
 export function factsOf(s: Session): Facts {
   const main = [...s.mains].sort((x, y) => y.mtime - x.mtime)[0];
   const ask = main && pendingOf(main)?.name === "AskUserQuestion" ? pendingOf(main) : undefined;
   const needs = ask
     ? ask.hint || "has a question for you"
     : s.job && jobWaiting(s.job)
-      ? s.job.needs || s.job.detail || "waiting on you"
+      ? s.job.needs
       : "";
   const idle = s.status !== "busy";
   // A background job says so itself; otherwise: idle, and Claude spoke last.
@@ -2954,6 +2954,7 @@ export const seen = {
 export function markSeen(now: number) {
   seen.at = now;
   seen.events = [];
+  heldOpen.clear(); // the finished sessions you have now seen go quietly
 }
 /** Is this timestamp new since you last looked? Replies newer than the mark get a bold ◆ and the word "new" for an age. */
 export const isNew = (t: number): boolean => t > seen.at;
@@ -3090,7 +3091,9 @@ export function fleetCounts(sessions: Session[], now: number, since = frameWindo
     const f = factsOf(s);
     const state = sessionState(f, stallOf(s, f, now).count > 0);
     if (state === "needs") c.needs++;
-    else if (isQuiet(s, f, since)) c.idle++;
+    else if (isQuiet(s, f, since)) {
+      if (!heldOpen.has(s.sid)) c.idle++; // a finished session still on show is not kept off the screen
+    }
     else if (state === "stalled") c.stalled++;
     else c.working++;
     c.agents += [...s.agents, ...s.workflows.flatMap((w) => w.agents)].filter((a) => !a.done && lastWriteOf(a.tail) >= since).length;
@@ -3184,7 +3187,33 @@ export function buildViews(sessions: Session[], now: number, since = frameWindow
 }
 
 /** Kept off the screen unless --all: see isQuiet(). */
-export const isHidden = (v: View): boolean => v.quiet;
+/**
+ * Sessions that finished while you watched: each has its party, and stays on the screen until you press space (seen
+ * it), rather than vanishing the moment it goes quiet. Noted on each scan by noteFinished().
+ */
+export const heldOpen = new Map<string, number>();
+const wasShown = new Set<string>();
+let finishPrimed = false;
+export function noteFinished(sessions: Session[], now: number): string[] {
+  const finished: string[] = [];
+  const live = new Set(sessions.map((s) => s.sid));
+  for (const v of buildViews(sessions, now)) {
+    const sid = v.s.sid;
+    if (v.quiet && finishPrimed && wasShown.has(sid) && !heldOpen.has(sid)) {
+      heldOpen.set(sid, now);
+      parties.set(sid, { text: "finished", at: now });
+      finished.push(sid);
+    }
+    if (!v.quiet) heldOpen.delete(sid); // busy again: an ordinary session once more
+    if (v.quiet && !heldOpen.has(sid)) wasShown.delete(sid);
+    else wasShown.add(sid);
+  }
+  for (const sid of heldOpen.keys()) if (!live.has(sid)) heldOpen.delete(sid);
+  for (const sid of wasShown) if (!live.has(sid)) wasShown.delete(sid);
+  finishPrimed = true;
+  return finished;
+}
+export const isHidden = (v: View): boolean => v.quiet && !heldOpen.has(v.s.sid);
 /**
  * The session tab moves the focus to from `current` (null: none is focused): the next one down the
  * screen, in the order the screen lists them, so the first press lands on whoever needs you. Sessions
@@ -3632,7 +3661,7 @@ const EARLIER_TONE = mix(C.cyan, C.faint, 0.5); // ◇: cyan mixed halfway to fa
 export function blockOf(v: View, g: Grid, now: number, win: Win, focus = false): Block {
   const { s, facts: f, state } = v;
   const m = f.main;
-  const body = focus || !v.quiet;
+  const body = focus || !isHidden(v);
   const brief = opt.mode === "compact" && !focus; // compact: no conversation and no lines under tasks (focus shows them all)
   const subW = g.textEnd - g.icon + 1;
   const typed = oneLine(m?.ask?.text || m?.lastPrompt || "");
@@ -8792,7 +8821,7 @@ function refresh() {
   }
   if (opt.bell && !opt.once) process.stdout.write("\x07".repeat(rings));
   noteScan(sessions, now);
-  const partied = noteParties(sessions, now);
+  const partied = [...noteParties(sessions, now), ...noteFinished(sessions, now).map((sid) => `${sid} finished`)];
   if (botHere) void tgTick(sessions, now, partied);
   if (opt.bell && !opt.once && partied.length) process.stdout.write("\x07");
 }
