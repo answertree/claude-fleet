@@ -6055,15 +6055,16 @@ export const WEB_PAGE = `<!doctype html>
 <style>html,body{background:#0d1117}
 #splash{position:fixed;inset:0;z-index:50;background:radial-gradient(120% 80% at 50% 38%,#18212d 0%,var(--bg) 62%);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;perspective:800px;transition:opacity .24s ease-out,transform .24s ease-out}
 #splash.gone{opacity:0;transform:scale(1.04);pointer-events:none}
-#splash .logo{position:relative;width:192px;height:192px;border-radius:48px;overflow:hidden;will-change:transform;box-shadow:0 1px 2px #0009,0px 6px 12px #0007,0px 18px 36px #0008,0px 40px 80px #000b,0px 26px 90px #3a5bff33,0 0 0 1px #ffffff14;animation:tilt 2.4s ease-in-out .225s infinite}
+#splash .tilt{position:relative;will-change:transform}
+#splash .ring{position:absolute;inset:-9px;border-radius:57px;padding:1px;opacity:0;background:conic-gradient(from var(--a,200deg),transparent 0deg,#ffffffd8 16deg,#ffffff30 40deg,transparent 64deg,transparent 170deg,#8fb8ff70 200deg,transparent 250deg);-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask:linear-gradient(#000 0 0) content-box exclude,linear-gradient(#000 0 0)}
+#splash .logo{position:relative;width:192px;height:192px;border-radius:48px;overflow:hidden;will-change:transform;box-shadow:0 1px 2px #0009,0px 6px 12px #0007,0px 18px 36px #0008,0px 40px 80px #000b,0px 26px 90px #3a5bff33,0 0 0 1px #ffffff14}
 #splash .logo img{width:100%;height:100%;display:block}
-#splash .logo b i{background:linear-gradient(115deg,transparent 36%,#ffffff30 43%,#fffffff0 50%,#ffffff30 57%,transparent 64%)}
+#splash .logo b i.s{background:linear-gradient(115deg,transparent 36%,#ffffff30 43%,#fffffff0 50%,#ffffff30 57%,transparent 64%)}
+#splash .logo i.d{background:radial-gradient(circle at 50% 50%,#ffffff3a 0,#ffffff14 18%,transparent 34%);opacity:0}
+#splash .logo b i.d{background:radial-gradient(circle at 50% 50%,#ffffff80 0,#ffffff2a 18%,transparent 34%)}
 #splash .logo b{position:absolute;inset:0;overflow:hidden;-webkit-mask:url(__LOGO_MASK__) center/100% 100% no-repeat;mask:url(__LOGO_MASK__) center/100% 100% no-repeat}
-#splash .logo i{position:absolute;inset:-40%;background:linear-gradient(115deg,transparent 38%,#ffffff10 44%,#ffffffb0 50%,#ffffff10 56%,transparent 62%);transform:translateX(-70%);animation:shine 2.4s cubic-bezier(.4,0,.2,1) .225s infinite}
-@keyframes shine{0%{transform:translateX(-70%)}60%,100%{transform:translateX(70%)}}
-@keyframes tilt{0%,90%,100%{transform:rotateY(0) rotateX(0) translateY(0);box-shadow:0 1px 2px #0009,0px 6px 12px #0007,0px 18px 36px #0008,0px 40px 80px #000b,0px 26px 90px #3a5bff33,0 0 0 1px #ffffff14}25%{transform:rotateY(-10deg) rotateX(5deg) translateY(-3px);box-shadow:0 1px 2px #0009,5px 6px 12px #0007,10px 18px 36px #0008,16px 40px 80px #000b,8px 26px 90px #3a5bff33,0 0 0 1px #ffffff14}58%{transform:rotateY(9deg) rotateX(-3deg) translateY(-3px);box-shadow:0 1px 2px #0009,-4px 6px 12px #0007,-8px 18px 36px #0008,-14px 40px 80px #000b,-7px 26px 90px #3a5bff33,0 0 0 1px #ffffff14}}
-#splash .title{font-size:22px;font-weight:700;letter-spacing:-.01em;background:linear-gradient(100deg,#8a95a5 30%,#fff 50%,#8a95a5 70%);background-size:250% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:sheen 2.4s linear .225s infinite}
-@keyframes sheen{0%{background-position:120% 0}60%,100%{background-position:-130% 0}}
+#splash .logo i{position:absolute;inset:-40%;will-change:transform,opacity}#splash .logo i.s{background:linear-gradient(115deg,transparent 38%,#ffffff10 44%,#ffffffb0 50%,#ffffff10 56%,transparent 62%);transform:translateX(-211px)}
+#splash .title{font-size:22px;font-weight:700;letter-spacing:-.01em;background:linear-gradient(100deg,#8a95a5 30%,#fff 50%,#8a95a5 70%);background-size:250% 100%;background-position:120% 0;-webkit-background-clip:text;background-clip:text;color:transparent}
 #splash .what{color:var(--dim);font-size:13px;min-height:1.4em}</style>
 __STARTUP__
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
@@ -6141,9 +6142,46 @@ details.tasks[open]>summary::before,details.wfg[open]>summary::before,details.ta
 .pick.armed{background:var(--amber);color:#1a1405;border-color:var(--amber)}.pick.armed .k{background:#00000022;color:#1a1405}
 .chips{display:flex;flex-wrap:nowrap;gap:6px;margin:6px -14px 8px;padding:0 14px;overflow-x:auto;scroll-snap-type:x proximity;-webkit-overflow-scrolling:touch;scrollbar-width:none;-webkit-mask-image:linear-gradient(90deg,transparent 0,#000 14px,#000 calc(100% - 28px),transparent);mask-image:linear-gradient(90deg,transparent 0,#000 14px,#000 calc(100% - 28px),transparent)}.chips::-webkit-scrollbar{display:none}.chips .chip{flex:none;white-space:nowrap;scroll-snap-align:start}.chip{background:transparent;color:var(--text);border:1px solid #2f3946;border-radius:999px;padding:7px 12px;font:500 13.5px -apple-system,system-ui,sans-serif}
 .chip.key{color:var(--dim)}.chip.armed{background:var(--amber);color:#1a1405;border-color:var(--amber)}.picks-note{color:var(--dim);font-size:12px;margin:6px 0 2px}
+.live{margin-top:8px;padding-left:10px;border-left:2px solid #2f3946}.live:empty{display:none}.live p{margin:6px 0;font-size:13px;white-space:pre-wrap}.live .you{color:var(--blue)}.live .st{color:var(--dim);font-size:12.5px;margin:4px 0}
 .sent{font-size:12px;margin-top:4px;color:var(--dim)}.sent.ok{color:var(--green)}.sent.err{color:var(--red)}
 </style></head><body>
-<div id="splash"><div class="logo"><img src="__ICON__" alt=""><i></i><b><i></i></b></div><div class="title">Claude Fleet</div><div class="what" id="splash-what">Reaching your Mac…</div></div>
+<div id="splash"><div class="tilt"><div class="ring"></div><div class="logo"><img src="__ICON__" alt=""><i class="d"></i><i class="s"></i><b><i class="d"></i><i class="s"></i></b></div></div><div class="title">Claude Fleet</div><div class="what" id="splash-what">Reaching your Mac…</div></div>
+<script>
+// The splash's motion, from one thing: how far the logo has turned. Two lights reflect off it, a sharp one and a
+// diffuse one from another side, so where each shows follows the turn exactly; the shadows, the title's sheen and
+// a fine border standing just off the logo too.
+(() => {
+  const sp = document.getElementById("splash"), tilt = sp.querySelector(".tilt"), logo = sp.querySelector(".logo"), ring = sp.querySelector(".ring"), title = sp.querySelector(".title");
+  const sharp = sp.querySelectorAll(".logo i.s"), soft = sp.querySelectorAll(".logo i.d");
+  const DELAY = 225, CYCLE = 2400, L = 192;
+  const YAW = [[0, 0], [0.15, -5], [0.55, 14], [0.9, 0], [1, 0]], PITCH = [[0, 0], [0.15, 2], [0.55, -4], [0.9, 0], [1, 0]];
+  const along = (pts, p) => { for (let k = 1; k < pts.length; k++) if (p <= pts[k][0]) { const [p0, v0] = pts[k - 1], [p1, v1] = pts[k], u = (p - p0) / (p1 - p0); return v0 + (v1 - v0) * u * u * (3 - 2 * u); } return 0; };
+  const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const clamp = (v) => Math.max(0, Math.min(1, v));
+  function pose(ms) {
+    const t = ms - DELAY, p = t < 0 ? 0 : (t % CYCLE) / CYCLE;
+    const yaw = still ? 0 : along(YAW, p), pitch = still ? 0 : along(PITCH, p), lift = clamp(yaw / 14), x = -yaw * 1.4;
+    tilt.style.transform = "rotateY(" + yaw + "deg) rotateX(" + pitch + "deg) translateY(" + -3 * lift + "px)";
+    ring.style.setProperty("--a", 200 + yaw * 9 + "deg"); // the border catches the lights as it turns, unseen at rest
+    ring.style.opacity = clamp(Math.abs(yaw) / 8);
+    logo.style.boxShadow = "0 1px 2px #0009," + x * 0.3 + "px " + (6 + 2 * lift) + "px 12px #0007," + x * 0.6 + "px " + (18 + 4 * lift) + "px 36px #0008," + x + "px " + (40 + 8 * lift) + "px 80px #000b," + x * 0.5 + "px 26px 90px #3a5bff33,0 0 0 1px #ffffff14";
+    const xs = -0.6 + yaw * (1.75 / 14); // the sharp light: off the face at rest, across it as the logo turns
+    for (const e of sharp) e.style.transform = "translateX(" + (xs - 0.5) * L + "px)";
+    const xd = 0.2 + yaw * 0.03, yd = 0.32 - pitch * 0.05, od = clamp(yaw / 10); // the diffuse one, as the face turns to it
+    for (const e of soft) { e.style.transform = "translate(" + (xd - 0.5) * L + "px," + (yd - 0.5) * L + "px)"; e.style.opacity = od; }
+    title.style.backgroundPosition = 120 - 250 * clamp((xs + 0.1) / 1.25) + "% 0";
+  }
+  const t0 = performance.now();
+  let stopAt = Infinity, held = false;
+  const frame = () => { if (held) return; const ms = performance.now() - t0; if (ms >= stopAt) return pose(0); pose(ms); requestAnimationFrame(frame); };
+  pose(0); requestAnimationFrame(frame);
+  window.splashMotion = {
+    // How long until the logo is back at rest at the end of a turn; it stays at rest from then.
+    untilRest() { if (still) return 0; const t = performance.now() - t0 - DELAY, left = t < 0 ? CYCLE - t : CYCLE - (t % CYCLE); stopAt = performance.now() - t0 + left; return left; },
+    hold(ms) { held = true; pose(ms); }, // to look at one moment
+  };
+})();
+</script>
 <header><h1><img src="/icon-192.png" alt="">Claude Fleet</h1><span id="clock"></span></header>
 <div id="quip">Waking the fleet…</div>
 <div class="gauges" id="gauges"></div>
@@ -6417,19 +6455,20 @@ function card(s) {
   if (s.tasks && s.tasks.total) c.append(taskList(s.tasks));
   if (R && (R.main || R.workflows.length || R.agents.length || R.finished)) c.append(roster(R));
   if (s.talk.length) { const d = el("details", "talk"); if (s.state === "needs") d.open = true; d.append(el("summary", "", "conversation")); for (const m of s.talk) d.append(talkLine(s.sid, m)); c.append(d); }
-  const m = el("details", "message"); if (s.state === "needs") m.open = true; m.append(el("summary", "", s.state === "needs" ? "answer" : "send a message"));
+  const m = el("details", "message"); if (s.state === "needs" || following.has(s.sid)) m.open = true; m.append(el("summary", "", s.state === "needs" ? "answer" : "send a message"));
   const f = el("form", "send"); const ta = el("textarea"); ta.rows = 2; ta.placeholder = s.state === "needs" ? "your answer…" : "type to " + s.name + "…"; ta.value = drafts.get(s.sid) || ""; ta.dataset.sid = s.sid;
   ta.addEventListener("input", () => drafts.set(s.sid, ta.value));
   m.append(answerButtons(s));
   const go = el("button", "", "Send"); go.type = "submit"; f.append(ta, go); m.append(f);
   const note = el("div", "sent" + (notes.get(s.sid)?.cls ? " " + notes.get(s.sid).cls : ""), notes.get(s.sid)?.text || ""); m.append(note);
+  m.append(liveBox(s));
   f.addEventListener("submit", async (e) => {
     e.preventDefault(); const text = ta.value.trim(); if (!text) return;
     go.disabled = true; note.className = "sent"; note.textContent = "sending…";
     try {
       const r = await fetch("api/send?t=" + encodeURIComponent(token), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sid: s.sid, text }) });
       const d = await r.json().catch(() => ({ ok: false, error: "fleet said " + r.status }));
-      if (d.ok) { drafts.delete(s.sid); ta.value = ""; notes.set(s.sid, { cls: "ok", text: "sent ✓ " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) }); }
+      if (d.ok) { following.set(s.sid, { text, at: Date.now() }); drafts.delete(s.sid); ta.value = ""; notes.set(s.sid, { cls: "ok", text: "sent ✓ " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) }); }
       else notes.set(s.sid, { cls: "err", text: "not sent: " + (d.error || "unknown") });
     } catch { notes.set(s.sid, { cls: "err", text: "not sent: can't reach fleet" }); }
     const n = notes.get(s.sid); note.className = "sent " + n.cls; note.textContent = n.text; go.disabled = false; ta.blur(); tick();
@@ -6439,15 +6478,13 @@ function card(s) {
   return c;
 }
 let last = 0, open = new Map();
-// The splash plays its shine to the end of a sweep, holds 400 ms on the logo, then the app fades in quickly.
+// The splash finishes its turn (the logo back at rest), holds 400 ms on the logo, then the app fades in quickly.
 let leaving = false;
 function leaveSplash() {
   const sp = document.getElementById("splash");
   if (!sp || leaving) return;
   leaving = true;
-  const a = sp.querySelector(".logo i").getAnimations()[0];
-  const local = a ? Number(a.currentTime) - 225 : 1440, phase = local < 0 ? local : local % 2400; // its delay, a cycle, the end of its sweep
-  const wait = phase < 0 ? 1440 - phase : phase < 1440 ? 1440 - phase : 0;
+  const wait = window.splashMotion ? splashMotion.untilRest() : 0;
   setTimeout(() => { sp.classList.add("gone"); setTimeout(() => sp.remove(), 300); }, wait + 400);
 }
 // Finished cards a swipe has put away, by session, kept on this phone.
@@ -6485,6 +6522,20 @@ function swipeAway(c, sid) {
   c.addEventListener("pointerup", end); c.addEventListener("pointercancel", end);
 }
 const drafts = new Map(), notes = new Map();
+// After you send: your words, what the session is doing, and its replies as they are written; kept up to date even
+// while you type the next one (the rest of the card holds still then). For a quarter of an hour.
+const following = new Map(); // sid → { text, at }
+function liveBox(s) {
+  const box = el("div", "live"), f = following.get(s.sid);
+  if (!f || Date.now() - f.at > 15 * 60_000) { following.delete(s.sid); return box; }
+  box.append(el("p", "you", "▸ " + f.text));
+  const replies = s.talk.filter((m) => m.who === "claude" && m.t >= f.at - 3000);
+  for (const m of replies) box.append(talkLine(s.sid, m));
+  const busy = s.state === "working" || s.state === "stalled";
+  const st = el("div", "st" + (busy ? " pulse" : ""), busy ? "◐ " + (s.sub && s.sub.source !== "reply" && s.sub.text ? s.sub.text : "thinking…") : s.state === "needs" ? "▲ it's asking you something" : replies.length ? "" : "waiting for Claude…");
+  if (st.textContent) box.append(st);
+  return box;
+}
 // Asked twice a second; the page is only redrawn when what fleet says has changed, or when you have done something.
 let lastText = "";
 async function tick(force = true) {
@@ -6505,7 +6556,10 @@ async function tick(force = true) {
     fivePanel(d.five);
     const cards = document.getElementById("cards");
     // Never redraw under your thumbs: while you are typing a message the cards hold still.
-    if (document.activeElement && document.activeElement.tagName === "TEXTAREA" && cards.contains(document.activeElement)) return void (lastText = "");
+    if (document.activeElement && document.activeElement.tagName === "TEXTAREA" && cards.contains(document.activeElement)) {
+      for (const c of cards.querySelectorAll(".card")) { const s = d.sessions.find((x) => x.sid === c.dataset.sid), old = c.querySelector(".live"); if (s && old) old.replaceWith(liveBox(s)); }
+      return void (lastText = "");
+    }
     for (const det of cards.querySelectorAll("details")) open.set(det.closest(".card")?.dataset.sid + det.className, det.open);
     if (swiping || (!force && Date.now() < touchedUntil)) return void (lastText = ""); // nor under a card being swiped, or a finger scrolling
     const build = (s) => { const c = card(s); c.dataset.sid = s.sid; for (const det of c.querySelectorAll("details")) { const k = s.sid + det.className; if (open.has(k)) det.open = open.get(k); } return c; };
@@ -6760,27 +6814,16 @@ function withSession(s: Session, fn: (server: string[], pane: string, via: strin
     if (process.platform === "win32") return { ok: false, error: "reaching a session needs tmux, so it does not work on Windows" };
     if (spawnSync(tmuxCmd(), ["-V"], { timeout: 3000 }).status !== 0) return { ok: false, error: "reaching a session needs tmux, which is not installed" };
     if (s.jobId) {
-      const server = ["-L", `fleet-send-${process.pid}`];
-      spawnSync(tmuxCmd(), [...server, "kill-server"], { timeout: 3000 });
-      const attach = process.env.FLEET_ATTACH_CMD || "claude";
-      if (spawnSync(tmuxCmd(), [...server, "new-session", "-d", "-x", "120", "-y", "40", attach, "attach", s.jobId], { timeout: 5000 }).status !== 0) return { ok: false, error: "could not open the session" };
-      try {
-        // Ready once it has drawn its prompt (the input line, or a choice) and the screen has stopped changing.
-        let last = "";
-        let ready = false;
-        for (let i = 0; i < 60 && !ready; i++) {
-          await pause(250);
-          // claude attach has already exited (no such session, or it could not attach): no point waiting.
-          if (spawnSync(tmuxCmd(), [...server, "has-session"], { timeout: 3000 }).status !== 0) return { ok: false, error: "could not open the session" };
-          const screen = spawnSync(tmuxCmd(), [...server, "capture-pane", "-p"], { encoding: "utf8", timeout: 3000 }).stdout ?? "";
-          ready = screen.includes("❯") && screen === last;
-          last = screen;
-        }
-        if (!ready) return { ok: false, error: "the session did not open in time" };
-        return await fn(server, "0", "attach");
-      } finally {
-        spawnSync(tmuxCmd(), [...server, "kill-server"], { timeout: 3000 });
+      // Twice if need be: an attach that does not open is tried once more, a moment later, in a fresh tmux.
+      let r = await attachAnd(s, fn);
+      if (!r.ok && r.retry) {
+        svcLog(`could not open ${s.name || s.sid.slice(0, 8)} (${r.error}); trying again${r.screen ? `. Its screen: ${safeLine(r.screen.trim().split("\n").slice(-3).join(" ⏎ ")).slice(0, 300)}` : ""}`);
+        await pause(1500);
+        r = await attachAnd(s, fn);
+        if (!r.ok && r.retry) svcLog(`could not open ${s.name || s.sid.slice(0, 8)} again (${r.error})${r.screen ? `. Its screen: ${safeLine(r.screen.trim().split("\n").slice(-3).join(" ⏎ ")).slice(0, 300)}` : ""}`);
       }
+      const { retry: _, ...out } = r;
+      return out;
     }
     const pane = paneOf(s.pid);
     if (!pane) return { ok: false, error: "this session is not a background session or in tmux, so it cannot be reached from here" };
@@ -6789,6 +6832,31 @@ function withSession(s: Session, fn: (server: string[], pane: string, via: strin
   const next = sendChain.then(run, run);
   sendChain = next.catch(() => {});
   return next;
+}
+let attachN = 0;
+/** Open a background session with `claude attach` in a hidden tmux of its own, run `fn` once it is ready, close it. */
+async function attachAnd(s: Session, fn: (server: string[], pane: string, via: string) => Promise<Reach> | Reach): Promise<Reach & { retry?: boolean }> {
+  const server = ["-L", `fleet-send-${process.pid}-${++attachN}`];
+  const attach = process.env.FLEET_ATTACH_CMD || "claude";
+  if (spawnSync(tmuxCmd(), [...server, "new-session", "-d", "-x", "120", "-y", "40", attach, "attach", s.jobId!], { timeout: 5000 }).status !== 0) return { ok: false, error: "could not open the session", retry: true };
+  try {
+    // Ready once its prompt (the input line, or a choice) is drawn and either the screen has settled or the prompt
+    // has stood for a second: a session that is thinking keeps its spinner turning, and takes a message all the same.
+    let last = "", promptSince = 0, screen = "";
+    for (let i = 0; i < 60; i++) {
+      await pause(250);
+      // claude attach has already exited (no such session, or it could not attach): no point waiting.
+      if (spawnSync(tmuxCmd(), [...server, "has-session"], { timeout: 3000 }).status !== 0) return { ok: false, error: "could not open the session", retry: true, screen };
+      screen = spawnSync(tmuxCmd(), [...server, "capture-pane", "-p"], { encoding: "utf8", timeout: 3000 }).stdout ?? "";
+      if (!screen.includes("❯")) promptSince = 0;
+      else if (!promptSince) promptSince = i;
+      if (promptSince && (screen === last || i - promptSince >= 4)) return await fn(server, "0", "attach");
+      last = screen;
+    }
+    return { ok: false, error: "the session did not open in time", retry: true, screen };
+  } finally {
+    spawnSync(tmuxCmd(), [...server, "kill-server"], { timeout: 3000 });
+  }
 }
 /** Type a message into a session, as if you had typed it there, on whichever machine it is on. */
 export function sendToSession(s: Session, raw: string): Promise<Reach> {
@@ -7141,6 +7209,9 @@ export function tgSettle(waiting: Set<string>, stuck: Set<string> = new Set()) {
   tgStatusWrite(keep);
 }
 const tgName = (s: Session) => (s.name || path.basename(s.cwd)) + (machineOf(s) ? ` (${machineOf(s)})` : "");
+/** The session you last wrote to from Telegram, and when: plain words follow it for half an hour. */
+let tgLastTo: { sid: string; at: number } | undefined;
+const TG_TALK_MS = 30 * 60_000;
 /** What fleet does with a message from Telegram: pairing, a reply to a session, or a short status. */
 export async function tgHandle(update: any): Promise<void> {
   const q = update?.callback_query;
@@ -7165,13 +7236,22 @@ export async function tgHandle(update: any): Promise<void> {
   }
   if (m.chat.id !== c.chat || (c.user && m.from?.id !== c.user)) return;
   const text = m.text.trim();
-  const target = typeof m.reply_to_message?.message_id === "number" ? tgSent.get(m.reply_to_message.message_id) : undefined;
+  // Where it goes: the session of the message it replies to; or, for plain words (not a /command) with no reply,
+  // the session you last wrote to, within half an hour, so a second message needs no reply to find.
+  const replied = typeof m.reply_to_message?.message_id === "number" ? tgSent.get(m.reply_to_message.message_id) : undefined;
+  const target = replied ?? (!text.startsWith("/") && tgLastTo && Date.now() - tgLastTo.at < TG_TALK_MS ? tgLastTo.sid : undefined);
   if (target) {
     const s = tg.getSessions().find((x) => x.sid === target);
     if (!s) return void (await say("That session has finished, so I can't send to it."));
     const r = await (web.send ?? sendToSession)(s, text);
     const ack = await say(r.ok ? `✓ sent to ${tgName(s)}` : `✗ not sent: ${r.error}`);
-    if (r.ok) tgExpire(ack.result?.message_id, 60_000);
+    // Your message and the receipt belong to the session too, so a reply to either reaches it.
+    rememberTg(m.message_id, s.sid);
+    if (typeof ack.result?.message_id === "number") rememberTg(ack.result.message_id, s.sid);
+    if (r.ok) {
+      tgLastTo = { sid: s.sid, at: Date.now() };
+      tgExpire(ack.result?.message_id);
+    }
     return;
   }
   const cmd = text.split(/[\s@]/)[0].toLowerCase().replace(/^\//, "");
@@ -7236,7 +7316,7 @@ export const TG_COMMANDS = [
   { command: "screen", description: "a picture of the fleet, or /screen <session>" },
   { command: "help", description: "what I can do" },
 ];
-const TG_HELP = TG_COMMANDS.map((x) => `/${x.command} — ${x.description}`).join("\n") + "\n\nReply to any of my messages to send your reply to that session. Menus and pictures tidy themselves away after ten minutes.";
+const TG_HELP = TG_COMMANDS.map((x) => `/${x.command} — ${x.description}`).join("\n") + "\n\nReply to any of my messages to send your reply to that session; after that, just type, and it goes to the same session for half an hour. Menus and pictures tidy themselves away after ten minutes.";
 
 type TgView = { text: string; markup?: unknown };
 // Everything the detail view shows, a section at a time: as commands, and as a menu that changes in place.
@@ -7611,6 +7691,7 @@ let prWasLoaded = "";
 /** Forget what this run has seen, as a restart does (tests). */
 export function tgForgetRun() {
   prWasLoaded = "";
+  tgLastTo = undefined;
   tg.was.pr.clear();
   tg.was.ready = false;
 }

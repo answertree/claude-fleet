@@ -5149,6 +5149,13 @@ describe("key t: Telegram", () => {
       await F.tgHandle({ message: { message_id: 9, text: "yes, drop it", chat: { id: 42 }, from: { id: 7 }, reply_to_message: { message_id: promptId } } });
       expect(sent).toEqual([["s1", "yes, drop it"]]);
       expect(calls.at(-1)![1].text).toBe("✓ sent to checkout flow");
+      // A second message: plain words follow the session just written to; a reply to the receipt, or to your own message, reaches it too.
+      const ackId = 100 + calls.length;
+      await F.tgHandle({ message: { message_id: 11, text: "and keep the old column for a week", chat: { id: 42 }, from: { id: 7 } } });
+      await F.tgHandle({ message: { message_id: 12, text: "thanks", chat: { id: 42 }, from: { id: 7 }, reply_to_message: { message_id: ackId } } });
+      await F.tgHandle({ message: { message_id: 13, text: "one more", chat: { id: 42 }, from: { id: 7 }, reply_to_message: { message_id: 9 } } });
+      expect(sent.map(([, t]) => t)).toEqual(["yes, drop it", "and keep the old column for a week", "thanks", "one more"]);
+      sent.length = 1;
       // Once the session stops waiting, the question is deleted.
       F.tgSettle(new Set(["s1"]));
       await Bun.sleep(50);
@@ -5659,6 +5666,27 @@ describe("a fleet window and the background service", () => {
     const body = new TextDecoder().decode(Bun.gunzipSync(F.peerState([], Date.now()).body));
     expect(JSON.parse(body).build).toBe(F.FLEET_BUILD);
   });
+});
+
+describe("reaching a background session", () => {
+  test("one that will not open is tried once more, a moment later, and the log says why", async () => {
+    if (Bun.spawnSync(["tmux", "-V"]).exitCode !== 0) return; // needs tmux, as fleet does
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-attach-"));
+    const fake = path.join(dir, "claude");
+    // Refuses the first attach, as when the session is briefly out of reach; the second shows a prompt.
+    fs.writeFileSync(fake, `#!/bin/sh\nn=$(cat "${dir}/n" 2>/dev/null || echo 0); echo $((n+1)) > "${dir}/n"\nif [ "$n" = 0 ]; then echo "Session not found"; exit 1; fi\nprintf '\\342\\235\\257 '\nsleep 30\n`, { mode: 0o755 });
+    const saved = process.env.FLEET_ATTACH_CMD;
+    process.env.FLEET_ATTACH_CMD = fake;
+    try {
+      const r = await F.sendToSession({ sid: "a1", jobId: "abc123", name: "retry me", cwd: "/x", mains: [], agents: [], workflows: [] } as any, "hello");
+      expect([r.ok, r.via, fs.readFileSync(path.join(dir, "n"), "utf8").trim()]).toEqual([true, "attach", "2"]);
+      expect(fs.readFileSync(F.svcLogPath(), "utf8")).toContain("could not open retry me (could not open the session); trying again");
+    } finally {
+      if (saved === undefined) delete process.env.FLEET_ATTACH_CMD;
+      else process.env.FLEET_ATTACH_CMD = saved;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
 });
 
 describe("the home-screen launch picture", () => {
