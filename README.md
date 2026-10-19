@@ -174,9 +174,21 @@ It is built to be safe to leave running:
 
 - **Your devices only.** It listens on this Mac's Tailscale address when there is one, so only your own devices on your tailnet can reach it, over Tailscale's encryption. Without Tailscale it listens on this Mac alone (127.0.0.1).
 - **The link is the key.** Every request must carry a random secret (the `?t=` in the link); without it the answer is 403. The secret is made once and kept in `~/.config/claude-fleet/web-token`, readable only by you, so the link stays the same and a home-screen icon keeps working. Delete that file to change the link; the old one then stops working.
+- **The roster, as the detail view lists it:** under each busy session, the main thread, each workflow with its phases (✓ done, ◐ now, ○ next), a tick for each finished agent, tokens, age and an activity bar, with its agents beneath it (what each is doing, model, activity), then the standalone agents.
 - **It can talk to your sessions.** Each card has a box to send a message, as if you had typed it there (open already on a session that needs you). A background session is reached by opening `claude attach` in a hidden tmux, pasting the message and closing it again; a session running in a tmux pane gets it pasted into that pane; any other session cannot be reached. It needs `tmux`. Messages are sent one at a time, stripped of control characters, and capped at 4000 characters; only the page itself can send (another site's request is refused). Since the link can type into Claude, keep it like a password.
 - Otherwise it serves only the page, its data and its icons.
 - It stops when fleet quits. With several fleets open, the first serves the page and the others show the same link; when it quits, another takes the page over within ten seconds.
+
+## On your glasses
+
+Fleet runs on [Even Realities G2](https://www.evenrealities.com) glasses too. Press `w`, then `g`, and fleet shows a QR code; scan it with the Even app on your phone (its developer option to load an app from a QR code) and fleet opens on your glasses. Like the phone page, it is served by fleet over Tailscale with the same secret, so the phone needs Tailscale on.
+
+- **Home:** a header with the counts, the time and the most urgent thing (a question waiting on you, or what the first session is doing), and a list of your sessions, those that need you first, with the machine each is on. Scroll the ring to move, tap to open. A session that starts waiting on you is called out in the header.
+- **A session:** what it needs or is doing, a context bar, tasks, agents, failures and pull requests, then its roster: each workflow with its current phase and how many agents have finished, the agents under it and what each is doing, then its last reply. Scroll for more.
+- **Answer it:** tap, and fleet reads the session's own screen and lists the numbered choices on it (`1. Yes`, `2. …`, `3. No`), then Esc, Enter and a few quick replies. Tap one and it is pressed or typed in that session, on whichever machine it runs (a background session, or one in tmux, as for messages).
+- Double-tap goes back; on the home list it asks before closing.
+
+The page uses Even's SDK, which is included in `vendor/` (MIT, version 0.0.16). The glasses draw 576 by 288 in sixteen shades of green, in a font with no ✓ or spinner, so fleet uses ▲ ● ◐ ○ ■ instead.
 
 ## On Windows
 
