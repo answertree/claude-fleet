@@ -728,6 +728,29 @@ setTimeout(() => { throw new Error("boom in a scan"); }, 5);`;
     }
   });
 
+  test("the phone page gets a cropped message's whole text, for a tap to show, and nothing extra for a short one", () => {
+    const home = path.join(root, "whole");
+    fs.rmSync(home, { recursive: true, force: true });
+    const sid = "whol0000-0000-4000-8000-000000000001";
+    const file = path.join(home, "projects", "-p", `${sid}.jsonl`);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.mkdirSync(path.join(home, "sessions"), { recursive: true });
+    fs.writeFileSync(path.join(home, "sessions", "1.json"), JSON.stringify({ pid: process.pid, sessionId: sid, name: "w", kind: "bg", status: "busy", cwd: "/w", startedAt: NOW - 60 * MIN }));
+    const long = "Done. " + "Every read now goes through the promotions table. ".repeat(30) + "The end.";
+    fs.writeFileSync(file, [prompt(NOW - 2 * MIN, "move the coupons"), reply(NOW - 10_000, long)].map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const saved = process.env.FLEET_HOME;
+    process.env.FLEET_HOME = home;
+    try {
+      const talk = F.webState(F.scan(NOW).filter((x) => x.sid === sid), NOW).sessions[0].talk as any[];
+      const [ask, said] = talk;
+      expect([ask.who, ask.text, ask.full]).toEqual(["you", "move the coupons", undefined]);
+      expect([said.text.length <= 601, said.text.endsWith("…")]).toEqual([true, true]);
+      expect(said.full).toBe(long);
+    } finally {
+      process.env.FLEET_HOME = saved;
+    }
+  });
+
   test("a transcript replaced by a different file at the same path is read afresh", () => {
     const home = path.join(root, "replaced");
     fs.rmSync(home, { recursive: true, force: true });
