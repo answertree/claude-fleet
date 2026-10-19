@@ -6042,7 +6042,11 @@ h1{display:flex;align-items:center;gap:9px;font-size:21px;font-weight:700;margin
 .gauges{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:0 0 16px}
 .gt{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:9px 6px 8px;text-align:center}.gt svg{display:block;margin:0 auto}
 .gt b{display:block;color:var(--text);font-size:12px;font-weight:600;margin-top:4px}.gt small{display:block;color:var(--dim);font-size:10.5px;line-height:1.25;margin-top:1px}.gt.hot small{color:var(--red);font-weight:600}
-.five{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 12px;margin:-6px 0 16px;font-size:13px;color:var(--text)}.five.hot{border-color:#5a2a28;color:#ff9d97}
+.five{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:11px 14px 12px;margin:-6px 0 16px}.five:empty{display:none}
+.five .hl{display:flex;justify-content:space-between;align-items:baseline;gap:10px}.five .big{color:var(--white);font-size:17px;font-weight:650}.five .big em{font-style:normal;color:var(--k)}.five .in{color:var(--k);font-size:15px;font-weight:650;white-space:nowrap}
+.five .tl{position:relative;height:8px;margin:11px 0 5px;border-radius:4px;background:#262d37}.five .tl i{position:absolute;top:0;bottom:0;border-radius:4px}.five .tl b{position:absolute;top:-4px;bottom:-4px;width:2px;border-radius:1px;background:var(--white)}
+.five .ends{position:relative;display:flex;justify-content:space-between;color:var(--dim);font-size:11px}.five .ends .now{position:absolute;transform:translateX(-50%);color:var(--white)}.five .note{color:var(--dim);font-size:12.5px;margin-top:5px}
+.wfg>summary{list-style:none;display:block}.wfg>summary::before{content:none}.wfg>summary .nm::after{content:" ▸";color:var(--dim);font-weight:400}.wfg[open]>summary .nm::after{content:" ▾"}.wfg .count{color:var(--dim);font-size:11px;padding-left:23px;margin:-2px 0 2px}.wfg[open] .count{display:none}
 .card{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--c);border-radius:16px;padding:12px 14px 14px;margin-bottom:12px;position:relative;overflow:hidden}
 .card.needs{background:#2a2108;border-color:#5a4512;box-shadow:0 0 0 1px #5a4512,0 0 24px #e5b54433;animation:glow 2s ease-in-out infinite}
 @keyframes glow{50%{box-shadow:0 0 0 1px #8a6a1a,0 0 34px #e5b54466}}
@@ -6123,6 +6127,38 @@ function sparkSvg(values, colour) {
   svg.append(svgEl("path", { d: line, fill: "none", stroke: colour, "stroke-width": "1.6", "vector-effect": "non-scaling-stroke", "stroke-linejoin": "round" }));
   return svg;
 }
+// When the five-hour limit runs out: the one thing the rings above don't say. A headline, a timeline of the
+// window (now, when it runs out, the reset), and what that means.
+function fivePanel(f) {
+  const box = document.getElementById("five"); box.replaceChildren();
+  if (!f || !f.kind) return;
+  const k = f.kind === "full" ? "#f0625c" : f.kind === "out" ? "#e5b544" : "#50c878";
+  box.style.setProperty("--k", k);
+  const hl = el("div", "hl"), big = el("div", "big");
+  const em = (t) => el("em", "", t);
+  if (f.kind === "full") big.append("Out of tokens until ", em(f.resetAt || "the reset"));
+  else if (f.kind === "out") big.append("Runs out ", em("~" + f.outAt));
+  else if (f.kind === "lasts") big.append("Lasts to the ", em(f.resetAt + " reset"));
+  else big.append("Too early to forecast");
+  hl.append(big);
+  if ((f.kind === "full" || f.kind === "out") && f.inText) hl.append(el("span", "in", "in " + f.inText));
+  box.append(hl);
+  if (f.start && f.resets && f.resets > f.start) {
+    const span = f.resets - f.start, at = (t) => Math.max(0, Math.min(100, ((t - f.start) / span) * 100));
+    const tl = el("div", "tl"), past = el("i"), now = el("b");
+    past.style.cssText = "left:0;width:" + at(f.now) + "%;background:#3b4452";
+    tl.append(past);
+    if (f.kind === "out" && f.out) { const gap = el("i"); gap.style.cssText = "left:" + at(f.out) + "%;right:0;background:" + k + ";opacity:.55"; tl.append(gap); }
+    if (f.kind === "full") { const gap = el("i"); gap.style.cssText = "left:" + at(f.now) + "%;right:0;background:" + k + ";opacity:.55"; tl.append(gap); }
+    now.style.left = "calc(" + at(f.now) + "% - 1px)"; tl.append(now);
+    const ends = el("div", "ends"), hm = (t) => new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const nowLabel = el("span", "now", "now"); nowLabel.style.left = Math.max(14, Math.min(72, at(f.now))) + "%";
+    ends.append(el("span", "", hm(f.start)), nowLabel, el("span", "", "reset " + (f.resetAt || hm(f.resets))));
+    box.append(tl, ends);
+  }
+  const note = f.kind === "out" ? (f.gap ? f.gap + " without tokens before the reset at this pace" : "just before the reset at this pace") : f.kind === "lasts" ? "~" + f.by + "% used by then at this pace" : f.kind === "full" ? "a fresh five hours starts then" : "";
+  if (note) box.append(el("div", "note", note));
+}
 function quip(d) {
   const c = d.counts, n = d.sessions.length;
   const parts = [];
@@ -6184,10 +6220,16 @@ function wfRow(w) {
 function roster(R) {
   const box = el("div", "roster");
   if (R.main) box.append(agentRow(R.main, false));
+  // Each workflow folds to its own row (name, steps, phases) and a count of its agents; a tap opens the agents.
   for (const w of R.workflows) {
-    box.append(wfRow(w));
-    for (const a of w.agents) box.append(agentRow(a, true));
-    if (w.more) box.append(el("div", "r child more", "+ " + w.more + " more agents"));
+    if (!w.agents.length && !w.more) { box.append(wfRow(w)); continue; }
+    const g = el("details", "wfg wf-" + w.name.replace(/[^\w-]/g, "_")), sm = el("summary");
+    const n = w.agents.length + (w.more || 0), busy = w.agents.filter((a) => a.state === "active" || a.state === "tool").length;
+    sm.append(wfRow(w), el("div", "count", n + (n === 1 ? " agent" : " agents") + (busy ? " · " + busy + " working" : "")));
+    g.append(sm);
+    for (const a of w.agents) g.append(agentRow(a, true));
+    if (w.more) g.append(el("div", "r child more", "+ " + w.more + " more agents"));
+    box.append(g);
   }
   for (const a of R.agents) box.append(agentRow(a, false));
   if (R.finished) box.append(el("div", "r done-line", "✓ " + R.finished + " agent" + (R.finished === 1 ? "" : "s") + " finished in the window"));
@@ -6253,7 +6295,7 @@ async function tick() {
     const five = lim(/5/), week = lim(/7|week/i);
     g.replaceChildren(gaugeTile("5 hours", five ? five.pct : undefined, five ? five.resets : "no figures", !!(d.five && d.five.urgent)), gaugeTile("week", week ? week.pct : undefined, week ? week.resets : ""), gaugeTile("cpu", d.machine.cpu, "load " + d.machine.load), gaugeTile("memory", d.machine.mem, d.machine.memText));
     // The five-hour forecast, always.
-    const f5 = document.getElementById("five"); f5.textContent = d.five ? d.five.text : ""; f5.className = "five" + (d.five && d.five.urgent ? " hot" : "");
+    fivePanel(d.five);
     const cards = document.getElementById("cards");
     // Never redraw under your thumbs: while you are typing a message the cards hold still.
     if (document.activeElement && document.activeElement.tagName === "TEXTAREA" && cards.contains(document.activeElement)) return;
@@ -6742,7 +6784,7 @@ export const tg = {
   was: { ready: false, pr: new Map<string, string>() },
 };
 /** Send `text` to the paired chat; when it is about a session, a reply to it goes to that session. */
-export async function tgSay(text: string, sid?: string, asking = false): Promise<boolean> {
+export async function tgSay(text: string, sid?: string, asking = false, kind?: "ask" | "stall"): Promise<boolean> {
   const c = readTg();
   if (!c.token || !c.chat) return false;
   // A question carries a Reply button; it is taken off again once the session stops waiting.
@@ -6751,21 +6793,44 @@ export async function tgSay(text: string, sid?: string, asking = false): Promise
   if (!r.ok) tg.status = r.error ?? "";
   if (r.ok && sid && typeof r.result?.message_id === "number") {
     rememberTg(r.result.message_id, sid);
-    if (asking) tgAsking.set(sid, r.result.message_id);
+    if (kind) tgNoteStatus(sid, kind, r.result.message_id);
   }
   return r.ok;
 }
-/** The question message each waiting session was sent, so its Reply button can be taken off when it is answered. */
-const tgAsking = new Map<string, number>();
-/** Take the Reply button off questions whose session is no longer waiting. */
-export function tgSettle(waiting: Set<string>) {
+// "Needs you" and "looks stuck" are states, not news: each message is deleted once its session is no longer
+// in that state, and a new question replaces the last. Kept on disk so a restart still tidies them.
+type TgStatus = { sid: string; kind: "ask" | "stall"; id: number };
+const tgStatusPath = () => path.join(path.dirname(tgConfigPath()), "telegram-status.json");
+function tgStatusRead(): TgStatus[] {
+  try {
+    const j = JSON.parse(fs.readFileSync(tgStatusPath(), "utf8"));
+    return Array.isArray(j) ? j.filter((x) => typeof x?.sid === "string" && typeof x?.id === "number" && (x.kind === "ask" || x.kind === "stall")) : [];
+  } catch {
+    return [];
+  }
+}
+function tgStatusWrite(list: TgStatus[]) {
+  try {
+    fs.mkdirSync(path.dirname(tgStatusPath()), { recursive: true });
+    fs.writeFileSync(tgStatusPath(), JSON.stringify(list.slice(-200)), { mode: 0o600 });
+  } catch {}
+}
+function tgNoteStatus(sid: string, kind: TgStatus["kind"], id: number) {
+  const c = readTg();
+  const list = tgStatusRead();
+  // The session's earlier message of the same kind is out of date now.
+  for (const old of list.filter((x) => x.sid === sid && x.kind === kind)) if (c.token && c.chat) void tgCall(c.token, "deleteMessage", { chat_id: c.chat, message_id: old.id });
+  tgStatusWrite([...list.filter((x) => !(x.sid === sid && x.kind === kind)), { sid, kind, id }]);
+}
+/** Delete the "needs you" and "looks stuck" messages that are no longer so. */
+export function tgSettle(waiting: Set<string>, stuck: Set<string> = new Set()) {
   const c = readTg();
   if (!c.token || !c.chat) return;
-  for (const [sid, id] of tgAsking)
-    if (!waiting.has(sid)) {
-      tgAsking.delete(sid);
-      void tgCall(c.token, "editMessageReplyMarkup", { chat_id: c.chat, message_id: id, reply_markup: { inline_keyboard: [] } });
-    }
+  const list = tgStatusRead();
+  const keep = list.filter((x) => (x.kind === "ask" ? waiting : stuck).has(x.sid));
+  if (keep.length === list.length) return;
+  for (const x of list) if (!keep.includes(x)) void tgCall(c.token, "deleteMessage", { chat_id: c.chat, message_id: x.id });
+  tgStatusWrite(keep);
 }
 const tgName = (s: Session) => (s.name || path.basename(s.cwd)) + (machineOf(s) ? ` (${machineOf(s)})` : "");
 /** What fleet does with a message from Telegram: pairing, a reply to a session, or a short status. */
@@ -8529,21 +8594,29 @@ export function glassesState(sessions: Session[], now: number) {
  * The five-hour limit in one line, whatever is known: when it fills at this pace ("full ~16:40, in ~2h"), or where
  * it will be at the reset ("~64% by 18:00"), or that it is full, or that there are no figures.
  */
-export function fiveHourLine(now = clock()): { text: string; urgent: boolean } {
+/** When the five-hour limit runs out, said in a line, with the parts for the phone page to lay out:
+ *  `kind` is "full" (out now), "out" (runs out before the reset), "lasts" (lasts to the reset) or "steady" (too early to tell);
+ *  the times are on this Mac's clock, `inText` is how long until it runs out (or, when full, until the reset),
+ *  `gap` how long without tokens before the reset, `by` where it will be at the reset, and `start`/`out`/`resets` the timeline in ms. */
+export type FiveHour = { text: string; urgent: boolean; kind?: "full" | "out" | "lasts" | "steady"; outAt?: string; resetAt?: string; inText?: string; gap?: string; by?: number; start?: number; out?: number; resets?: number; now?: number };
+export function fiveHourLine(now = clock()): FiveHour {
   const acct = opt.usage ? accountView(now) : undefined;
   const l = acct?.limits.find((x) => x.windowMs === 5 * 3600_000) ?? acct?.limits[0];
   if (!l) return { text: `5h: no usage figures${acct?.reason ? ` (${glassesSafe(acct.reason).slice(0, 30)})` : ""}`, urgent: false };
   const pct = Math.round(l.pct);
   const at = (t: number) => new Date(t).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-  if (pct >= 100) return { text: `5h full · resets ${l.resetsAt ? at(l.resetsAt) : "soon"}`, urgent: true };
-  if (l.fullIn) return { text: `5h ${pct}% · full ~${at(now + l.fullIn)}, in ~${roughly(l.fullIn / 60_000)}`, urgent: true };
+  const line = { now, resets: l.resetsAt, start: l.resetsAt ? l.resetsAt - l.windowMs : undefined, resetAt: l.resetsAt ? at(l.resetsAt) : undefined };
+  const out = (t: number, text: string): FiveHour => ({ text, urgent: true, kind: "out", ...line, out: t, outAt: at(t), inText: roughly((t - now) / 60_000), gap: l.resetsAt && l.resetsAt > t ? roughly((l.resetsAt - t) / 60_000) : undefined });
+  if (pct >= 100) return { text: `5h full · resets ${l.resetsAt ? at(l.resetsAt) : "soon"}`, urgent: true, kind: "full", ...line, inText: l.resetsAt ? roughly((l.resetsAt - now) / 60_000) : undefined };
+  if (l.fullIn) return out(now + l.fullIn, `5h ${pct}% · full ~${at(now + l.fullIn)}, in ~${roughly(l.fullIn / 60_000)}`);
   const tick = l.tick ?? 0;
   if (tick > 0.03 && pct > 0 && l.resetsAt) {
     const toFull = ((100 - pct) / pct) * tick * l.windowMs;
-    if (now + toFull < l.resetsAt) return { text: `5h ${pct}% · on pace to fill ~${at(now + toFull)}`, urgent: true };
-    return { text: `5h ${pct}% · ~${Math.min(99, Math.round(pct / tick))}% by ${at(l.resetsAt)} reset`, urgent: false };
+    if (now + toFull < l.resetsAt) return out(now + toFull, `5h ${pct}% · on pace to fill ~${at(now + toFull)}`);
+    const by = Math.min(99, Math.round(pct / tick));
+    return { text: `5h ${pct}% · ~${by}% by ${at(l.resetsAt)} reset`, urgent: false, kind: "lasts", by, ...line };
   }
-  return { text: `5h ${pct}%${l.resetsAt ? ` · resets ${at(l.resetsAt)}` : ""}`, urgent: false };
+  return { text: `5h ${pct}%${l.resetsAt ? ` · resets ${at(l.resetsAt)}` : ""}`, urgent: false, kind: "steady", ...line };
 }
 
 export const GLASSES_PAGE = `<!doctype html>
@@ -9348,7 +9421,9 @@ function refresh() {
   const asks = facts.filter((x) => x.f.needs).map((x): [string, number] => [x.s.sid, stateSince(x.s, x.f, "needs")]);
   // A machine that has just come into view brings what was already waiting there: noted, but not news.
   const asked = newAsks(needing, askedAt, asks).filter((sid) => !fresh.has(sid));
-  const stalled = newStalls(stalledNow, facts.flatMap((x) => stallMarks(x.s, x.f, stallOf(x.s, x.f, now)))).filter((k) => !fresh.has(k.split("/")[0]));
+  const marks = facts.flatMap((x) => stallMarks(x.s, x.f, stallOf(x.s, x.f, now)));
+  const stuckNow = new Set(marks.map(([k]) => k.split("/")[0]));
+  const stalled = newStalls(stalledNow, marks).filter((k) => !fresh.has(k.split("/")[0]));
   const rings = asked.length + stalled.length;
   const told = tgWanted ? tgEvents(sessions, asked, stalled) : []; // always, so what changed while another fleet held the bot is not news later
   const botHere = tgWanted && tg.on && (tg.paired = !!readTg().chat);
@@ -9361,9 +9436,9 @@ function refresh() {
       // Muted, or quiet hours and not a question: kept for the digest, not sent.
       const held = (muted[sid] ?? 0) > Date.now() || (quiet && !asking);
       tgLog(text + (held ? " (held)" : ""));
-      if (!held) void tgSay(text, sid, asking);
+      if (!held) void tgSay(text, sid, asking, key.startsWith("ask:") ? "ask" : key.startsWith("stall:") ? "stall" : undefined);
     }
-    tgSettle(new Set(asks.map(([sid]) => sid)));
+    tgSettle(new Set(asks.map(([sid]) => sid)), stuckNow);
     tgSweep();
   }
   if (opt.bell && !opt.once) process.stdout.write("\x07".repeat(rings));
