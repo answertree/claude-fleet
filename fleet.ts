@@ -810,6 +810,7 @@ export interface Tail {
   title?: string;
   lastPrompt?: string; // from the transcript's own last-prompt marker
   ask?: { text: string; t: number }; // last thing the person typed
+  asks?: { text: string; t: number }[]; // the last few things the person typed, oldest first
   say?: { text: string; t: number }; // last thing Claude wrote
   says: { text: string; t: number }[]; // its last few messages, oldest first
   taskLog: Map<string, TaskTrace>; // each task its updates started or finished, by task id
@@ -1072,6 +1073,8 @@ export function ingest(t: Tail, line: string) {
     const typed = texts.map((x) => x.trim()).find((x) => x && !x.startsWith("<"));
     if (typed) {
       t.ask = { text: safeText(capText(typed, PROMPT_KEEP)), t: ts };
+      (t.asks ??= []).push(t.ask);
+      if (t.asks.length > 6) t.asks.shift();
       t.askLog.push(ts);
       if (t.askLog.length > 300) t.askLog.shift();
     }
@@ -1116,6 +1119,7 @@ export function newTail(file: string, start = 0, birth = 0): Tail {
     decoder: new StringDecoder("utf8"),
     tools: [],
     says: [],
+    asks: [],
     taskLog: new Map(),
     taskFocus: [],
     prs: new Map(),
@@ -6039,11 +6043,13 @@ export function webState(sessions: Session[], now: number) {
         }),
         // Each message cropped, with the whole of it (to a limit) when cropping cut it, for a tap to show.
         talk: [
-          ...(main?.ask ? [{ who: "you", text: capText(main.ask.text, 400), whole: main.ask.text, t: main.ask.t }] : []),
-          ...(main?.says ?? []).slice(-2).map((x) => ({ who: "claude", text: capText(flatReply(x.text), 600), whole: x.text.trim(), t: x.t })),
+          ...(main?.asks?.length ? main.asks : main?.ask ? [main.ask] : []).map((x) => ({ who: "you", text: capText(x.text, 400), whole: x.text, t: x.t })),
+          ...(main?.says ?? []).map((x) => ({ who: "claude", text: capText(flatReply(x.text), 600), whole: x.text.trim(), t: x.t })),
         ]
           .sort((a, b) => a.t - b.t)
-          .map((x) => ({ who: x.who, text: x.text, ...(x.text !== x.whole ? { full: capText(x.whole, 20_000) } : {}), t: x.t, ago: ago(now - x.t) })),
+          .slice(-12)
+          // The newest three carry the whole of a message cropping cut, for a tap to show; older ones stay cropped.
+          .map((x, i, all) => ({ who: x.who, text: x.text, ...(x.text !== x.whole && i >= all.length - 3 ? { full: capText(x.whole, 6000) } : {}), t: x.t, ago: ago(now - x.t) })),
       };
     }),
   };
@@ -6141,7 +6147,15 @@ details.tasks[open]>summary::before,details.wfg[open]>summary::before,details.ta
 .pick.armed{background:var(--amber);color:#1a1405;border-color:var(--amber)}.pick.armed .k{background:#00000022;color:#1a1405}
 .chips{display:flex;flex-wrap:nowrap;gap:6px;margin:6px -14px 8px;padding:0 14px;overflow-x:auto;scroll-snap-type:x proximity;-webkit-overflow-scrolling:touch;scrollbar-width:none;-webkit-mask-image:linear-gradient(90deg,transparent 0,#000 14px,#000 calc(100% - 28px),transparent);mask-image:linear-gradient(90deg,transparent 0,#000 14px,#000 calc(100% - 28px),transparent)}.chips::-webkit-scrollbar{display:none}.chips .chip{flex:none;white-space:nowrap;scroll-snap-align:start}.chip{background:transparent;color:var(--text);border:1px solid #2f3946;border-radius:999px;padding:7px 12px;font:500 13.5px -apple-system,system-ui,sans-serif}
 .chip.key{color:var(--dim)}.chip.armed{background:var(--amber);color:#1a1405;border-color:var(--amber)}.picks-note{color:var(--dim);font-size:12px;margin:6px 0 2px}
-.talk .st{color:var(--dim);font-size:12.5px;margin:4px 0 2px}
+details.chat{margin-top:10px;border-top:1px solid var(--line);padding-top:8px}
+details.chat>summary{display:flex;align-items:baseline;gap:8px;list-style:none}details.chat>summary::before{content:"▸";color:var(--dim);flex:none}details.chat[open]>summary::before{content:"▾"}
+details.chat .ct{color:var(--white);font-weight:650;font-size:14px;flex:none}details.chat .prev{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dim);font-size:13px}details.chat .when{flex:none;color:var(--faint);font-size:11px}
+details.chat[open] .prev,details.chat[open] .when{visibility:hidden}
+.log{display:flex;flex-direction:column;gap:6px;max-height:min(42vh,340px);overflow-y:auto;overscroll-behavior:contain;margin:8px -2px 4px;padding:26px 2px 2px;-webkit-mask-image:linear-gradient(transparent 0,#000 30px);mask-image:linear-gradient(transparent 0,#000 30px)}
+.log p{margin:0;max-width:86%;padding:7px 11px;border-radius:15px;font-size:14px;line-height:1.38;white-space:pre-wrap;word-break:break-word}
+.log p.you{align-self:flex-end;background:#1f3d63;color:#e3eeff;border-bottom-right-radius:5px}.log p.claude{align-self:flex-start;background:#1d2530;color:var(--text);border-bottom-left-radius:5px}
+.log p .ago{color:#ffffff55;font-size:10.5px;margin-left:7px}.log p.cut{cursor:pointer}.log p .more{color:var(--cyan);font-size:12px;margin-left:6px;font-weight:600}.log .none{color:var(--dim);font-size:13px;text-align:center;padding:6px}
+.chat > .st{color:var(--dim);font-size:12.5px;margin:2px 2px 4px}
 .sent{font-size:12px;margin-top:4px;color:var(--dim)}.sent.ok{color:var(--green)}.sent.err{color:var(--red)}
 </style></head><body>
 <div id="splash"><div class="tilt"><div class="logo"><img src="__ICON__" alt=""><i class="d"></i><i class="s"></i><b><i class="d"></i><i class="s"></i></b></div></div><div class="title">Claude Fleet</div><div class="what" id="splash-what">Reaching your Mac…</div></div>
@@ -6339,8 +6353,8 @@ function roster(R) {
 const whole = new Set();
 function talkLine(sid, m) {
   const k = sid + ":" + m.t, all = m.full && whole.has(k);
-  const p = el("p", m.who + (m.full ? " cut" : ""), (m.who === "you" ? "▸ " : "◆ ") + (all ? m.full : m.text)); p.dataset.k = k;
-  p.append(el("span", "", m.ago));
+  const p = el("p", m.who + (m.full ? " cut" : ""), all ? m.full : m.text); p.dataset.k = k;
+  p.append(el("span", "ago", m.ago));
   if (m.full) {
     p.append(el("span", "more", all ? "show less" : "show all"));
     p.addEventListener("click", () => { if (whole.has(k)) whole.delete(k); else whole.add(k); tick(); });
@@ -6453,8 +6467,7 @@ function card(s) {
   const R = s.roster;
   if (s.tasks && s.tasks.total) c.append(taskList(s.tasks));
   if (R && (R.main || R.workflows.length || R.agents.length || R.finished)) c.append(roster(R));
-  const tk = talkSection(s); if (tk) c.append(tk);
-  const m = el("details", "message"); if (s.state === "needs" || following.has(s.sid)) m.open = true; m.append(el("summary", "", s.state === "needs" ? "answer" : "send a message"));
+  const m = chatHead(s);
   const f = el("form", "send"); const ta = el("textarea"); ta.rows = 1; ta.placeholder = s.state === "needs" ? "your answer…" : "type to " + s.name + "…"; ta.value = drafts.get(s.sid) || ""; ta.dataset.sid = s.sid;
   ta.addEventListener("input", () => { drafts.set(s.sid, ta.value); grow(ta); });
   if (ta.value) requestAnimationFrame(() => grow(ta));
@@ -6468,7 +6481,7 @@ function card(s) {
     try {
       const r = await fetch("api/send?t=" + encodeURIComponent(token), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sid: s.sid, text }) });
       const d = await r.json().catch(() => ({ ok: false, error: "fleet said " + r.status }));
-      if (d.ok) { following.set(s.sid, { text, at: Date.now() }); open.set(s.sid + "talk", true); const tk = f.closest(".card")?.querySelector("details.talk"); if (tk) tk.open = true; drafts.delete(s.sid); ta.value = ""; grow(ta); notes.set(s.sid, { cls: "ok", text: "sent ✓ " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) }); }
+      if (d.ok) { following.set(s.sid, { text, at: Date.now() }); open.set(s.sid + "chat", true); stick.set(s.sid, true); const ch = f.closest("details.chat"); if (ch) ch.open = true; drafts.delete(s.sid); ta.value = ""; grow(ta); notes.set(s.sid, { cls: "ok", text: "sent ✓ " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) }); }
       else notes.set(s.sid, { cls: "err", text: "not sent: " + (d.error || "unknown") });
     } catch { notes.set(s.sid, { cls: "err", text: "not sent: can't reach fleet" }); }
     const n = notes.get(s.sid); note.className = "sent " + n.cls; note.textContent = n.text; go.disabled = false; ta.blur(); tick();
@@ -6518,7 +6531,7 @@ function savePutAway(a) { try { localStorage.setItem("fleet-put-away", JSON.stri
 function swipeAway(c, sid) {
   let x0 = null, y0 = 0, dx = 0, locked = false;
   const reset = () => { x0 = null; locked = false; swiping = false; };
-  c.addEventListener("pointerdown", (e) => { if (e.target.closest("button,textarea,summary,a,input,.talk,.chips")) return; x0 = e.clientX; y0 = e.clientY; dx = 0; locked = false; });
+  c.addEventListener("pointerdown", (e) => { if (e.target.closest("button,textarea,summary,a,input,.log,.chips")) return; x0 = e.clientX; y0 = e.clientY; dx = 0; locked = false; });
   c.addEventListener("pointermove", (e) => {
     if (x0 === null) return;
     dx = e.clientX - x0; const dy = e.clientY - y0;
@@ -6540,24 +6553,36 @@ function swipeAway(c, sid) {
   c.addEventListener("pointerup", end); c.addEventListener("pointercancel", end);
 }
 const drafts = new Map(), notes = new Map();
-// After you send, the conversation opens and follows: your words at once, what the session is doing, and its
-// replies as they are written. For a quarter of an hour, or until you close it.
-const following = new Map(); // sid → { text, at }
-function talkSection(s) {
+// The conversation and the box to write in are one: folded, a line with the latest message; open, the recent
+// messages in a short scroller that fades out at the top and stays at the newest unless you scroll back, what the
+// session is doing, then the answers and the box. It opens when the session asks you something, and when you send.
+const following = new Map(); // sid → { text, at }: what you just sent, shown until the transcript has it
+const stick = new Map(); // sid → false while you have scrolled back through its messages
+function chatHead(s) {
   const f = following.get(s.sid);
   if (f && Date.now() - f.at > 15 * 60_000) following.delete(s.sid);
   const live = following.get(s.sid);
-  if (!s.talk.length && !live) return undefined;
-  const d = el("details", "talk"); if (s.state === "needs") d.open = true;
-  d.append(el("summary", "", "conversation"));
-  for (const m of s.talk) d.append(talkLine(s.sid, m));
-  if (live) {
-    if (!s.talk.some((m) => m.who === "you" && m.t >= live.at - 5000)) { const p = el("p", "you", "▸ " + live.text); p.dataset.k = "sent"; d.append(p); } // until the transcript has it
-    const busy = s.state === "working" || s.state === "stalled";
-    if (busy) d.append(el("div", "st pulse", "◐ " + (s.sub && s.sub.source !== "reply" && s.sub.text ? s.sub.text : "thinking…")));
-    else if (s.state === "needs") d.append(el("div", "st", "▲ it's asking you something"));
-  }
+  const d = el("details", "chat"); if (s.state === "needs" || live) d.open = true;
+  const sm = el("summary"), last = s.talk[s.talk.length - 1];
+  sm.append(el("span", "ct", s.state === "needs" ? "Answer" : "Conversation"));
+  if (last) sm.append(el("span", "prev", (last.who === "you" ? "You: " : "") + last.text.replace(/\\s+/g, " ")), el("span", "when", last.ago));
+  else sm.append(el("span", "prev", "write to " + s.name));
+  d.append(sm);
+  const log = el("div", "log"); log.dataset.k = "log"; log.dataset.of = s.sid;
+  for (const m of s.talk) log.append(talkLine(s.sid, m));
+  if (live && !s.talk.some((m) => m.who === "you" && m.t >= live.at - 5000)) { const p = el("p", "you", live.text); p.dataset.k = "sent"; log.append(p); }
+  if (!log.childNodes.length) log.append(el("div", "none", "Nothing said yet."));
+  log.addEventListener("scroll", () => stick.set(s.sid, log.scrollHeight - log.scrollTop - log.clientHeight < 24), { passive: true });
+  d.append(log);
+  const busy = s.state === "working" || s.state === "stalled";
+  if (busy) d.append(el("div", "st pulse", "◐ " + (s.sub && s.sub.source !== "reply" && s.sub.text ? s.sub.text : "thinking…")));
+  // Opened by your tap (not by a redraw): straight to the newest message.
+  sm.addEventListener("click", () => { if (!d.open) { stick.set(s.sid, true); requestAnimationFrame(settleLogs); } });
   return d;
+}
+// Each open conversation at its newest message, unless you have scrolled back.
+function settleLogs() {
+  for (const log of document.querySelectorAll("#cards .log")) if (stick.get(log.dataset.of) !== false) log.scrollTop = log.scrollHeight;
 }
 // Asked twice a second; the page is only redrawn when what fleet says has changed, or when you have done something.
 let lastText = "";
@@ -6605,14 +6630,17 @@ async function tick(force = true) {
       if (!o) return n;
       if (shapeOf(o) === shapeOf(n)) return patch(o, n), o;
       if (o !== typing) return n;
-      const ot = o.querySelector("details.talk"), nt = n.querySelector("details.talk");
-      if (ot && nt) shapeOf(ot) === shapeOf(nt) ? patch(ot, nt) : ot.replaceWith(nt);
+      const ol = o.querySelector(".chat .log"), nl = n.querySelector(".chat .log");
+      if (ol && nl) shapeOf(ol) === shapeOf(nl) ? patch(ol, nl) : ol.replaceWith(nl);
+      const os = o.querySelector(".chat > .st"), ns = n.querySelector(".chat > .st");
+      if (os && ns) patch(os, ns); else if (os) os.remove(); else if (ns && o.querySelector(".chat .log")) o.querySelector(".chat .log").after(ns);
       return o;
     });
     // Only what changed is touched: moving a card would take the focus from its text box.
     const keep = new Set(next);
     for (const n of [...cards.children]) if (!keep.has(n)) n.remove();
     next.forEach((n, i) => { if (cards.children[i] !== n) cards.insertBefore(n, cards.children[i] || null); });
+    settleLogs();
     document.getElementById("clock").textContent = new Date(d.now).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     document.getElementById("foot").textContent = (d.hidden ? d.hidden + " idle or finished not shown · " : "") + "live";
     document.title = (d.counts.needs ? "▲" + d.counts.needs + " " : "") + "Claude Fleet";
