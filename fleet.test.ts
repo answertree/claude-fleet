@@ -5658,6 +5658,21 @@ describe("a fleet window and the background service", () => {
   });
 });
 
+describe("the home-screen launch picture", () => {
+  test("is the splash as a still: phone-sized, its background, the rounded icon where the splash puts it; listed for each phone", () => {
+    const png = F.startupPng(390, 844, 3);
+    const p = F.rgbOfPng(png)!;
+    expect([p.w, p.h]).toEqual([1170, 2532]);
+    const at = (x: number, y: number) => Array.from(p.rgb.subarray((y * p.w + x) * 3, (y * p.w + x) * 3 + 3));
+    expect(at(0, p.h - 1)).toEqual([0x0d, 0x11, 0x17]); // the page's background at the edge
+    const top = Math.round(p.h / 2 - 89.5 * 3), left = Math.round(p.w / 2 - 48 * 3);
+    expect(at(left + 2, top + 2)).toEqual(at(left - 4, top - 4)); // a rounded corner shows the background
+    expect(at(left + 144, top + 40)[0]).toBeLessThan(8); // inside, the icon's black
+    expect(F.startupPng(390, 844, 3)).toBe(png); // drawn once
+    expect(F.WEB_PAGE).toContain("__STARTUP__");
+  });
+});
+
 describe("which checkout a session's git figures are about", () => {
   const mk = (branch: string) => ({ sid: "g1", name: "g", cwd: "/repo", mains: [{ branch }], agents: [], workflows: [], side: { cwd: "/repo", prs: [], edits: [] } }) as any;
   test("the folder it started in when its branch is out there; the worktree with its branch when it has moved; none when no checkout has it", () => {
