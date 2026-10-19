@@ -6208,7 +6208,7 @@ tick(); setInterval(tick, 2000);
 </script></body></html>`;
 
 /** The web server, once key w has started it: where it listens and the link to open. */
-export const web: { url?: string; host?: string; onTailnet?: boolean; server?: { stop: () => void }; error?: string; send?: typeof sendToSession; keys?: typeof keysToSession; peek?: typeof peekSession; start?: typeof startSession; shared?: boolean; retake?: () => void; older?: boolean } = {};
+export const web: { url?: string; host?: string; onTailnet?: boolean; server?: { stop: (closeActive?: boolean) => void }; error?: string; send?: typeof sendToSession; keys?: typeof keysToSession; peek?: typeof peekSession; start?: typeof startSession; shared?: boolean; retake?: () => void; yieldPort?: () => void; older?: boolean } = {};
 const sameToken = (a: string, b: string) => a.length === b.length && crypto.timingSafeEqual ? (() => { try { return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b)); } catch { return false; } })() : a === b;
 /** This Mac's Tailscale IPv4 address, when it has one. */
 function tailnetAddress(): string | undefined {
@@ -6455,6 +6455,7 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
   const base = Number(process.env.FLEET_WEB_PORT) || 4777;
   const serveOn = (port: number) => {
     try {
+      web.server?.stop(true); // one page per fleet: never two servers with one forgotten
       const server = Bun.serve({
         hostname: host,
         port,
@@ -6536,12 +6537,27 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
       return false;
     }
   };
-  if (serveOn(base)) return web;
+  // The background service, when it runs, always serves: it runs the code on disk, where a window may be days old.
+  web.yieldPort = () => {
+    if (web.server && !web.shared) {
+      web.server.stop(true); // open connections too: a phone holding one moves to the service at once
+      Object.assign(web, { server: undefined, shared: true });
+    }
+  };
+  web.retake = () => {
+    if (!web.shared || serviceRunning()) return;
+    if (serveOn(base)) {
+      web.older = false;
+      notice.until = 0;
+    } else if (web.older) Object.assign(notice, { text: `old fleet holds :${base}, quit it`, until: clock() + 12_000 });
+  };
+  if (!serviceRunning() && serveOn(base)) return web;
   // The port is taken, most likely by another fleet, which keeps the same secret and so answers the same link: use
   // that, so the link (and a home-screen icon) is the same whichever fleet serves it. Check it really is a fleet; if
   // not, serve on the next free port. And take the page over when the other fleet quits.
   Object.assign(web, { host, onTailnet: !!tail, url: `http://${host}:${base}/?t=${token}`, shared: true });
   const fallBack = () => {
+    if (serviceRunning()) return; // the service serves the page (or is starting to): never a second page on another port
     for (let port = base + 1; port < base + 20; port++) if (serveOn(port)) return;
     Object.assign(web, { url: undefined, shared: false, error: `could not find a free port from ${base}` });
   };
@@ -6552,16 +6568,11 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
       // A fleet, but is it this version? An older one cannot answer your other machines, so they would not see this one.
       const r = await fetch(`http://${host}:${base}/peer/state`, { signal: AbortSignal.timeout(4000) }).catch(() => undefined);
       const j: any = r?.ok ? await r.json().catch(() => undefined) : undefined;
-      web.older = j?.proto !== PEER_PROTO;
+      // Different code (a fleet started before an update) serves pages this one may not have, such as the glasses'.
+      web.older = j?.proto !== PEER_PROTO || j?.build !== FLEET_BUILD;
+      if (web.older && isServiceWorker) svcLog(`an older fleet holds port ${base}: quit it, and this one takes over`);
     })
     .catch(fallBack);
-  web.retake = () => {
-    if (web.shared && serveOn(base)) {
-      web.retake = undefined;
-      web.older = false;
-      notice.until = 0;
-    } else if (web.older) Object.assign(notice, { text: `old fleet holds :${base}, quit it`, until: clock() + 12_000 });
-  };
   return web;
 }
 
@@ -7082,6 +7093,11 @@ async function tgPoll() {
 /** Only one fleet talks to the bot (Telegram allows one reader): the one holding the lock, taken over when it quits. */
 const tgLockPath = () => path.join(path.dirname(tgConfigPath()), "telegram.lock");
 export function tgClaim(): boolean {
+  if (serviceRunning()) {
+    // The background service talks to the bot; a window that had it lets go.
+    if (tg.on) tgRelease();
+    return (tg.on = false);
+  }
   if (!readTg().token) return (tg.on = false);
   if (!tgLeader(tailnet.ip, [...peers.values()])) return (tg.on = false); // another machine's fleet talks to the bot
   const file = tgLockPath();
@@ -7295,7 +7311,15 @@ export function tgKey(key: string): boolean {
 // asleep or not running fleet simply is not there. A fleet answers another machine only after Tailscale confirms
 // the request comes from a device of the same Tailscale user, so there is no secret to copy between machines.
 
-export const PEER_PROTO = 1; // what /peer/state speaks; a fleet speaking another is left out until it is updated
+export const PEER_PROTO = 1;
+/** This fleet's code, as a fingerprint of fleet.ts when it started: two fleets with different ones are different versions. */
+export const FLEET_BUILD = (() => {
+  try {
+    return Bun.hash(fs.readFileSync(import.meta.path)).toString(36);
+  } catch {
+    return "";
+  }
+})(); // what /peer/state speaks; a fleet speaking another is left out until it is updated
 const PEER_EVERY_MS = 2000;
 const PEER_GONE_MS = 15_000; // a machine that has not answered for this long is dropped
 const PEER_KEEP_MS = 3.5 * 3600_000; // what is older than this is not sent: the widest window is three hours
@@ -7420,7 +7444,7 @@ export function peerState(local: Session[], now: number): { body: Uint8Array; ta
   }
   const tgc = readTg();
   const ws = webState([], now);
-  const text = `{"proto":${PEER_PROTO},"host":${JSON.stringify(selfHost())},"machine":${JSON.stringify({ cpu: ws.machine.cpu, mem: ws.machine.mem })},"usage":${JSON.stringify(ws.account?.limits ?? null)},"tgReady":${!!tgc.token && tgWanted},"tg":${JSON.stringify(tgc.at ? tgc : null)},"prs":${JSON.stringify(prs)},"sessions":${encodeSessions(local, now)}}`;
+  const text = `{"proto":${PEER_PROTO},"build":${JSON.stringify(FLEET_BUILD)},"host":${JSON.stringify(selfHost())},"machine":${JSON.stringify({ cpu: ws.machine.cpu, mem: ws.machine.mem })},"usage":${JSON.stringify(ws.account?.limits ?? null)},"tgReady":${!!tgc.token && tgWanted},"tg":${JSON.stringify(tgc.at ? tgc : null)},"prs":${JSON.stringify(prs)},"sessions":${encodeSessions(local, now)}}`;
   peerPayload = { at: now, body: Bun.gzipSync(new TextEncoder().encode(text)), tag: `"${Bun.hash(text).toString(36)}"` };
   return peerPayload;
 }
@@ -8000,6 +8024,25 @@ const writePid = (which: "service" | "worker", pid: number) => {
   } catch {}
 };
 
+let isServiceWorker = false; // this process is the background service's fleet
+/** Whether fleet runs in the background on this machine (and this is not it): then it serves the page and the bot. */
+export const serviceRunning = (): boolean => !isServiceWorker && !!readPid("service");
+/** A fleet window whose fleet.ts has changed since it started is out of date: it says so, until it is restarted. */
+const startedMtime = (() => {
+  try {
+    return fs.statSync(import.meta.path).mtimeMs;
+  } catch {
+    return 0;
+  }
+})();
+export let staleSince = 0;
+export function staleCheck(now = clock()) {
+  if (isServiceWorker || !startedMtime) return; // the service restarts itself onto new code
+  try {
+    if (!staleSince && fs.statSync(import.meta.path).mtimeMs !== startedMtime) staleSince = now;
+  } catch {}
+  if (staleSince) Object.assign(notice, { text: "fleet updated: q, then fleet, to restart", until: now + 12_000 });
+}
 /** --serve: keep the screenless fleet running, starting it again whenever it stops. */
 export async function serveSupervisor(): Promise<never> {
   svcLog(`service started (pid ${process.pid}, ${process.platform})`);
@@ -8033,6 +8076,7 @@ export async function serveSupervisor(): Promise<never> {
 
 /** --serve-worker: fleet with no screen. */
 export async function serveWorker(): Promise<never> {
+  isServiceWorker = true;
   opt.bell = false;
   svcLog(`fleet running with no screen (pid ${process.pid})`);
   process.on("uncaughtException", (e: any) => {
@@ -8794,8 +8838,10 @@ let tgWanted = false; // set at launch for real sessions: talk to the Telegram b
 function refresh() {
   if (Date.now() >= retakeAt) {
     retakeAt = Date.now() + 10_000; // when the fleet serving the page or talking to the bot quits, this one takes over
-    web.retake?.();
+    if (serviceRunning()) web.yieldPort?.();
+    else web.retake?.();
     if (tgWanted) tgClaim();
+    staleCheck();
   }
   const now = clock();
   const local = scan(now);
