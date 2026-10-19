@@ -20,7 +20,7 @@ Every live Claude Code session, on every one of your machines, on one screen: wh
 </p>
 <p align="center"><sub>The phone page, and a session as Telegram's <code>/screen</code> sends it (fleet draws the picture itself).</sub></p>
 
-It is one TypeScript file with no dependencies beyond [Bun](https://bun.sh). It reads the files Claude Code already keeps under `~/.claude`, and writes only its own small files: usage figures (not at all with `--no-usage`, see [Account usage and your login](#account-usage-and-your-login)), and under `~/.config/claude-fleet` the phone page's secret and, once you pair it, the Telegram bot's. Every 30 seconds it asks `git` for the state of each session's checkout, and it asks GitHub, through your `gh` command, about each session's pull requests (`--no-prs` turns that off).
+It is one TypeScript file (and `accounts.ts` beside it, for [other accounts](#other-accounts)) with no dependencies beyond [Bun](https://bun.sh). It reads the files Claude Code already keeps under `~/.claude`, and writes only its own small files: usage figures (not at all with `--no-usage`, see [Account usage and your login](#account-usage-and-your-login)), and under `~/.config/claude-fleet` the phone page's secret and, once you pair it, the Telegram bot's. Every 30 seconds it asks `git` for the state of each session's checkout, and it asks GitHub, through your `gh` command, about each session's pull requests (`--no-prs` turns that off).
 
 ## Try it
 
@@ -131,7 +131,8 @@ Every control has a key, and all but `tab` and `esc` are also buttons on the bot
 | `d` | List finished agents instead of counting them |
 | `tab` | Focus the next session |
 | `b` | Ring the terminal bell when a session starts waiting on you, or when something stalls |
-| `u` | Retry the usage read now (the button appears only while it is failing) |
+| `u` | Usage: every Claude account's limits on one screen, this Mac's login and each [other account](#other-accounts). Opening it retries a failing read; there `r` retries every read, `a` adds an account and `x` removes one |
+| `m` | The menu: finished agents, bell, phone page, Telegram, in the background, each with its own key too |
 | `space` | Seen it. The button counts what is new since you last pressed it |
 | `?` | Legend: what every mark and key means. Any key closes it |
 | `esc` | Leave focus (or quit) |
@@ -304,6 +305,14 @@ A dashboard whose own read fails shows the figures from that file, or failing th
 - Figures under ten minutes old are shown as current.
 - Older ones are shown dim, behind a red `✗` and the time they date from (`✗ as of 23:12`, or `✗ 23:12` where that is all that fits; the three-row header shortens its gauges rather than leave it out), and the reason the read is failing wherever there is room for it.
 - Figures more than a day old, or stamped in the future, are not shown: the block reads `no reading yet`, the reason, and when the next try is.
+
+### Other accounts
+
+Key `u` (or `bun fleet.ts accounts`, which stays open; `--once` prints it once) shows the 5-hour and weekly limits of every Claude account you use, one block each: this Mac's login first, then each account on your list.
+
+**To add one, press `a` on that screen** (or run `bun fleet.ts accounts add`). Fleet steps aside and asks for a name and a folder (`~/.claude-work` for "work"), then runs Claude Code's own sign-in, `claude auth login`, with `CLAUDE_CONFIG_DIR` set to that folder: the browser opens, you sign in with that account, and the login lands in that folder and nowhere else. The account you are working in is never touched. Fleet then checks that the sign-in was recorded and that the keychain holds it where fleet looks, lists the account, and goes back to the screen. `x` takes one off the list, and offers to sign it out of Claude in its folder (`claude auth logout`, there only). `bun fleet.ts accounts --check` says, for each account, whether its folder, login file and keychain entry are there, never what is in them.
+
+The list is `${XDG_CONFIG_HOME:-~/.config}/claude-fleet/accounts.json`, `[{ "name": "work", "dir": "~/.claude-work" }]`, and can be edited by hand. Each account's login is read as this Mac's is (above): from the keychain entry Claude Code keeps for that folder (`Claude Code-credentials-` and eight hex digits of the folder's SHA-256), or its `.credentials.json`, held for one request and never refreshed, written or printed. When an account's login has expired the screen says `token expired · run claude in ~/.claude-work`: any Claude Code session in that folder renews it. If `--check` finds no keychain entry, an entry may name its own (`"keychain": "Claude Code-credentials-1a2b3c4d"`); only entries whose name begins `Claude Code` are ever asked for. While an account's own read fails, the figures Claude Code last fetched in that folder stand in. Nothing is written for other accounts but the list itself.
 
 ## Things to know
 

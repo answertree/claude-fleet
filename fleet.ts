@@ -17,6 +17,7 @@ import * as os from "node:os";
 import { StringDecoder } from "node:string_decoder";
 import { deflateSync, inflateSync } from "node:zlib";
 import { spawn, spawnSync } from "node:child_process";
+import { accountWizard, accountsKey, accountsMain, accountsScreen, retryAccounts, tickAccounts } from "./accounts.ts";
 
 /**
  * Where Claude Code keeps its files; the demo and the tests point FLEET_HOME at made-up sessions. Read each
@@ -72,7 +73,9 @@ Usage: bun fleet.ts [minutes] [options]
 
 Keys: 1 2 3 view mode (3: timeline) · r open the session waiting on you (or
       the focused one) to reply · + - window · a all sessions · d finished agents
-      tab focus next session · b bell · u retry the usage read
+      tab focus next session · b bell
+      u usage: every Claude account's limits (there: r retries, a adds an account)
+      m menu (finished agents, bell, phone, Telegram, background)
       space seen it (marks what is new from now on) · esc leave focus (with
       nothing focused, quit) · q quit
       ? what every mark and key means (any key closes it)
@@ -124,6 +127,8 @@ let focusSid: string | null = null;
 let frame = 0;
 /** A word on the bottom row for a few seconds: what a key could not do. */
 export const notice = { text: "", until: 0 };
+/** Key m: the menu of things used now and then, open above the button bar. */
+export const menu = { open: false };
 export const FPS = 4; // frames a second
 /** Once-a-second beats, for what should blink slowly however fast the frames come: a waiting session's rail. */
 const beat = () => Math.floor(frame / FPS);
@@ -1564,7 +1569,7 @@ function readText(f: string, max = 32 << 20): string | undefined {
     return undefined;
   }
 }
-const readJson = (f: string, max?: number): any => {
+export const readJson = (f: string, max?: number): any => {
   const text = readText(f, max);
   if (text === undefined) return undefined;
   try {
@@ -2142,7 +2147,7 @@ export function loginDecision(k: KeychainOutcome | undefined, f: FileOutcome, re
   return { reason: keychain === REASON.keychainMissing && file === REASON.fileMissing ? REASON.none : keychain, keychain, file };
 }
 
-interface Login {
+export interface Login {
   token: string;
   expiresAt: number;
 }
@@ -2170,25 +2175,31 @@ function ancestorNames(): string[] {
   }
   return names;
 }
-/** The stored login, or the exact reason there is none. The keychain call is the one the dashboard has always made. */
-function readLogin(): { login: Login } | { reason: string } {
+/**
+ * The stored login, or the exact reason there is none. By default the keychain call is the one the dashboard has always
+ * made; another account's folder (key u) passes its own keychain entries, tried in turn while each is "not found", and its own login file.
+ */
+export function readLogin(services = ["Claude Code-credentials"], loginFile = path.join(claudeHome(), ".credentials.json")): { login: Login } | { reason: string } {
   let k: KeychainOutcome | undefined;
   let fromKeychain: Login | undefined;
   if (process.platform === "darwin") {
     k = { status: 127, stderr: "", timedOut: false, parse: "empty" };
     try {
-      const r = spawnSync("security", ["find-generic-password", "-s", "Claude Code-credentials", "-w"], { encoding: "utf8", timeout: 5000 });
-      const parsed: { parse: LoginParse; login?: Login } = r.status === 0 ? parseLogin(r.stdout ?? "") : { parse: "empty" };
-      const timedOut = (r.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT" || (r.status === null && r.signal === "SIGTERM");
-      k = { status: r.error && !timedOut ? 127 : r.status, stderr: String(r.stderr ?? ""), timedOut, parse: parsed.parse };
-      fromKeychain = parsed.login;
+      for (const service of services) {
+        const r = spawnSync("security", ["find-generic-password", "-s", service, "-w"], { encoding: "utf8", timeout: 5000 });
+        const parsed: { parse: LoginParse; login?: Login } = r.status === 0 ? parseLogin(r.stdout ?? "") : { parse: "empty" };
+        const timedOut = (r.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT" || (r.status === null && r.signal === "SIGTERM");
+        k = { status: r.error && !timedOut ? 127 : r.status, stderr: String(r.stderr ?? ""), timedOut, parse: parsed.parse };
+        fromKeychain = parsed.login;
+        if (keychainReason(k, false) !== REASON.keychainMissing) break;
+      }
     } catch {}
   }
   let f: FileOutcome = "missing";
   let fromFile: Login | undefined;
   if (!fromKeychain) {
     try {
-      const file = path.join(claudeHome(), ".credentials.json");
+      const file = loginFile;
       if (!fs.statSync(file).isFile()) throw new Error("not a file"); // a named pipe here would block the dashboard for good
       const parsed = parseLogin(fs.readFileSync(file, "utf8"));
       f = parsed.parse === "empty" ? "not-json" : parsed.parse;
@@ -2330,7 +2341,10 @@ async function readUsage(now: number): Promise<Reading | { reason: string }> {
     const o = readJson(process.env.FLEET_USAGE_FIXTURE);
     return o ? { figures: figuresOnly(o), fetchedAt: typeof o.fetchedAt === "number" ? o.fetchedAt : now } : { reason: REASON.network("fixture not found") };
   }
-  const found = readLogin();
+  return askAnthropic(readLogin(), now);
+}
+/** Ask Anthropic for the figures with a login just read. The login is used for this one request and goes nowhere else. */
+export async function askAnthropic(found: { login: Login } | { reason: string }, now: number): Promise<Reading | { reason: string }> {
   if ("reason" in found) return found;
   if (found.login.expiresAt && found.login.expiresAt < Date.now()) return { reason: REASON.expired };
   let res: Response;
@@ -2425,7 +2439,7 @@ export function usageStateOf(u: { data?: UsageFigures; fetchedAt: number; reason
 }
 export const usageState = (now: number): UsageState => usageStateOf(usage, now);
 
-const hhmm = (t: number) => new Date(t).toTimeString().slice(0, 5);
+export const hhmm = (t: number) => new Date(t).toTimeString().slice(0, 5);
 /** When a limit resets: "resets in 2h10" under a day away, else "resets Fri 09:00". short: "2h10 left" / "Fri 09:00". bare: "2h10" / "Fri 09:00". */
 export function resetText(resetsAt: number, now: number, form: "long" | "short" | "bare" = "long"): string {
   if (!resetsAt || resetsAt <= now) return "";
@@ -4704,9 +4718,9 @@ export type HeaderKind = "tall" | "medium" | "old";
 export const headerKind = (W: number, rows: number, mode: Mode = opt.mode): HeaderKind => (mode === "compact" || W < 100 ? "old" : rows >= 40 ? "tall" : "medium");
 
 /** `text` when it fits in `w` cells; cut with … when enough of it would be left to mean something; else nothing. */
-const fitOrDrop = (text: string, w: number): string => (width(text) <= w ? text : w >= 8 ? fit(text, w, "l", true).replace(/\s+…$/, "…") : "");
+export const fitOrDrop = (text: string, w: number): string => (width(text) <= w ? text : w >= 8 ? fit(text, w, "l", true).replace(/\s+…$/, "…") : "");
 /** The first wording that fits in `w` cells, else the fullest one cut with …. */
-const firstFit = (wordings: string[], w: number): string => wordings.find((x) => width(x) <= w) ?? fitOrDrop(wordings[0], w);
+export const firstFit = (wordings: string[], w: number): string => wordings.find((x) => width(x) <= w) ?? fitOrDrop(wordings[0], w);
 
 /**
  * A limit's gauge, `w` cells: ━ for the part used, in the limit rule's colour, then a faint track. `tick`
@@ -5480,13 +5494,69 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
   }
   while (out.length < rows - 1) out.push("");
   out.length = Math.max(0, rows - 1);
+  if (menu.open) {
+    const first = rows - 1 - (1 + Math.ceil(menuItems().length / (W >= 90 ? 2 : 1))); // out[first] is screen row first + 1
+    for (let i = hits.length - 1; i >= 0; i--) if (hits[i].row > first) hits.splice(i, 1);
+    menuPanel(W, first + 1).forEach((line, i) => (out[first + i] = line));
+  }
   out.push(buttonBar(W, rows, all.filter(isHidden).length));
   // The layout is made for 80 columns and up, and is not drawn narrower than 60. On anything smaller a row is cut at the edge rather than left to wrap.
   return out.map((line) => clipRow(line, cols));
 }
 
+/** One entry in the menu: its key, what it is, how it stands now, and the control it works. */
+export interface MenuItem {
+  key: string;
+  label: string;
+  state: string;
+  act: string;
+}
+/** The menu (key m): what is used now and then, each also on its own key. A switch keeps the menu open, so its new state shows; the rest open a screen. */
+export function menuItems(): MenuItem[] {
+  const svc = svcState();
+  return [
+    { key: "d", label: "Finished agents", state: opt.showDone ? "shown" : "hidden", act: "done" },
+    { key: "b", label: "Bell", state: opt.bell ? "on" : "off", act: "bell" },
+    { key: "w", label: "Phone page", state: web.url ? "on" : "", act: "web" },
+    { key: "t", label: "Telegram", state: tg.paired ? "paired" : "set up", act: "telegram" },
+    { key: "i", label: "In the background", state: !svc.supported ? "" : svc.installed ? "installed" : "off", act: "service" },
+  ];
+}
+/** Controls the menu stays open for. */
+export const MENU_SWITCHES = new Set(["done", "bell"]);
 /**
- * The bottom row: every control, clickable, with its key. The count of idle and finished sessions kept
+ * The open menu: a rule and its entries in two columns (one under 90 columns), drawn over the rows just
+ * above the button bar, the first of them screen row `top`. Each entry is clickable; the rows' other
+ * targets are taken away, so a click there cannot reach what is under the menu.
+ */
+export function menuPanel(W: number, top: number): string[] {
+  const items = menuItems();
+  const cols = W >= 90 ? 2 : 1;
+  const colW = cols === 2 ? Math.min(44, Math.floor((W - 6) / 2)) : W - 4;
+  const perCol = Math.ceil(items.length / cols);
+  const out: string[] = [];
+  const rule = new Row(W);
+  rule.put(1, "─".repeat(W), C.faint);
+  rule.segs(3, [[" MENU ", C.cyan, true], ["m or esc closes ", C.dim]]);
+  out.push(rule.toString());
+  for (let i = 0; i < perCol; i++) {
+    const r = new Row(W);
+    for (let c = 0; c < cols; c++) {
+      const it = items[c * perCol + i];
+      if (!it) continue;
+      const x = 3 + c * (colW + 2);
+      r.put(x, it.key, C.white, true);
+      r.put(x + 3, fitOrDrop(it.label, colW - 16), C.text);
+      if (it.state) r.putr(x + colW - 1, it.state, it.state === "on" || it.state === "shown" || it.state === "paired" || it.state === "installed" ? C.cyan : C.dim);
+      hits.push({ row: top + 1 + i, x0: x, x1: x + colW - 1, act: it.act });
+    }
+    out.push(r.toString());
+  }
+  return out;
+}
+
+/**
+ * The bottom row: the everyday controls, clickable, with their keys; the rest are in the menu (m). The count of idle and finished sessions kept
  * off the screen rides on the a button, and the count of things new since you looked on the space
  * button. Labels shorten in two steps when the row does not fit: digits for the modes and shorter
  * words, then keys alone.
@@ -5517,14 +5587,11 @@ export function buttonBar(W: number, row: number, idle = 0): string {
     plain(" ");
     const all = idle ? `a All · ${idle} idle` : "a All";
     add(all, idle ? `a All·${idle}` : "a All", "a", "all", opt.showAll);
-    add("d Finished agents", "d Done", "d", "done", opt.showDone);
-    add("b Bell", "b", "b", "bell", opt.bell);
-    if (opt.usage && usage.reason) add("u Retry usage", "u Retry", "u", "usage"); // only while a usage read is failing
     const seenIt = newCount() ? `space Seen · ${newCount()} new` : "space Seen";
     add(seenIt, newCount() ? `␣ Seen·${newCount()}` : "␣ Seen", "␣", "seen");
     add("r Reply", "r Reply", "r", "reply");
-    add("w Phone", "w Phone", "w", "web", !!web.url);
-    add("t Telegram", "t", "t", "telegram", tg.paired);
+    if (opt.usage) add("u Usage", "u Usage", "u", "accounts", acctOn); // every account's limits; a failing read is retried as it opens
+    add("m Menu", "m Menu", "m", "menu", menu.open); // everything used now and then: see menuItems()
     add("? Legend", "?", "?", "legend");
     plain(" ");
     add("q Quit", "q Quit", "q", "quit");
@@ -8503,6 +8570,7 @@ let webGlasses = false; // on the w screen, key g: the glasses QR code instead o
 // ───────────────────────── legend ─────────────────────────
 
 let legendOn = false; // key ?: the legend is showing instead of the fleet
+let acctOn = false; // key u: every Claude account's usage is showing instead of the fleet
 
 /**
  * Key ?: one screen that says what every mark and key means, since the screen itself carries no word
@@ -8558,8 +8626,8 @@ export function legend(cols: number, rows: number): string[] {
     key("d", "list finished agents"),
     key("tab", "focus the next session"),
     key("esc", "leave focus; with none, quit"),
-    key("r w t i", "open one waiting; phone; Telegram; background"),
-    key("b u", "bell on/off; retry usage now"),
+    key("r", "open the session waiting on you"),
+    key("b u m", "bell; usage, every account; menu"),
     key("space", "seen it: clears the new marks"),
     key("?", "this legend"),
     key("q", "quit"),
@@ -8698,6 +8766,7 @@ function refresh() {
   holdStalls(sessions, now);
   steadyClock(now);
   if (opt.usage && !opt.once) tickUsage(now); // --once has already made its one read
+  if (opt.usage && !opt.once) tickAccounts(now); // the other accounts in accounts.json, if any
   // Ring once when a session starts waiting on the person, and once for each thing that newly stalls.
   const facts = sessions.map((s) => ({ s, f: factsOf(s) }));
   const asks = facts.filter((x) => x.f.needs).map((x): [string, number] => [x.s.sid, stateSince(x.s, x.f, "needs")]);
@@ -8729,6 +8798,7 @@ function refresh() {
 }
 
 if (import.meta.main) {
+  if (process.argv[2] === "accounts") await accountsMain(process.argv.slice(3)); // never returns
   const command = parseArgs(process.argv.slice(2));
   if (command) {
     process.stdout.write(command === "help" ? HELP : glyphCard());
@@ -8790,8 +8860,10 @@ if (import.meta.main) {
 
   const out = process.stdout;
   let onScreen: string[] | undefined; // the frame the terminal shows, so the next writes only the rows that differ
+  let away = false; // a wizard has the terminal (key a or x on the accounts screen)
   const draw = () => {
-    const lines = legendOn ? legend(out.columns || 140, out.rows || 45) : webOn ? webScreen(out.columns || 140, out.rows || 45) : tgOn ? tgScreen(out.columns || 140, out.rows || 45) : svcOn ? svcScreen(out.columns || 140, out.rows || 45) : render(sessions, out.columns || 140, out.rows || 45, clock());
+    if (away) return;
+    const lines = legendOn ? legend(out.columns || 140, out.rows || 45) : acctOn ? accountsScreen(out.columns || 140, out.rows || 45, clock()) : webOn ? webScreen(out.columns || 140, out.rows || 45) : tgOn ? tgScreen(out.columns || 140, out.rows || 45) : svcOn ? svcScreen(out.columns || 140, out.rows || 45) : render(sessions, out.columns || 140, out.rows || 45, clock());
     out.write(frameDiff(onScreen, lines));
     onScreen = lines;
   };
@@ -8815,7 +8887,11 @@ if (import.meta.main) {
   /** Every control, whether it came from a key or a click. */
   const act = (name: string) => {
     if (name === "quit") return quit();
-    if (name.startsWith("mode:")) opt.mode = name.slice(5) as Mode;
+    if (name === "back" && menu.open) name = "menu"; // esc closes the menu first
+    if (name === "menu") menu.open = !menu.open;
+    else if (!MENU_SWITCHES.has(name)) menu.open = false;
+    if (name === "menu") {
+    } else if (name.startsWith("mode:")) opt.mode = name.slice(5) as Mode;
     else if (name === "win+") opt.windowMin = stepWindow(opt.windowMin, 1);
     else if (name === "win-") opt.windowMin = stepWindow(opt.windowMin, -1);
     else if (name === "reply") return reply();
@@ -8836,8 +8912,14 @@ if (import.meta.main) {
     else if (name === "bell") opt.bell = !opt.bell;
     else if (name === "seen") markSeen(clock());
     else if (name === "legend") legendOn = true;
+    else if (name === "accounts") {
+      acctOn = true;
+      if (opt.usage && usage.reason) void fetchUsage().then(draw); // u has always retried a failing read
+      if (opt.usage) tickAccounts(clock());
+    }
     else if (name === "usage") {
       if (opt.usage) void fetchUsage().then(draw); // retry now, whatever the next try was set to
+      if (opt.usage) void retryAccounts().then(draw);
     } else if (name.startsWith("focus:")) focusSid = focusSid === name.slice(6) ? null : name.slice(6);
     else if (name === "next") focusSid = nextFocus(sessions, clock(), out.columns || 140, focusSid);
     else if (name === "back") {
@@ -8872,6 +8954,23 @@ if (import.meta.main) {
     Object.assign(notice, { text, until: clock() + 5000 });
     draw();
   };
+  /** Step aside for a conversation in the ordinary terminal, then come back to the same screen. */
+  const stepOut = (job: () => Promise<unknown>) => {
+    away = true;
+    out.write(leaveScreen(opt.mouse));
+    if (process.stdin.isTTY) process.stdin.setRawMode(false);
+    void job().finally(() => {
+      away = false;
+      out.write(enterScreen(opt.mouse));
+      if (process.stdin.isTTY) {
+        process.stdin.setRawMode(true);
+        process.stdin.resume();
+      }
+      refresh();
+      clear();
+      draw();
+    });
+  };
 
   refresh(); // the first read, under the splash
   setScanProgress(undefined);
@@ -8882,6 +8981,7 @@ if (import.meta.main) {
   // Four frames a second, so spinners and celebrations move smoothly; the data is read every two seconds,
   // and only the rows that change are written (a frame takes a couple of milliseconds to lay out).
   setInterval(() => {
+    if (away) return;
     frame++;
     if (frame % (FPS * 2) === 0) {
       refresh();
@@ -8904,12 +9004,13 @@ if (import.meta.main) {
     q: "quit", "\x03": "quit", "\x1b": "back", "\t": "next", w: "web", t: "telegram", i: "service",
     "1": "mode:detail", "2": "mode:compact", "3": "mode:far", r: "reply",
     "+": "win+", "=": "win+", "-": "win-", _: "win-",
-    d: "done", a: "all", b: "bell", u: "usage", " ": "seen", "?": "legend",
+    d: "done", a: "all", b: "bell", u: "accounts", m: "menu", " ": "seen", "?": "legend",
   };
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(true);
     process.stdin.resume();
     const handle = (events: InputEvent[]) => {
+      if (away) return; // the wizard reads the terminal itself
       const keys = events.filter((e) => e.kind === "key");
       if (keys.some((e) => e.kind === "key" && e.key === "\x03")) return quit(); // Ctrl-C quits from anywhere in a read
       // The background service screen: y installs or removes it, anything else closes it.
@@ -8938,6 +9039,13 @@ if (import.meta.main) {
       for (const e of events) {
         if (e.kind === "other" || (e.kind === "key" && keys.length > PASTE_KEYS)) continue;
         // The legend is closed by a key or a click, which then does nothing else. A button's release is not a click, so the click that opened it does not close it.
+        // The usage screen answers r (retry every read now), a (add an account) and x (remove one) itself.
+        const wizard = acctOn && e.kind === "key" ? accountsKey(e.key) : undefined;
+        if (wizard === "retry") {
+          act("usage");
+          continue;
+        }
+        if (wizard) return stepOut(() => accountWizard(wizard));
         // On the w screen, g switches between the phone's code and the glasses'.
         if (webOn && e.kind === "key" && e.key === "g") {
           webGlasses = !webGlasses;
@@ -8945,8 +9053,9 @@ if (import.meta.main) {
           draw();
           continue;
         }
-        if (legendOn || webOn) {
+        if (legendOn || webOn || acctOn) {
           legendOn = false;
+          acctOn = false;
           webOn = false;
           webGlasses = false;
           clear();

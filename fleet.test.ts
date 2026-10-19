@@ -1690,13 +1690,13 @@ describe("since you looked", () => {
   test("the buttons carry the hidden count and the count of new things", () => {
     resetSeen(NOW);
     expect(strip(F.buttonBar(200, 44, 1))).toContain(" a All · 1 idle ");
-    expect(strip(F.buttonBar(150, 44, 1))).toContain(" a All·1 "); // the shorter labels at 150
+    expect(strip(F.buttonBar(120, 44, 1))).toContain(" a All·1 "); // the shorter labels at 120
     expect(strip(F.buttonBar(200, 44, 0))).toContain(" a All ");
     expect(strip(F.buttonBar(200, 44))).toContain(" space Seen ");
     F.seen.events.push(...Array.from({ length: 4 }, (_, i) => ({ kind: "reply" as F.EventKind, t: NOW + i, sid: "a", key: "k" })));
     expect(strip(F.buttonBar(210, 44, 1))).toContain(" space Seen · 4 new ");
-    expect(strip(F.buttonBar(150, 44, 1))).toContain(" ␣ Seen·4 ");
-    expect(strip(F.buttonBar(210, 44, 1))).not.toContain("Retry usage"); // only while a usage read is failing
+    expect(strip(F.buttonBar(120, 44, 1))).toContain(" ␣ Seen·4 ");
+    expect(strip(F.buttonBar(210, 44, 1))).not.toContain("Retry"); // u opens the usage screen, which retries a failing read
     for (const W of [80, 100, 110, 130, 150, 200]) expect(F.cells(F.buttonBar(W, 44, 3))).toBeLessThanOrEqual(W);
     resetSeen(NOW);
   });
@@ -2078,20 +2078,19 @@ describe("header and chrome", () => {
 
   test("the button bar carries the hidden count, and its labels shorten in two steps", () => {
     const bar = (W: number, idle = 1, account = "current") => draw(account, () => strip(F.buttonBar(W, 44, idle)).trimEnd());
-    expect(bar(200)).toBe("  1 Detail   2 Compact   3 Timeline    −  30m  +    a All · 1 idle   d Finished agents   b Bell   space Seen   r Reply   w Phone   t Telegram   ? Legend    q Quit          click a session to focus it");
-    expect(bar(150)).toBe("  1 Detail   2 Compact   3 Timeline    −  30m  +    a All·1   d Done   b   ␣ Seen   r Reply   w Phone   t   ?    q Quit");
-    expect(bar(80, 1, "remote")).toBe("  1   2   3    −  30m  +    a   d   b   u   ␣   r   w   t   ?    q");
-    // "u Retry usage" is there only while a usage read is failing, whatever figures are on screen.
-    expect([bar(220, 1, "none"), bar(220, 1, "stale"), bar(220, 1, "shared")].map((b) => b.includes(" u Retry usage "))).toEqual([true, true, true]);
-    expect([bar(220), bar(220, 1, "off")].map((b) => b.includes("Retry"))).toEqual([false, false]);
-    expect(bar(160, 1, "none")).toContain(" u Retry ");
+    expect(bar(200)).toBe("  1 Detail   2 Compact   3 Timeline    −  30m  +    a All · 1 idle   space Seen   r Reply   u Usage   m Menu   ? Legend    q Quit                                           click a session to focus it");
+    expect(bar(120)).toBe("  1 Detail   2 Compact   3 Timeline    −  30m  +    a All·1   ␣ Seen   r Reply   u Usage   m Menu   ?    q Quit");
+    expect(bar(80, 1, "remote")).toBe("  1   2   3    −  30m  +    a   ␣   r   u   m   ?    q");
+    // "u Usage" opens every account's limits, failing or not; with usage off there is nothing to open.
+    expect([bar(220), bar(220, 1, "none"), bar(220, 1, "stale"), bar(220, 1, "shared")].map((b) => b.includes(" u Usage "))).toEqual([true, true, true, true]);
+    expect(bar(220, 1, "off")).not.toContain("Usage");
     for (let W = 80; W <= 200; W += 5) for (const account of ["current", "none"]) expect(F.width(bar(W, 12, account))).toBeLessThanOrEqual(W);
     // The line that used to name the hidden sessions is gone from every mode.
     for (const mode of ["detail", "compact", "far", "timeline"] as F.Mode[]) {
       const frame = draw("current", () => F.render(fleet(), 150, 44, NOW).map(strip), { mode });
       expect(frame.length).toBe(44);
       expect(frame.join("\n")).not.toMatch(/hidden|a shows/);
-      expect(frame.at(-1)).toContain(" a All·1 ");
+      expect(frame.at(-1)).toContain(" a All · 1 idle ");
     }
   });
 
@@ -2103,7 +2102,7 @@ describe("header and chrome", () => {
       const text = lines.join("\n");
       for (const word of ["needs you", "stalled?", "working", "your turn", "idle", "finished", "you", "Claude", "earlier", "live", "in progress", "not started", "done", "failed", "workflow", "no reading", "pace", "context", "rail"]) expect([cols, word, text.includes(word)]).toEqual([cols, word, true]);
       for (const glyph of ["▲", "◐", "●", "▸", "○", "✓", "✗", "◆", "◇", "⠋", "≡", "━", "┼", "┿", "╌", "█", "▌", "░", "■", "•", "…", "┴", "▼"]) expect([cols, glyph, text.includes(glyph)]).toEqual([cols, glyph, true]);
-      for (const key of ["1 2 3", "+ -", "a ", "d ", "tab", "esc", "b u", "r w t", "space", "? ", "q "]) expect([cols, key, lines.some((l) => l.includes(key))]).toEqual([cols, key, true]);
+      for (const key of ["1 2 3", "+ -", "a ", "d ", "tab", "esc", "b u", "r ", "m ", "space", "? ", "q "]) expect([cols, key, lines.some((l) => l.includes(key))]).toEqual([cols, key, true]);
       expect(lines.at(-1)).toContain("any key or click returns");
     }
     // With --plain-glyphs it shows the stand-ins the screen is drawing.
@@ -3885,7 +3884,7 @@ describe("one program: the header, the sessions and the buttons agree", () => {
     const lines = frame("detail", 150, 44, NOW, false);
     expect(lines[0]).toContain("▲ 1 needs you    ● 2 working    ⠋ 4 agents    ≡ 1 workflow    ○ 1 idle");
     expect(lines.filter((l) => l.startsWith(" ██ ")).length).toBe(3 * 2); // three sessions on screen, two head rows each
-    expect(lines[43]).toContain(" a All·1 ");
+    expect(lines[43]).toContain(" a All · 1 idle ");
     expect(lines.join("\n")).not.toContain("hidden"); // the line that used to say so is gone from every mode
     for (const mode of MODES) expect([mode, frame(mode, 150, 44, NOW, false).join("\n").includes("hidden")]).toEqual([mode, false]);
 
@@ -4058,14 +4057,14 @@ describe("demo", () => {
     const frame = Object.fromEntries(["current", "extra-off", "stale", "none", "remote"].map((a) => [a, squash(demo(["--plain", "--account", a]))]));
     expect(frame.current).toContain("38%");
     expect(frame.current).toContain("£12of£50");
-    expect(frame.current).not.toContain("uretryusage");
+    expect(frame.current).toContain("uusage"); // the usage screen's button, whatever the read is doing
     expect(frame["extra-off"]).toContain("12%"); // the Opus week, returned only here
     expect(frame.stale).toContain("anthropicanswered429");
     expect(frame.stale).toMatch(/asof\d\d:\d\d/);
     expect(frame.none).toContain("keychain:noanswerin5s");
     expect(frame.none).not.toContain("unlock-keychain");
     expect(frame.remote).toContain("keychain:closedtoremote");
-    expect(frame.remote).toContain("uretryusage");
+    expect(frame.remote).toContain("uretries"); // u opens the usage screen and retries the failing read
     expect(frame.remote).toContain("securityunlock-keychain~/library/keychains/login.keychain-db"); // the remedy
   }, SLOW);
 
