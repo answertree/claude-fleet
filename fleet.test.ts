@@ -5658,6 +5658,22 @@ describe("a fleet window and the background service", () => {
   });
 });
 
+describe("which checkout a session's git figures are about", () => {
+  const mk = (branch: string) => ({ sid: "g1", name: "g", cwd: "/repo", mains: [{ branch }], agents: [], workflows: [], side: { cwd: "/repo", prs: [], edits: [] } }) as any;
+  test("the folder it started in when its branch is out there; the worktree with its branch when it has moved; none when no checkout has it", () => {
+    F.gitState.clear();
+    F.worktreeState.clear();
+    F.gitState.set("/repo", { at: Date.now(), state: { branch: "main", dirty: 6, ahead: 0, behind: 49 } });
+    F.gitState.set("/repo/.wt/fix", { at: Date.now(), state: { branch: "fix/invites", dirty: 0, ahead: 2, behind: 0 } });
+    F.worktreeState.set("/repo", { at: Date.now(), list: F.parseWorktrees("worktree /repo\nHEAD abc\nbranch refs/heads/main\n\nworktree /repo/.wt/fix\nHEAD def\nbranch refs/heads/fix/invites\n\nworktree /repo/.wt/old\nHEAD 123\ndetached\n") });
+    expect(F.gitOf(mk("main"))).toEqual({ branch: "main", dirty: 6, ahead: 0, behind: 49 });
+    expect(F.gitOf(mk("fix/invites"))).toEqual({ branch: "fix/invites", dirty: 0, ahead: 2, behind: 0 });
+    expect(F.gitOf(mk("feature/merged-and-gone"))).toBeUndefined();
+    F.gitState.clear();
+    F.worktreeState.clear();
+  });
+});
+
 describe("the glasses' slide and dashboards", () => {
   const now = Date.now();
   const mk = (sid: string, name: string, job: object) => ({ sid, name, kind: "bg", status: "busy", cwd: "/x", startedAt: now - 60_000, pid: 1, mains: [], agents: [], workflows: [], job: { detail: "", needs: "", ...job } }) as any;
