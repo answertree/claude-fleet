@@ -5109,7 +5109,7 @@ describe("key t: Telegram", () => {
     F.web.send = async (s, text) => (sent.push([s.sid, text]), { ok: true });
     try {
       calls.length = 0;
-      await F.tgSay("🟡 checkout flow needs you", "s1", true);
+      await F.tgSay("🟡 checkout flow needs you", "s1", true, "ask");
       const [method, body] = calls[0];
       expect([method, body.chat_id, body.reply_markup.inline_keyboard[0][0].text]).toEqual(["sendMessage", 42, "↩ Reply"]);
       const askId = 101;
@@ -5123,16 +5123,42 @@ describe("key t: Telegram", () => {
       await F.tgHandle({ message: { message_id: 9, text: "yes, drop it", chat: { id: 42 }, from: { id: 7 }, reply_to_message: { message_id: promptId } } });
       expect(sent).toEqual([["s1", "yes, drop it"]]);
       expect(calls.at(-1)![1].text).toBe("✓ sent to checkout flow");
-      // Once the session stops waiting, the button comes off the question.
+      // Once the session stops waiting, the question is deleted.
+      F.tgSettle(new Set(["s1"]));
+      await Bun.sleep(50);
+      expect(calls.at(-1)![0]).not.toBe("deleteMessage");
       F.tgSettle(new Set());
       await Bun.sleep(50);
-      expect(calls.at(-1)).toEqual(["editMessageReplyMarkup", { chat_id: 42, message_id: askId, reply_markup: { inline_keyboard: [] } }]);
+      expect(calls.at(-1)).toEqual(["deleteMessage", { chat_id: 42, message_id: askId }]);
       // Messages from another chat never reach a session.
       await F.tgHandle({ message: { message_id: 10, text: "rm -rf", chat: { id: 666 }, from: { id: 666 }, reply_to_message: { message_id: promptId } } });
       expect(sent.length).toBe(1);
     } finally {
       delete F.web.send;
     }
+  });
+
+  test("'needs you' and 'looks stuck' are deleted once untrue, a newer one replaces the last, and a restart still tidies them", async () => {
+    F.writeTg({ token: TOKEN, chat: 42, user: 7, bot: "my_fleet_bot" });
+    calls.length = 0;
+    await F.tgSay("🟡 s1 needs you", "s1", true, "ask"); // 101
+    await F.tgSay("⏳ s2 looks stuck", "s2", false, "stall"); // 102
+    await F.tgSay("✅ s2: #4 CI green", "s2"); // 103: news, never deleted
+    await F.tgSay("🟡 s1 needs you again", "s1", true, "ask"); // 104 replaces 101
+    await Bun.sleep(50);
+    expect(calls.filter(([m]) => m === "deleteMessage").map(([, b]) => b.message_id)).toEqual([101]);
+    // What was sent is on disk beside the pairing, so a fresh fleet knows it.
+    expect(JSON.parse(fs.readFileSync(path.join(dir, "telegram-status.json"), "utf8")).map((x: any) => x.id).sort()).toEqual([102, 105 - 1]);
+    calls.length = 0;
+    F.tgSettle(new Set(["s1"]), new Set(["s2"]));
+    await Bun.sleep(50);
+    expect(calls).toEqual([]);
+    F.tgSettle(new Set(["s1"]), new Set());
+    await Bun.sleep(50);
+    expect(calls).toEqual([["deleteMessage", { chat_id: 42, message_id: 102 }]]);
+    F.tgSettle(new Set(), new Set());
+    await Bun.sleep(50);
+    expect(calls.map(([, b]) => b.message_id)).toEqual([102, 104]);
   });
 
   test("everything in the detail view is a command or a menu away, and menus tidy themselves away", async () => {
@@ -5629,6 +5655,7 @@ describe("the glasses' slide and dashboards", () => {
     F.opt.usage = false;
     try {
       expect(F.fiveHourLine(now).text).toMatch(/^5h: no usage figures/);
+      expect(F.fiveHourLine(now).kind).toBeUndefined(); // nothing for the phone's panel to draw
     } finally {
       F.opt.usage = was;
     }
