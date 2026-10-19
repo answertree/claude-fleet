@@ -146,6 +146,7 @@ export const C = {
   faint: [58, 64, 74] as RGB, // gauge tracks, empty buckets, free context, rules
   amber: [229, 181, 68] as RGB, // you are needed: ▲, NEEDS YOU, that session's rail, the masthead tile
   tint: [52, 38, 0] as RGB, // background behind a waiting session's title and question
+  doneTint: [8, 42, 22] as RGB, // background behind a just-finished session's title
   warmDim: [150, 130, 90] as RGB, // dim text on the tint
   red: [240, 98, 92] as RGB, // broken or nearly out: ✗, failed, any limit at 80% or more, stalled
   green: [80, 200, 120] as RGB, // alive: ●, WORKING, the spinner, "live", ✓ inside strips
@@ -477,12 +478,13 @@ export function setPlainGlyphs(on: boolean) {
   for (const [k, v] of Object.entries(GLYPHS) as [IconName, { g: string; plain?: string }][]) ICON[k] = on && v.plain ? v.plain : v.g;
 }
 
-export type SessionState = "needs" | "stalled" | "working" | "yourTurn" | "idle" | "finished";
+export type SessionState = "needs" | "stalled" | "working" | "justDone" | "yourTurn" | "idle" | "finished";
 /** Each session state has its own glyph, word and colour, so the screen still reads without colour. Listed in sort order. */
 export const STATE: Record<SessionState, { glyph: string; word: string; color: RGB }> = {
   needs: { glyph: "▲", word: "NEEDS YOU", color: C.amber },
   stalled: { glyph: "◐", word: "STALLED?", color: C.red },
   working: { glyph: "●", word: "WORKING", color: C.green },
+  justDone: { glyph: "✓", word: "FINISHED", color: C.green }, // finished while you watched: on show until space
   yourTurn: { glyph: "▸", word: "YOUR TURN", color: C.blue },
   idle: { glyph: "○", word: "IDLE", color: C.dim },
   finished: { glyph: "✓", word: "FINISHED", color: C.done },
@@ -2777,6 +2779,7 @@ export const byState = (a: { state: SessionState; s: Session }, b: { state: Sess
 
 /** When the session's state began: how long it has waited, been stalled, been up, or since Claude last spoke. */
 export function stateSince(s: Session, f: Facts, state: SessionState, stalledSince = 0): number {
+  if (state === "justDone") return heldOpen.get(s.sid) ?? 0;
   const m = f.main;
   const lastWrite = m ? lastWriteOf(m) : 0;
   const ask = m && pendingOf(m);
@@ -2955,6 +2958,8 @@ export function markSeen(now: number) {
   seen.at = now;
   seen.events = [];
   heldOpen.clear(); // the finished sessions you have now seen go quietly
+  for (const sid of quietSince.keys()) wasShown.delete(sid);
+  quietSince.clear();
 }
 /** Is this timestamp new since you last looked? Replies newer than the mark get a bold ◆ and the word "new" for an age. */
 export const isNew = (t: number): boolean => t > seen.at;
@@ -3177,7 +3182,7 @@ export function buildViews(sessions: Session[], now: number, since = frameWindow
         showMain: s.status === "busy" && s.mains.length > 0,
         showNeeds: !!facts.needs,
         facts,
-        state: sessionState(facts, stall.count > 0),
+        state: heldOpen.has(s.sid) && isQuiet(s, facts, since) ? "justDone" : sessionState(facts, stall.count > 0),
         stall,
         quiet: isQuiet(s, facts, since),
         lastT,
@@ -3193,27 +3198,35 @@ export function buildViews(sessions: Session[], now: number, since = frameWindow
  */
 export const heldOpen = new Map<string, number>();
 const wasShown = new Set<string>();
+const quietSince = new Map<string, number>(); // when each shown session went quiet: it has finished once it stays so
+export const FINISH_CONFIRM_MS = 8000; // picking a session up can show it as done for a moment: that is not a finish
 let finishPrimed = false;
 export function noteFinished(sessions: Session[], now: number): string[] {
   const finished: string[] = [];
   const live = new Set(sessions.map((s) => s.sid));
   for (const v of buildViews(sessions, now)) {
     const sid = v.s.sid;
-    if (v.quiet && finishPrimed && wasShown.has(sid) && !heldOpen.has(sid)) {
-      heldOpen.set(sid, now);
-      parties.set(sid, { text: "finished", at: now });
-      finished.push(sid);
+    if (!v.quiet) {
+      heldOpen.delete(sid); // busy again: an ordinary session once more
+      quietSince.delete(sid);
+      wasShown.add(sid);
+      continue;
     }
-    if (!v.quiet) heldOpen.delete(sid); // busy again: an ordinary session once more
-    if (v.quiet && !heldOpen.has(sid)) wasShown.delete(sid);
-    else wasShown.add(sid);
+    if (!finishPrimed || !wasShown.has(sid)) continue; // quiet since before fleet looked, or already seen off
+    if (heldOpen.has(sid)) continue;
+    const quietAt = quietSince.get(sid) ?? now;
+    quietSince.set(sid, quietAt);
+    if (now - quietAt < FINISH_CONFIRM_MS) continue; // not yet: it may only be between two turns
+    heldOpen.set(sid, quietAt);
+    parties.set(sid, { text: "finished", at: now });
+    finished.push(sid);
   }
   for (const sid of heldOpen.keys()) if (!live.has(sid)) heldOpen.delete(sid);
-  for (const sid of wasShown) if (!live.has(sid)) wasShown.delete(sid);
+  for (const m of [wasShown, quietSince]) for (const sid of m.keys()) if (!live.has(sid)) m.delete(sid);
   finishPrimed = true;
   return finished;
 }
-export const isHidden = (v: View): boolean => v.quiet && !heldOpen.has(v.s.sid);
+export const isHidden = (v: View): boolean => v.quiet && !heldOpen.has(v.s.sid) && !quietSince.has(v.s.sid);
 /**
  * The session tab moves the focus to from `current` (null: none is focused): the next one down the
  * screen, in the order the screen lists them, so the first press lands on whoever needs you. Sessions
@@ -4416,11 +4429,12 @@ function headRows(b: Block, p: Paint): Row[] {
   const { g, now } = p;
   const { s, facts: f, state } = b.v;
   const needs = state === "needs";
+  const justDone = state === "justDone";
   const receded = isReceded(state);
   const tone = STATE[state].color;
   const dim = needs ? C.warmDim : C.dim;
   const start = () => {
-    const r = new Row(g.W, needs ? C.tint : undefined);
+    const r = new Row(g.W, needs ? C.tint : justDone ? C.doneTint : undefined);
     r.put(g.rail, ICON.railThick, railTone(state, true, beat()));
     return r;
   };
@@ -6852,7 +6866,7 @@ export function tgSweep(now = Date.now()) {
 
 
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-const STATE_EMOJI: Record<string, string> = { needs: "🟡", stalled: "⏳", working: "🟢", yours: "🔵", idle: "⚪", done: "✅" };
+const STATE_EMOJI: Record<string, string> = { needs: "🟡", stalled: "⏳", working: "🟢", justDone: "✅", yourTurn: "🔵", idle: "⚪", finished: "✅" };
 const BLOCKS = "▁▂▃▄▅▆▇█";
 /** A sparkline in text, `n` wide. */
 export function sparkText(values: number[], n = 24): string {
@@ -6879,7 +6893,7 @@ export function tgOverview(now = clock()): TgView {
   const usage = [...(st.account?.limits.length ? [{ host: selfHost(), limits: st.account.limits }] : []), ...[...peers.values()].filter((p) => p.usage?.length).map((p) => ({ host: p.host, limits: p.usage! }))];
   if (usage.length) lines.push("", ...usage.map((u) => `📊 ${machines.length > 1 ? esc(u.host) + ": " : ""}${u.limits.map((l) => `${esc(l.label)} ${l.pct}%`).join(" · ")}`));
   if (st.hidden) lines.push("", `<i>${st.hidden} idle or finished not shown</i>`);
-  const order = ["needs", "stalled", "working", "yours", "idle", "done"];
+  const order = ["needs", "stalled", "working", "justDone", "yourTurn", "idle", "finished"];
   const rows = [...st.sessions]
     .sort((a, b) => order.indexOf(a.state) - order.indexOf(b.state))
     .slice(0, 24)
@@ -8339,11 +8353,11 @@ function glassesRoster(r: ReturnType<typeof rosterOfView>): string[] {
   if (r.agents.length > 4) out.push(`+ ${r.agents.length - 4} more agents`);
   return out;
 }
-const GLASSES_MARK: Record<string, string> = { needs: "▲", stalled: "◐", working: "●", yours: "▶", idle: "○", done: "○" };
+const GLASSES_MARK: Record<string, string> = { needs: "▲", stalled: "◐", working: "●", justDone: "■", yourTurn: "▶", idle: "○", finished: "○" };
 /** Everything the glasses page shows, in plain, short, drawable text. */
 export function glassesState(sessions: Session[], now: number) {
   const st = webState(sessions, now);
-  const order = ["needs", "stalled", "working", "yours", "idle", "done"];
+  const order = ["needs", "stalled", "working", "justDone", "yourTurn", "idle", "finished"];
   return {
     clock: new Date(now).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }),
     counts: st.counts,
@@ -8622,7 +8636,7 @@ export function legend(cols: number, rows: number): string[] {
     mark(STATE.working.glyph, C.green, "working", "alive and busy"),
     mark(STATE.yourTurn.glyph, C.blue, "your turn", "it replied; your move", true),
     mark(STATE.idle.glyph, C.dim, "idle", "nothing running"),
-    mark(STATE.finished.glyph, C.done, "finished", "its job says it is done"),
+    mark(STATE.finished.glyph, C.green, "finished", "just now (space clears), or its job is done", true),
     [],
     head("CONVERSATION"),
     mark(ICON.you, C.blue, "you", "something you typed", true),

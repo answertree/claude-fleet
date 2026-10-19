@@ -340,7 +340,7 @@ describe("vocabulary", () => {
   });
 
   test("state colours and the gauge rule", () => {
-    expect(F.STATE_ORDER).toEqual(["needs", "stalled", "working", "yourTurn", "idle", "finished"]);
+    expect(F.STATE_ORDER).toEqual(["needs", "stalled", "working", "justDone", "yourTurn", "idle", "finished"]);
     expect(F.STATE.needs).toEqual({ glyph: "▲", word: "NEEDS YOU", color: [229, 181, 68] });
     expect(F.STATE.stalled).toEqual({ glyph: "◐", word: "STALLED?", color: [240, 98, 92] });
     expect(F.STATE.working).toEqual({ glyph: "●", word: "WORKING", color: [80, 200, 120] });
@@ -5521,22 +5521,37 @@ describe("on your glasses", () => {
 });
 
 describe("a session that finishes while you watch", () => {
-  test("it has its party and stays on the screen until space; one already idle at launch stays out of the way", () => {
-    const now = Date.now();
-    const busy = { sid: "s1", name: "busy one", kind: "bg", status: "busy", cwd: "/x", startedAt: now - 60_000, pid: 1, mains: [], agents: [], workflows: [], job: { state: "working", detail: "", needs: "" } } as any;
-    const idle = { ...busy, sid: "s2", name: "idle one", job: { state: "done", detail: "", needs: "" } } as any;
-    F.heldOpen.clear();
+  const now = Date.now();
+  const busy = { sid: "s1", name: "busy one", kind: "bg", status: "busy", cwd: "/x", startedAt: now - 60_000, pid: 1, mains: [], agents: [], workflows: [], job: { state: "working", detail: "", needs: "" } } as any;
+  const idle = { ...busy, sid: "s2", name: "idle one", job: { state: "done", detail: "", needs: "" } } as any;
+  const done = { ...busy, job: { state: "done", detail: "", needs: "" } };
+  const view = (s: any, t = now) => F.buildViews([s], t)[0];
+
+  test("it has its party, shows as just finished, and stays on the screen until space; one already idle at launch stays out of the way", () => {
+    F.markSeen(now - 1);
     expect(F.noteFinished([busy, idle], now)).toEqual([]); // the first look: nothing is news
-    const view = (s: any) => F.buildViews([s], now)[0];
     expect([F.isHidden(view(busy)), F.isHidden(view(idle))]).toEqual([false, true]);
-    const done = { ...busy, job: { state: "done", detail: "", needs: "" } };
-    expect(F.noteFinished([done, idle], now + 2000)).toEqual(["s1"]);
-    expect(F.partyOn("s1", now + 2000)?.text).toBe("finished");
-    expect([F.isHidden(view(done)), F.isHidden(view(idle))]).toEqual([false, true]); // still on show, party or not
-    expect(F.fleetCounts([done, idle], now + 2000).idle).toBe(1); // only the one kept off the screen
+    expect(F.noteFinished([done, idle], now + 2000)).toEqual([]); // quiet for a moment: not yet a finish
+    expect(F.isHidden(view(done, now + 2000))).toBe(false);
+    expect(F.noteFinished([done, idle], now + 2000 + F.FINISH_CONFIRM_MS)).toEqual(["s1"]);
+    expect(F.partyOn("s1", now + 2000 + F.FINISH_CONFIRM_MS)?.text).toBe("finished");
+    const v = view(done, now + 2000 + F.FINISH_CONFIRM_MS);
+    expect([v.state, F.STATE[v.state].word, F.isHidden(v), F.isHidden(view(idle))]).toEqual(["justDone", "FINISHED", false, true]);
+    expect(F.stateTime(done, v.facts, v.state, now + 62_000)).toBe("1m"); // since it went quiet
+    expect(F.fleetCounts([done, idle], now + 20_000).idle).toBe(1); // only the one kept off the screen
     expect(F.noteFinished([done, idle], now + 30_000)).toEqual([]); // finished once, not every scan
-    expect(F.isHidden(view(done))).toBe(false);
     F.markSeen(now + 40_000); // space: seen it
-    expect(F.isHidden(view(done))).toBe(true);
+    expect(F.isHidden(view(done, now + 40_000))).toBe(true);
+  });
+
+  test("picking a session up again, when it shows as done for a moment, is not a finish", () => {
+    F.markSeen(now - 1);
+    const t0 = now + 100_000;
+    F.noteFinished([busy], t0);
+    expect(F.noteFinished([done], t0 + 2000)).toEqual([]); // the blip
+    expect(F.noteFinished([busy], t0 + 4000)).toEqual([]); // and it is working
+    expect(F.noteFinished([done], t0 + 6000)).toEqual([]); // the quiet starts again from here
+    expect(F.noteFinished([busy], t0 + 9000)).toEqual([]);
+    expect(F.partyOn("s1", t0 + 9000)).toBeUndefined();
   });
 });
