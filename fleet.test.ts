@@ -728,7 +728,7 @@ setTimeout(() => { throw new Error("boom in a scan"); }, 5);`;
     }
   });
 
-  test("the phone page gets a cropped message's whole text, for a tap to show, and nothing extra for a short one", () => {
+  test("the phone page gets each message whole, to a limit, since the chat scrolls", () => {
     const home = path.join(root, "whole");
     fs.rmSync(home, { recursive: true, force: true });
     const sid = "whol0000-0000-4000-8000-000000000001";
@@ -743,9 +743,9 @@ setTimeout(() => { throw new Error("boom in a scan"); }, 5);`;
     try {
       const talk = F.webState(F.scan(NOW).filter((x) => x.sid === sid), NOW).sessions[0].talk as any[];
       const [ask, said] = talk;
-      expect([ask.who, ask.text, ask.full]).toEqual(["you", "move the coupons", undefined]);
-      expect([said.text.length <= 601, said.text.endsWith("…")]).toEqual([true, true]);
-      expect(said.full).toBe(long);
+      expect([ask.who, ask.text]).toEqual(["you", "move the coupons"]);
+      expect([said.text, said.full]).toEqual([long, undefined]);
+      expect(F.capText("x".repeat(5000), 4000).length).toBeLessThanOrEqual(4001); // the limit
     } finally {
       process.env.FLEET_HOME = saved;
     }
