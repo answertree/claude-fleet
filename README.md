@@ -183,8 +183,8 @@ It is built to be safe to leave running:
 
 Fleet runs on [Even Realities G2](https://www.evenrealities.com) glasses too. Press `w`, then `g`, and fleet shows a QR code; scan it with the Even app on your phone (its developer option to load an app from a QR code) and fleet opens on your glasses. Like the phone page, it is served by fleet over Tailscale with the same secret, so the phone needs Tailscale on.
 
-- **Home:** a header with the counts, the time and the most urgent thing (a question waiting on you, or what the first session is doing), and a list of your sessions, those that need you first, with the machine each is on. Scroll the ring to move, tap to open. A session that starts waiting on you is called out in the header.
-- **A session:** what it needs or is doing, a context bar, tasks, agents, failures and pull requests, then its roster: each workflow with its current phase and how many agents have finished, the agents under it and what each is doing, then its last reply. Scroll for more.
+- **Home, one slide:** fleet draws everything on one screen and sends it as a picture: the counts, the time, usage and load; then each session in two rows (its state, name and machine; its question or what it is doing, an activity sparkline, context, tasks and workflow progress), those that need you first. The ring moves a lit bar from session to session; tap opens it. Only the parts of the picture that changed are sent.
+- **A session:** a fixed header (name, machine, state), a body you scroll a page at a time (what it needs or is doing, a context bar, tasks, agents, failures, what it is working on, pull requests, its workflows and agents, its last reply), and a fixed footer with the controls and the page.
 - **Answer it:** tap, and fleet reads the session's own screen and lists the numbered choices on it (`1. Yes`, `2. …`, `3. No`), then Esc, Enter and a few quick replies. Tap one and it is pressed or typed in that session, on whichever machine it runs (a background session, or one in tmux, as for messages).
 - Double-tap goes back; on the home list it asks before closing.
 

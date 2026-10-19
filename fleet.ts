@@ -6528,6 +6528,7 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
           if (url.pathname === "/api/state") return Response.json(webState(getSessions(), now()), { headers });
           if (url.pathname === "/glasses") return new Response(GLASSES_PAGE, { headers: { ...headers, "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" } });
           if (url.pathname === "/api/glasses") return Response.json(glassesState(getSessions(), now()), { headers });
+          if (url.pathname === "/api/glasses/tiles") return Response.json(glassesTiles(getSessions(), now(), Math.max(0, Number(url.searchParams.get("sel")) || 0)), { headers });
           return new Response("not found", { status: 404, headers });
         },
       });
@@ -7939,12 +7940,17 @@ export function cellsOf(line: string): Cell[] {
 }
 /** Screen rows drawn as a PNG, `cols` characters wide. */
 export function pictureOf(lines: string[], cols: number, scale = 2): Buffer {
+  const r = rasterOf(lines, cols, scale);
+  return pngOf(r.W, r.H, r.px);
+}
+/** Screen rows drawn as RGB pixels, on `bg`. */
+export function rasterOf(lines: string[], cols: number, scale = 2, bg: RGB = PICTURE_BG): { px: Uint8Array; W: number; H: number } {
   const CW = 8 * scale;
   const CH = 16 * scale;
   const W = cols * CW;
   const H = Math.max(1, lines.length) * CH;
   const px = new Uint8Array(W * H * 3);
-  for (let i = 0; i < W * H; i++) px.set(PICTURE_BG, i * 3);
+  for (let i = 0; i < W * H; i++) px.set(bg, i * 3);
   const fill = (x0: number, y0: number, w: number, h: number, c: RGB) => {
     for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) px.set(c, (y * W + x) * 3);
   };
@@ -7965,7 +7971,13 @@ export function pictureOf(lines: string[], cols: number, scale = 2): Buffer {
           }
       });
   });
-  return pngOf(W, H, px);
+  return { px, W, H };
+}
+/** A rectangle of a raster, as a PNG of its own. */
+export function cropPng(r: { px: Uint8Array; W: number }, x: number, y: number, w: number, h: number): Buffer {
+  const out = new Uint8Array(w * h * 3);
+  for (let row = 0; row < h; row++) out.set(r.px.subarray(((y + row) * r.W + x) * 3, ((y + row) * r.W + x + w) * 3), row * w * 3);
+  return pngOf(w, h, out);
 }
 /** The fleet as a picture: every session, or one focused as a click on it would, in the detail view. */
 export function fleetPicture(sessions: Session[], now: number, focus?: string, cols = 110, rows = 44): Buffer {
@@ -8433,6 +8445,90 @@ export function glassesState(sessions: Session[], now: number) {
   };
 }
 
+// ── the slide: everything on one screen, drawn by fleet ──
+// The glasses' home is a picture: a header (counts, the time, usage and the machine), then two rows a session (its
+// state, name and machine; its question or what it is doing, its activity, context, tasks and workflows), the one
+// the ring has chosen lit as a bar. Drawn at 576 by 288 on black (off), in four greys, and sent as the four 288 by
+// 144 tiles the glasses allow, only those that changed.
+const G_HI: RGB = [255, 255, 255];
+const G_MID: RGB = [180, 180, 180];
+const G_LO: RGB = [110, 110, 110];
+const G_FAINT: RGB = [60, 60, 60];
+const SLIDE_COLS = 72;
+const SLIDE_ROWS = 18;
+const SPARKS = "▁▂▃▄▅▆▇█";
+const sparkOf = (values: number[], n: number) => {
+  if (!values.length) return " ".repeat(n);
+  const step = values.length / n;
+  const cols = Array.from({ length: n }, (_, i) => sum(values.slice(Math.floor(i * step), Math.floor((i + 1) * step))));
+  const max = Math.max(1, ...cols);
+  return cols.map((v) => (v ? SPARKS[Math.min(7, Math.floor((v / max) * 7.999))] : " ")).join("");
+};
+const meterOf = (pct: number, n: number) => "█".repeat(Math.round((Math.min(100, pct) / 100) * n)) + "░".repeat(n - Math.round((Math.min(100, pct) / 100) * n));
+/** One slide row: left text and right text in their colours, padded to the width; `lit` draws it as a bright bar. */
+function slideRow(left: [string, RGB][], right: [string, RGB][], lit = false): string {
+  const rw = right.reduce((n, [t]) => n + width(t), 0);
+  let room = SLIDE_COLS - rw - (rw ? 1 : 0);
+  const parts: [string, RGB][] = [];
+  for (const [t, c] of left) {
+    const cut = cutTo(t, Math.max(0, room));
+    if (!cut) break;
+    parts.push([cut, c]);
+    room -= width(cut);
+  }
+  const lw = parts.reduce((n, [t]) => n + width(t), 0);
+  const all: [string, RGB][] = [...parts, [" ".repeat(Math.max(0, SLIDE_COLS - lw - rw)), G_MID], ...right];
+  if (lit) return `\x1b[48;2;255;255;255m` + all.map(([t]) => fg([0, 0, 0], t)).join("") + `\x1b[49m`;
+  return all.map(([t, c]) => fg(c, t)).join("");
+}
+/** The slide, as screen rows: `sel` is the session the ring has chosen. */
+export function glassesSlide(sessions: Session[], now: number, sel = 0): string[] {
+  const st = glassesState(sessions, now);
+  const w = webState(sessions, now);
+  const c = st.counts;
+  const rows: string[] = [];
+  rows.push(slideRow([["◆ CLAUDE FLEET", G_HI]], [[st.clock, G_HI]]));
+  const counts: [string, RGB][] = [];
+  const add = (n: number, text: string, colour: RGB) => n && counts.push([`${counts.length ? "   " : ""}${text}`, colour]);
+  add(c.needs, `▲ ${c.needs} need${c.needs === 1 ? "s" : ""} you`, G_HI);
+  add(c.stalled, `◐ ${c.stalled} stuck`, G_HI);
+  add(c.working, `● ${c.working} working`, G_MID);
+  add(c.agents, `${c.agents} agent${c.agents === 1 ? "" : "s"}`, G_LO);
+  add(c.workflows, `≡ ${c.workflows} workflow${c.workflows === 1 ? "" : "s"}`, G_LO);
+  rows.push(slideRow(counts.length ? counts : [["all quiet", G_MID]], []));
+  const usage: [string, RGB][] = [];
+  for (const l of (w.account?.limits ?? []).slice(0, 2)) usage.push([`${usage.length ? "   " : ""}${l.label} ${meterOf(l.pct, 8)} ${l.pct}%`, l.pct >= 80 ? G_HI : G_LO]);
+  rows.push(slideRow([...usage, [`${usage.length ? "   " : ""}cpu ${w.machine.cpu}%  mem ${w.machine.mem}%`, G_LO]], [[manyMachines() ? `${peers.size + 1} machines` : selfHost(), G_FAINT]]));
+  rows.push(fg(G_FAINT, "─".repeat(SLIDE_COLS)));
+  const list = st.sessions;
+  const roomy = list.length <= 4; // few sessions: a blank row between them
+  const shown = roomy ? 4 : 6;
+  const first = Math.max(0, Math.min(sel - 2, list.length - shown));
+  for (const [i, s] of list.slice(first, first + shown).entries()) {
+    const lit = first + i === sel;
+    if (roomy && i) rows.push("");
+    const name = s.name.toUpperCase() + (s.host ? ` · ${s.host}` : "");
+    rows.push(slideRow([[`${s.mark} `, s.state === "needs" ? G_HI : G_MID], [name, G_HI]], [[`${s.word.toLowerCase()}${s.time ? ` ${s.time}` : ""}`, s.state === "needs" || s.state === "stalled" ? G_HI : G_MID]], lit));
+    const ws = w.sessions.find((x) => x.sid === s.sid);
+    const wf = ws?.roster.workflows.find((x) => x.outcome === "running");
+    const facts = [s.ctx ? `${s.ctx.pct}%` : "", s.tasks ? `☐${s.tasks}` : "", wf ? `≡${wf.done}/${wf.total}` : ""].filter(Boolean).join(" ");
+    rows.push(slideRow([[`  ${s.needs ? `? ${s.needs}` : s.now || ""}`, s.needs ? G_HI : G_MID]], [[sparkOf(ws?.spark ?? [], 10), G_LO], [facts ? ` ${facts}` : "", G_LO]], lit));
+  }
+  if (!list.length) rows.push("", slideRow([["  Nothing working, nothing waiting on you.", G_MID]], []));
+  while (rows.length < SLIDE_ROWS - 1) rows.push("");
+  const more = list.length > shown ? `${sel + 1}/${list.length}` : list.length ? `${list.length} session${list.length === 1 ? "" : "s"}` : "";
+  rows[SLIDE_ROWS - 1] = slideRow([["ring: choose   tap: open   2× tap: exit", G_FAINT]], [[more, G_FAINT]]);
+  return rows.slice(0, SLIDE_ROWS);
+}
+/** The slide as the four tiles the glasses show, each with a fingerprint, so only those that changed are sent. */
+export function glassesTiles(sessions: Session[], now: number, sel = 0): { key: string; png: string }[] {
+  const r = rasterOf(glassesSlide(sessions, now, sel), SLIDE_COLS, 1, [0, 0, 0]);
+  return [0, 1, 2, 3].map((i) => {
+    const png = cropPng(r, (i % 2) * 288, Math.floor(i / 2) * 144, 288, 144);
+    return { key: Bun.hash(png).toString(36), png: png.toString("base64") };
+  });
+}
+
 export const GLASSES_PAGE = `<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -8443,119 +8539,133 @@ export const GLASSES_PAGE = `<!doctype html>
 </head><body>
 <h1>◆ Claude Fleet on your glasses</h1>
 <p id="s">Waiting for the Even app…</p>
-<p>Scroll the ring to move, tap to open, double-tap to go back.</p>
+<p>The ring moves between sessions, a tap opens one, a double tap goes back.</p>
 <script type="module">
-import { waitForEvenAppBridge, TextContainerProperty, ListContainerProperty, ListItemContainerProperty, CreateStartUpPageContainer, RebuildPageContainer, TextContainerUpgrade, OsEventTypeList as E } from "/glasses/sdk.js";
+import { waitForEvenAppBridge, TextContainerProperty, ListContainerProperty, ListItemContainerProperty, ImageContainerProperty, ImageRawDataUpdate, CreateStartUpPageContainer, RebuildPageContainer, TextContainerUpgrade, OsEventTypeList as E } from "/glasses/sdk.js";
 const token = new URLSearchParams(location.search).get("t") || "";
+const q = (path, extra) => path + "?t=" + encodeURIComponent(token) + (extra || "");
 const say = (t) => (document.getElementById("s").textContent = t);
-const W = 576, H = 288, HEAD = 62;
+const W = 576, H = 288;
 const QUICK = ["yes, go ahead", "continue", "looks good, carry on", "stop and tell me where you are"];
 const cut = (s, n) => (s && s.length > n ? s.slice(0, n - 1) + "…" : s || "");
-const bar = (pct) => "━".repeat(Math.round(pct / 10)) + "─".repeat(10 - Math.round(pct / 10));
-let data = { sessions: [], counts: {}, clock: "" }, view = "home", sel = 0, sid = null, page = 0, pages = [""], choices = [], homeKey = "", started = false, flash = "", flashUntil = 0, busy = false, seenNeeds = new Set();
+const bar = (pct, n) => "━".repeat(Math.round((pct / 100) * n)) + "─".repeat(n - Math.round((pct / 100) * n));
+let data = { sessions: [], counts: {}, clock: "" }, view = "slide", sel = 0, pickAt = 0, sid = null, page = 0, pages = [""], choices = [], started = false, busy = false, sending = false, tileKeys = [];
 
 const bridge = await waitForEvenAppBridge();
 say("Connected: Claude Fleet is on your glasses.");
 
-const text = (id, name, x, y, w, h, content, capture) => new TextContainerProperty({ xPosition: x, yPosition: y, width: w, height: h, borderWidth: 0, borderColor: 0, paddingLength: 4, containerID: id, containerName: name, content: cut(content, 1000), isEventCapture: capture ? 1 : 0 });
+const text = (id, name, x, y, w, h, content, capture, z) => new TextContainerProperty({ xPosition: x, yPosition: y, width: w, height: h, borderWidth: 0, borderColor: 0, paddingLength: 4, containerID: id, containerName: name, content: cut(content, 1000), isEventCapture: capture ? 1 : 0, ...(z !== undefined ? { zOrderIndex: z } : {}) });
 // A list sits directly under what is above it: the glasses centre a list's items in its height, so it is only as tall as they are.
 const list = (id, name, y, h, items) => new ListContainerProperty({ xPosition: 0, yPosition: y, width: W, height: Math.min(h, items.length * 40 + 8), borderWidth: 0, borderColor: 0, paddingLength: 4, containerID: id, containerName: name, isEventCapture: 1, itemContainer: new ListItemContainerProperty({ itemCount: items.length, itemWidth: 0, isItemSelectBorderEn: 1, itemName: items.map((i) => cut(i, 64)) }) });
 // Input is ignored for a moment after a screen appears: a new list sends an event of its own (it reads as a tap), and
-// a tap on a list arrives twice (from the list, then from the system), so the second half would act on the new screen.
+// a tap arrives twice (from the container, then from the system), so the second half would act on the new screen.
 let settleUntil = 0;
-async function show(page) {
+async function show(p) {
   settleUntil = Date.now() + 1200;
-  // The first page is created once; every later one replaces it.
   if (!started) {
     started = true;
-    const r = await bridge.createStartUpPageContainer(new CreateStartUpPageContainer(page));
+    const r = await bridge.createStartUpPageContainer(new CreateStartUpPageContainer(p));
     if (r !== 0) say("The glasses would not take the page (" + r + ").");
-  } else await bridge.rebuildPageContainer(new RebuildPageContainer(page));
+  } else await bridge.rebuildPageContainer(new RebuildPageContainer(p));
 }
 const upgrade = (id, name, content) => bridge.textContainerUpgrade(new TextContainerUpgrade({ containerID: id, containerName: name, content: cut(content, 1000) }));
 const current = () => data.sessions.find((s) => s.sid === sid);
-const label = (s) => s.mark + " " + s.name + (s.host ? " · " + s.host : "");
 
-// ── home: a header and a list of sessions ──
-function counts() {
-  const c = data.counts || {};
-  return [c.needs ? "▲" + c.needs + " need you" : "", c.stalled ? "◐" + c.stalled + " stuck" : "", c.working ? "●" + c.working + " working" : "", c.agents ? c.agents + " agents" : ""].filter(Boolean).join("  ") || "all quiet";
+// ── the slide: fleet draws everything as one picture, in four tiles; an empty text layer behind takes the ring ──
+async function slide() {
+  view = "slide";
+  tileKeys = [];
+  const tiles = [0, 1, 2, 3].map((i) => new ImageContainerProperty({ xPosition: (i % 2) * 288, yPosition: Math.floor(i / 2) * 144, width: 288, height: 144, containerID: 10 + i, containerName: "tile" + i, zOrderIndex: i + 2 }));
+  await show({ containerTotalNum: 5, textObject: [text(1, "input", 0, 0, W, H, " ", true, 1)], imageObject: tiles });
+  await sendTiles();
 }
-function headText() {
-  const top = "◆ FLEET   " + counts() + "   " + data.clock;
-  if (flash && Date.now() < flashUntil) return top + "\\n" + flash;
-  const s = data.sessions[sel] || data.sessions[0];
-  if (!s) return top + "\\nNothing working, nothing waiting on you.";
-  return top + "\\n" + cut(s.needs ? "▲ " + s.needs : s.word + (s.time ? " " + s.time : "") + (s.now ? " · " + s.now : ""), 60);
-}
-function homeItems() {
-  return data.sessions.length ? data.sessions.slice(0, 20).map(label) : ["○ no sessions right now"];
-}
-async function home() {
-  view = "home";
-  const items = homeItems();
-  homeKey = items.join("|");
-  sel = 0; // a rebuilt list starts at its first item
-  await show({ containerTotalNum: 2, textObject: [text(1, "head", 0, 0, W, HEAD, headText(), false)], listObject: [list(2, "sessions", HEAD, H - HEAD, items)] });
-}
-
-// ── a session, a page at a time ──
-function sessionText(s) {
-  const lines = [s.mark + " " + s.name.toUpperCase() + (s.host ? " · " + s.host : "") + " · " + s.word + (s.time ? " " + s.time : "")];
-  if (s.needs) lines.push("? " + s.needs);
-  else if (s.now) lines.push("> " + s.now);
-  if (s.ctx) lines.push(bar(s.ctx.pct) + " " + s.ctx.pct + "% context" + (s.ctx.runway ? " · " + s.ctx.runway : ""));
-  const facts = [s.tasks && "tasks " + s.tasks, s.agents && s.agents + " agents", s.fails && s.fails + " failed"].filter(Boolean);
-  if (facts.length) lines.push(facts.join(" · ") + (s.doing ? ": " + s.doing : ""));
-  if (s.prs.length) lines.push("PRs " + s.prs.join(" · "));
-  if (s.roster && s.roster.length) lines.push(...s.roster);
-  if (s.said && !s.needs) lines.push("", "Claude: " + s.said);
-  return lines.join("\\n");
-}
-function paginate(t, size = 330) {
-  const out = [];
-  let cur = "";
-  for (const word of t.split(/(\\s+)/)) {
-    if ((cur + word).length > size && cur.trim()) {
-      out.push(cur.trim());
-      cur = "";
+async function sendTiles() {
+  if (sending || view !== "slide") return;
+  sending = true;
+  try {
+    const r = await fetch(q("/api/glasses/tiles", "&sel=" + sel), { cache: "no-store" });
+    if (!r.ok) throw new Error(r.status);
+    const tiles = await r.json();
+    // Only the tiles that changed, one at a time (the glasses take one image at once).
+    for (let i = 0; i < tiles.length; i++) {
+      if (tiles[i].key === tileKeys[i] || view !== "slide") continue;
+      const bytes = Uint8Array.from(atob(tiles[i].png), (c) => c.charCodeAt(0));
+      await bridge.updateImageRawData(new ImageRawDataUpdate({ containerID: 10 + i, containerName: "tile" + i, imageData: bytes }));
+      tileKeys[i] = tiles[i].key;
     }
-    cur += word;
+  } catch {
+    say("Can't reach fleet: is it running?");
+  } finally {
+    sending = false;
   }
-  if (cur.trim()) out.push(cur.trim());
+}
+
+// ── a session: a fixed head, a paged body, a fixed foot ──
+const HEAD = 62, FOOT = 32;
+const LINE = 58; // characters to a line, near enough, in the glasses' font
+function wrapLines(t) {
+  const out = [];
+  for (const para of t.split("\\n")) {
+    if (!para) { out.push(""); continue; }
+    let line = "";
+    for (const word of para.split(" ")) {
+      if ((line + " " + word).trim().length > LINE && line) { out.push(line); line = "  " + word; }
+      else line = line ? line + " " + word : word;
+    }
+    out.push(line);
+  }
+  return out;
+}
+function bodyLines(s) {
+  const lines = [];
+  if (s.needs) lines.push("? " + s.needs, "");
+  else if (s.now) lines.push(s.now, "");
+  if (s.ctx) lines.push("context  " + bar(s.ctx.pct, 12) + "  " + s.ctx.pct + "%" + (s.ctx.runway ? " · " + s.ctx.runway : ""));
+  const facts = [s.tasks && "tasks " + s.tasks, s.agents && s.agents + " agents", s.fails && s.fails + " failed"].filter(Boolean);
+  if (facts.length) lines.push(facts.join("   ·   "));
+  if (s.doing) lines.push("now: " + s.doing);
+  for (const p of s.prs) lines.push("PR " + p);
+  if (s.roster && s.roster.length) lines.push("", ...s.roster);
+  if (s.said && !s.needs) lines.push("", "Claude: " + s.said);
+  return wrapLines(lines.join("\\n"));
+}
+const PER_PAGE = 7;
+function paginate(lines) {
+  const out = [];
+  for (let i = 0; i < lines.length; i += PER_PAGE) out.push(lines.slice(i, i + PER_PAGE).join("\\n"));
   return out.length ? out : [""];
 }
-const sessionPage = () => pages[page] + "\\n\\n" + (pages.length > 1 ? "[" + (page + 1) + "/" + pages.length + "] scroll for more · " : "") + "tap: answer · 2× tap: back";
+const headText = (s) => s.mark + " " + s.name.toUpperCase() + "\\n" + [s.host, s.word + (s.time ? " " + s.time : "")].filter(Boolean).join("  ·  ");
+const footText = () => "tap: answer    2× tap: back" + (pages.length > 1 ? "    page " + (page + 1) + "/" + pages.length + " (scroll)" : "");
 async function session(id) {
   sid = id;
   view = "session";
   const s = current();
-  if (!s) return home();
-  pages = paginate(sessionText(s));
+  if (!s) return slide();
+  pages = paginate(bodyLines(s));
   page = Math.min(page, pages.length - 1);
-  await show({ containerTotalNum: 1, textObject: [text(1, "session", 0, 0, W, H, sessionPage(), true)] });
+  await show({ containerTotalNum: 3, textObject: [text(1, "head", 0, 0, W, HEAD, headText(s), false), text(2, "body", 0, HEAD, W, H - HEAD - FOOT, pages[page], true), text(3, "foot", 0, H - FOOT, W, FOOT, footText(), false)] });
 }
 
-// ── answering: the choices on its screen, Esc, Enter and quick replies ──
-const BASIC = () => [{ label: "Esc · stop or cancel", key: "X" }, { label: "Enter", key: "E" }, ...QUICK.map((q) => ({ label: "\\u201c" + q + "\\u201d", text: q }))];
-const answerPage = (note) => ({ containerTotalNum: 2, textObject: [text(1, "head", 0, 0, W, 36, cut(note, 50) + " · 2× tap: back", false)], listObject: [list(2, "choices", 36, H - 36, choices.map((c) => c.label))] });
+// ── answering: the choices on its own screen, Esc, Enter and quick replies ──
+const BASIC = () => [{ label: "Esc · stop or cancel", key: "X" }, { label: "Enter", key: "E" }, ...QUICK.map((x) => ({ label: "“" + x + "”", text: x }))];
+const answerPage = (note) => ({ containerTotalNum: 2, textObject: [text(1, "head", 0, 0, W, 36, cut(note, 52) + "   ·   2× tap: back", false)], listObject: [list(2, "choices", 36, H - 36, choices.map((c) => c.label))] });
 async function answer() {
   const s = current();
-  if (!s) return home();
+  if (!s) return slide();
   view = "answer";
   const asked = sid;
-  // Esc, Enter and the quick replies at once; the choices on its screen join them when fleet has looked.
   choices = BASIC();
-  sel = 0;
-  await show(answerPage("Reading its screen…"));
+  pickAt = 0;
+  await show(answerPage("Answer " + s.name + ": reading its screen…"));
   const r = await post("/api/choices", { sid });
   if (view !== "answer" || sid !== asked) return; // gone back meanwhile
   const options = (r.options || []).map((o) => ({ label: o.key + ". " + o.label, key: o.key }));
   if (options.length) {
     choices = [...options, ...BASIC()];
-    sel = 0;
-    await show(answerPage("Tap a choice to press it"));
-  } else await upgrade(1, "head", cut(r.ok ? "No numbered choice on its screen" : r.error || "Can't see its screen", 50) + " · 2× tap: back");
+    pickAt = 0;
+    await show(answerPage("Answer " + s.name + ": tap a choice"));
+  } else await upgrade(1, "head", cut(r.ok ? "No numbered choice on its screen" : r.error || "Can't see its screen", 52) + "   ·   2× tap: back");
 }
 async function pick(i) {
   const c = choices[i];
@@ -8563,7 +8673,7 @@ async function pick(i) {
   if (!c || !s) return;
   busy = true;
   const r = c.key ? await post("/api/keys", { sid, key: c.key }) : await post("/api/send", { sid, text: c.text });
-  await show({ containerTotalNum: 1, textObject: [text(1, "done", 0, 0, W, H, (r.ok ? "√ " + (c.key ? "Pressed " + (c.key === "X" ? "Esc" : c.key === "E" ? "Enter" : c.key) : "Sent") + " in " + s.name : "x Not done: " + (r.error || "fleet did not answer")), true)] });
+  await show({ containerTotalNum: 1, textObject: [text(1, "done", 0, 0, W, H, (r.ok ? "■ " + (c.key ? "Pressed " + (c.key === "X" ? "Esc" : c.key === "E" ? "Enter" : c.key) : "Sent") + " in " + s.name : "x Not done: " + (r.error || "fleet did not answer")), true)] });
   setTimeout(async () => {
     busy = false;
     await refresh();
@@ -8573,7 +8683,7 @@ async function pick(i) {
 
 async function post(path, body) {
   try {
-    const r = await fetch(path + "?t=" + encodeURIComponent(token), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const r = await fetch(q(path), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     return await r.json();
   } catch {
     return { ok: false, error: "can't reach fleet" };
@@ -8581,41 +8691,29 @@ async function post(path, body) {
 }
 async function refresh() {
   try {
-    const r = await fetch("/api/glasses?t=" + encodeURIComponent(token), { cache: "no-store" });
+    const r = await fetch(q("/api/glasses"), { cache: "no-store" });
     if (!r.ok) throw new Error(r.status);
     data = await r.json();
-    say("Connected: " + counts() + " · " + data.clock);
+    say("Connected · " + data.sessions.length + " sessions · " + data.clock);
   } catch {
-    flash = "fleet can't be reached: is it running?";
-    flashUntil = Date.now() + 5000;
-    return;
+    say("Can't reach fleet: is it running?");
   }
-  // A session that has just started waiting on you: said at the top of the home screen.
-  for (const s of data.sessions)
-    if (s.state === "needs" && !seenNeeds.has(s.sid)) {
-      if (seenNeeds.size || started) {
-        flash = "▲ " + s.name + " needs you";
-        flashUntil = Date.now() + 10000;
-      }
-      seenNeeds.add(s.sid);
-    }
-  for (const id of seenNeeds) if (!data.sessions.some((s) => s.sid === id && s.state === "needs")) seenNeeds.delete(id);
 }
-// Every two seconds: the header in place, the list only when its sessions change (a rebuild resets the selection).
+// Every few seconds: the slide's changed tiles, or the open session's text in place.
 async function tick() {
   if (busy) return;
   await refresh();
-  if (view === "home") {
-    if (homeItems().join("|") !== homeKey) await home();
-    else await upgrade(1, "head", headText());
-  } else if (view === "session") {
+  sel = Math.min(sel, Math.max(0, data.sessions.length - 1));
+  if (view === "slide") await sendTiles();
+  else if (view === "session") {
     const s = current();
-    if (!s) return home();
-    const next = paginate(sessionText(s));
+    if (!s) return slide();
+    const next = paginate(bodyLines(s));
     if (next.join() !== pages.join()) {
       pages = next;
       page = Math.min(page, pages.length - 1);
-      await upgrade(1, "session", sessionPage());
+      await upgrade(2, "body", pages[page]);
+      await upgrade(3, "foot", footText());
     }
   }
 }
@@ -8626,30 +8724,35 @@ bridge.onEvenHubEvent(async (e) => {
   const types = [typeOf(e.listEvent), typeOf(e.textEvent), typeOf(e.sysEvent)];
   if (types.includes(E.SYSTEM_EXIT_EVENT) || types.includes(E.ABNORMAL_EXIT_EVENT)) return;
   if (Date.now() < settleUntil) return;
-  if (e.listEvent) sel = e.listEvent.currentSelectItemIndex ?? 0;
+  if (e.listEvent) pickAt = e.listEvent.currentSelectItemIndex ?? 0; // the answer list's own choice; the slide keeps its session
   if (types.includes(E.DOUBLE_CLICK_EVENT)) {
     if (view === "answer") return session(sid);
-    if (view === "session") return home();
+    if (view === "session") return slide();
     return bridge.shutDownPageContainer(1);
   }
-  if (types.includes(E.SCROLL_BOTTOM_EVENT) || types.includes(E.SCROLL_TOP_EVENT)) {
-    if (view === "session") {
-      page = Math.max(0, Math.min(pages.length - 1, page + (types.includes(E.SCROLL_BOTTOM_EVENT) ? 1 : -1)));
-      return upgrade(1, "session", sessionPage());
+  const down = types.includes(E.SCROLL_BOTTOM_EVENT), up = types.includes(E.SCROLL_TOP_EVENT);
+  if (down || up) {
+    if (view === "slide") {
+      sel = Math.max(0, Math.min(data.sessions.length - 1, sel + (down ? 1 : -1)));
+      return sendTiles();
     }
-    if (view === "home") return upgrade(1, "head", headText());
+    if (view === "session") {
+      page = Math.max(0, Math.min(pages.length - 1, page + (down ? 1 : -1)));
+      await upgrade(2, "body", pages[page]);
+      return upgrade(3, "foot", footText());
+    }
     return;
   }
   if (types.includes(E.CLICK_EVENT)) {
     settleUntil = Date.now() + 800; // the other half of this tap
-    if (view === "home" && data.sessions[sel]) return session(data.sessions[sel].sid);
+    if (view === "slide" && data.sessions[sel]) { page = 0; return session(data.sessions[sel].sid); }
     if (view === "session") return answer();
-    if (view === "answer") return pick(sel);
+    if (view === "answer") return pick(pickAt);
   }
 });
 await refresh();
-await home();
-setInterval(tick, 2000);
+await slide();
+setInterval(tick, 3000);
 </script></body></html>`;
 
 let webGlasses = false; // on the w screen, key g: the glasses QR code instead of the phone's
