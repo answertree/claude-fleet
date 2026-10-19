@@ -5028,7 +5028,10 @@ describe("key w: the phone page", () => {
       expect((await fetch(`${base}/manifest.webmanifest`)).status).toBe(403);
       const manifest = await (await fetch(`${base}/manifest.webmanifest?t=${token}`)).json();
       expect([manifest.start_url, manifest.display]).toEqual([`/?t=${token}`, "standalone"]);
-      expect(await (await fetch(web.url!)).text()).toContain(`href="/manifest.webmanifest?t=${token}"`);
+      const page = await (await fetch(web.url!)).text();
+      expect(page).toContain(`href="/manifest.webmanifest?t=${token}"`);
+      // Every placeholder filled: the secret, the splash's icon and the logo's shape (twice), the launch pictures.
+      expect([page.match(/__[A-Z_]+__/g), page.match(/mask:url\(data:image\/png;base64,/g)?.length, page.match(/apple-touch-startup-image/g)?.length]).toEqual([null, 2, F.STARTUP_SIZES.length]);
       for (const [p, n] of [["/icon-192.png", 192], ["/icon-512.png", 512]] as const) expect((await (await fetch(base + p)).arrayBuffer()).byteLength > 0 && F.webIcon(n).readUInt32BE(16)).toBe(n);
     } finally {
       web.server?.stop();
@@ -5665,9 +5668,10 @@ describe("the home-screen launch picture", () => {
     expect([p.w, p.h]).toEqual([1170, 2532]);
     const at = (x: number, y: number) => Array.from(p.rgb.subarray((y * p.w + x) * 3, (y * p.w + x) * 3 + 3));
     expect(at(0, p.h - 1)).toEqual([0x0d, 0x11, 0x17]); // the page's background at the edge
-    const top = Math.round(p.h / 2 - 89.5 * 3), left = Math.round(p.w / 2 - 48 * 3);
-    expect(at(left + 2, top + 2)).toEqual(at(left - 4, top - 4)); // a rounded corner shows the background
-    expect(at(left + 144, top + 40)[0]).toBeLessThan(8); // inside, the icon's black
+    const S = F.SPLASH_LOGO * 3, top = Math.round(p.h / 2 - ((F.SPLASH_LOGO + 83) / 2) * 3), left = Math.round(p.w / 2 - S / 2);
+    const near = (a: number[], b: number[]) => a.every((v, k) => Math.abs(v - b[k]) <= 2);
+    expect(near(at(left + 4, top + 4), at(left - 4, top - 4))).toBe(true); // a rounded corner shows the background (a shade on in the gradient)
+    expect(at(left + S / 2, top + S / 12)[0]).toBeLessThan(8); // inside, the icon's black
     expect(F.startupPng(390, 844, 3)).toBe(png); // drawn once
     expect(F.WEB_PAGE).toContain("__STARTUP__");
   });
