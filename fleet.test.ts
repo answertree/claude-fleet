@@ -964,6 +964,27 @@ describe("a workflow between its agents", () => {
     expect(F.seen.events.map((e) => e.kind).filter((k) => k === "failed" || k === "workflowDone")).toEqual(["workflowDone"]);
   });
 
+  test("resumed after it ended (out of usage, then picked up again): running while its agents write, and finished again once they stop", () => {
+    setUp();
+    // It ended an hour ago (the state file says completed); one agent of that run handed in its result.
+    journal([{ type: "started", agentId: "a1", phase: "Pipe" }, { type: "result", agentId: "a1" }], NOW - 60 * MIN);
+    agentFile("a1", NOW - 60 * MIN, true);
+    fs.writeFileSync(path.join(dir, "workflows", "wf_gap.json"), JSON.stringify({ workflowName: "pipe-and-fix", status: "completed", startTime: NOW - 70 * MIN, durationMs: 10 * MIN }));
+    expect(statusAt(NOW).status).toBe("completed");
+    // Picked up again: a new agent writing in the same folder, a minute ago, after the recorded end.
+    put(path.join(wfDir, "agent-a2.jsonl"), [toolCall(NOW - MIN - 2000), toolResult(NOW - MIN)], NOW - MIN); // thinking, no tool waiting
+    const live = statusAt(NOW);
+    expect(live.status).toBe("running");
+    expect(live.s.workflows[0].agents.map((a) => [a.id, a.done])).toEqual([["a1", true], ["a2", false]]);
+    expect(live.s.workflows[0].finished).toBe(0);
+    // Its agents silent for longer than the quiet spell: what the state file says again.
+    expect(statusAt(NOW + 10 * MIN).status).toBe("completed");
+    // Unless one is waiting on a tool (a long test run): still going, for up to an hour of silence.
+    put(path.join(wfDir, "agent-a3.jsonl"), [toolCall(NOW - 2 * MIN)], NOW - 2 * MIN);
+    expect(statusAt(NOW + 10 * MIN).status).toBe("running");
+    expect(statusAt(NOW + 70 * MIN).status).toBe("completed");
+  });
+
   test("a workflow silent for minutes with no agent running and no state file has stopped; if it starts again, that was not a failure", () => {
     setUp();
     Object.assign(F.seen, { at: NOW - 30 * MIN, events: [], known: new Map(), primed: false });

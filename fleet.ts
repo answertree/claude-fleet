@@ -34,6 +34,8 @@ const HIDE_TOP = process.env.FLEET_HIDE_PROCESSES === "1"; // leave other progra
 export const WINDOWS = [5, 15, 30, 60, 180];
 const TAIL_BYTES = 2 * 1024 * 1024;
 const ACTIVE_MS = 60_000;
+const WF_RESUME_GRACE_MS = 60_000; // an agent's last lines written just after its workflow's state file are still that run's
+const WF_TOOL_MS = 60 * 60_000; // a resumed agent waiting on a tool (a long test run) is still going for up to this long; the stall watch speaks up long before
 const WF_QUIET_MS = 5 * 60_000; // a workflow with no state file that has written nothing for this long, with no agent running, has stopped
 const FINAL_TOOLS = new Set(["SubagentHandback", "StructuredOutput"]);
 const CTX_LOG_MS = 15 * 60_000; // how far back a session's context readings are kept, for the runway forecast
@@ -1728,11 +1730,13 @@ export function phaseTrail(wf: Workflow): PhaseStep[] {
 /** How a workflow ended: ✓ completed, ✗ anything else that is not running (failed, stopped, cancelled). */
 export const wfOutcome = (wf: Workflow): "running" | "completed" | "failed" => (wf.status === "running" ? "running" : wf.status === "completed" ? "completed" : "failed");
 
+/** An agent that has handed in its result (its last tool call is a final one, answered). */
+const finishedItself = (tail: Tail) => !!tail.lastTool && FINAL_TOOLS.has(tail.lastTool.name) && tail.lastResultT >= tail.lastTool.t;
 function loadAgent(file: string, wf?: string, started?: any, done = false): Agent | undefined {
   const tail = pump(file);
   if (!tail) return undefined;
   const m = meta(file);
-  const finalTool = !!tail.lastTool && FINAL_TOOLS.has(tail.lastTool.name) && tail.lastResultT >= tail.lastTool.t;
+  const finalTool = finishedItself(tail);
   return {
     id: path.basename(file, ".jsonl").replace(/^agent-/, ""),
     label: safeLine(started?.label || m.description || path.basename(file, ".jsonl")),
@@ -1792,6 +1796,12 @@ export function scan(now: number): Session[] {
             const a = loadAgent(path.join(wfDir, name), wfId, j.started.get(id), j.results.has(id) || !!state);
             if (a) wfAgents.push(a);
           }
+          // Resumed: a workflow that ended (out of usage, say) and was picked up again keeps its old state file until the new run
+          // ends, while its agents carry on in the same folder. An agent writing after the recorded end, lately, is that new run.
+          const ended = state ? count(state.startTime) + count(state.durationMs) : 0;
+          const going = (a: Agent) => now - a.tail.mtime < WF_QUIET_MS || (!!pendingOf(a.tail) && now - a.tail.mtime < WF_TOOL_MS);
+          const resumed = state ? wfAgents.filter((a) => !j.results.has(a.id) && a.tail.mtime > ended + WF_RESUME_GRACE_MS && going(a)) : [];
+          for (const a of resumed) a.done = finishedItself(a.tail);
           const lastT = Math.max(j.mtime, ...wfAgents.map((a) => a.tail.mtime), 0);
           const running = wfAgents.filter((a) => !a.done);
           const script = scripts.find((x) => x.endsWith(`-${wfId}.js`));
@@ -1801,12 +1811,12 @@ export function scan(now: number): Session[] {
             name: safeLine(state?.workflowName || (script ? script.slice(0, -(wfId.length + 4)) : wfId)),
             // The state file is written when a workflow ends. Without it the workflow is still going, even at a moment when no agent
             // is (just launched, between two agents, the last one just reported), unless it has written nothing for minutes.
-            status: state?.status ? safeLine(state.status) : running.length || now - lastT < WF_QUIET_MS ? "running" : "stopped",
+            status: resumed.length ? "running" : state?.status ? safeLine(state.status) : running.length || now - lastT < WF_QUIET_MS ? "running" : "stopped",
             phase: currentPhase(j.phases, running),
             phases,
             seen: j.phases,
             started: count(state?.startTime) || Math.min(...wfAgents.map((a) => a.tail.birth), now),
-            finished: state ? count(state.startTime) + count(state.durationMs) : 0,
+            finished: state && !resumed.length ? ended : 0,
             agents: wfAgents,
             lastT,
             tokens: typeof state?.totalTokens === "number" ? state.totalTokens : undefined,
