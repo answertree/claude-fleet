@@ -35,6 +35,8 @@ const HIDE_TOP = process.env.FLEET_HIDE_PROCESSES === "1"; // leave other progra
 export const WINDOWS = [5, 15, 30, 60, 180];
 const TAIL_BYTES = 2 * 1024 * 1024;
 const ACTIVE_MS = 60_000;
+const WF_RESUME_GRACE_MS = 60_000; // an agent's last lines written just after its workflow's state file are still that run's
+const WF_TOOL_MS = 60 * 60_000; // a resumed agent waiting on a tool (a long test run) is still going for up to this long; the stall watch speaks up long before
 const WF_QUIET_MS = 5 * 60_000; // a workflow with no state file that has written nothing for this long, with no agent running, has stopped
 const FINAL_TOOLS = new Set(["SubagentHandback", "StructuredOutput"]);
 const CTX_LOG_MS = 15 * 60_000; // how far back a session's context readings are kept, for the runway forecast
@@ -1733,11 +1735,13 @@ export function phaseTrail(wf: Workflow): PhaseStep[] {
 /** How a workflow ended: ✓ completed, ✗ anything else that is not running (failed, stopped, cancelled). */
 export const wfOutcome = (wf: Workflow): "running" | "completed" | "failed" => (wf.status === "running" ? "running" : wf.status === "completed" ? "completed" : "failed");
 
+/** An agent that has handed in its result (its last tool call is a final one, answered). */
+const finishedItself = (tail: Tail) => !!tail.lastTool && FINAL_TOOLS.has(tail.lastTool.name) && tail.lastResultT >= tail.lastTool.t;
 function loadAgent(file: string, wf?: string, started?: any, done = false): Agent | undefined {
   const tail = pump(file);
   if (!tail) return undefined;
   const m = meta(file);
-  const finalTool = !!tail.lastTool && FINAL_TOOLS.has(tail.lastTool.name) && tail.lastResultT >= tail.lastTool.t;
+  const finalTool = finishedItself(tail);
   return {
     id: path.basename(file, ".jsonl").replace(/^agent-/, ""),
     label: safeLine(started?.label || m.description || path.basename(file, ".jsonl")),
@@ -1765,10 +1769,11 @@ export function scan(now: number): Session[] {
   scanSeq++;
   const sessions: Session[] = [];
   const CLAUDE = claudeHome();
-  for (const f of ls(path.join(CLAUDE, "sessions"))) {
-    if (!f.endsWith(".json")) continue;
+  const registry = ls(path.join(CLAUDE, "sessions")).filter((f) => f.endsWith(".json"));
+  for (const [i, f] of registry.entries()) {
     const reg = readJson(path.join(CLAUDE, "sessions", f));
     if (typeof reg?.sessionId !== "string" || !PLAIN_ID.test(reg.sessionId) || !alive(reg.pid)) continue;
+    scanProgress?.(i, registry.length, safeLine(String(reg.name || reg.sessionId).slice(0, 40)));
     const sid: string = reg.sessionId;
     // One entry that cannot be read is left out; the rest of the fleet is still drawn.
     try {
@@ -1797,6 +1802,12 @@ export function scan(now: number): Session[] {
             const a = loadAgent(path.join(wfDir, name), wfId, j.started.get(id), j.results.has(id) || !!state);
             if (a) wfAgents.push(a);
           }
+          // Resumed: a workflow that ended (out of usage, say) and was picked up again keeps its old state file until the new run
+          // ends, while its agents carry on in the same folder. An agent writing after the recorded end, lately, is that new run.
+          const ended = state ? count(state.startTime) + count(state.durationMs) : 0;
+          const going = (a: Agent) => now - a.tail.mtime < WF_QUIET_MS || (!!pendingOf(a.tail) && now - a.tail.mtime < WF_TOOL_MS);
+          const resumed = state ? wfAgents.filter((a) => !j.results.has(a.id) && a.tail.mtime > ended + WF_RESUME_GRACE_MS && going(a)) : [];
+          for (const a of resumed) a.done = finishedItself(a.tail);
           const lastT = Math.max(j.mtime, ...wfAgents.map((a) => a.tail.mtime), 0);
           const running = wfAgents.filter((a) => !a.done);
           const script = scripts.find((x) => x.endsWith(`-${wfId}.js`));
@@ -1806,12 +1817,12 @@ export function scan(now: number): Session[] {
             name: safeLine(state?.workflowName || (script ? script.slice(0, -(wfId.length + 4)) : wfId)),
             // The state file is written when a workflow ends. Without it the workflow is still going, even at a moment when no agent
             // is (just launched, between two agents, the last one just reported), unless it has written nothing for minutes.
-            status: state?.status ? safeLine(state.status) : running.length || now - lastT < WF_QUIET_MS ? "running" : "stopped",
+            status: resumed.length ? "running" : state?.status ? safeLine(state.status) : running.length || now - lastT < WF_QUIET_MS ? "running" : "stopped",
             phase: currentPhase(j.phases, running),
             phases,
             seen: j.phases,
             started: count(state?.startTime) || Math.min(...wfAgents.map((a) => a.tail.birth), now),
-            finished: state ? count(state.startTime) + count(state.durationMs) : 0,
+            finished: state && !resumed.length ? ended : 0,
             agents: wfAgents,
             lastT,
             tokens: typeof state?.totalTokens === "number" ? state.totalTokens : undefined,
@@ -8195,6 +8206,65 @@ export function svcKey(key: string): boolean {
   return true;
 }
 
+// ───────────────────────── the splash ─────────────────────────
+// While fleet starts (its first read of every transcript can take a while on a busy machine) it shows its logo and
+// what it is doing. The first read blocks, so the splash is written straight to the terminal, between sessions.
+
+/** The fleet F in cells: # is the letter, the prompts sit in its arms, / is a slanted end. */
+const LOGO_MASK = [
+  "####################/",
+  "###..>_..#########/",
+  "###",
+  "##############/",
+  "###..>_..####/",
+  "###",
+  "###",
+  "###",
+];
+const LOGO_W = Math.max(...LOGO_MASK.map((r) => r.length));
+const clamp01 = (t: number) => Math.max(0, Math.min(1, t));
+/** The icon's gradient: blue to cyan along the top arm, cyan to green along the middle one, blue to violet down the stem. */
+function logoColour(r: number, c: number): RGB {
+  if (r <= 1) return mix([30, 107, 255], [95, 243, 255], clamp01(c / (LOGO_W - 1)));
+  if (r === 3 || r === 4) return c < 3 ? [31, 138, 235] : mix([24, 168, 224], [60, 240, 138], clamp01((c - 3) / 12));
+  return mix([31, 123, 255], [123, 60, 255], clamp01((r - 2) / (LOGO_MASK.length - 2)));
+}
+export function logoRows(): string[] {
+  return LOGO_MASK.map((row, r) => {
+    let out = "";
+    for (let c = 0; c < row.length; c++) {
+      const ch = row[c];
+      const [cr, cg, cb] = logoColour(r, c);
+      if (ch === "/") out += fg([cr, cg, cb], "◤");
+      else if (ch === ">" || ch === "_") out += `\x1b[48;2;${cr};${cg};${cb}m\x1b[1m${fg([255, 255, 255], ch)}\x1b[22m\x1b[49m`;
+      else out += `\x1b[48;2;${cr};${cg};${cb}m \x1b[49m`;
+    }
+    return out + " ".repeat(LOGO_W - row.length);
+  });
+}
+/** The splash: the logo, the name, what fleet is doing, and how far through the sessions it is. */
+export function splashScreen(cols: number, rows: number, doing: string, done = 0, total = 0): string[] {
+  const W = Math.max(30, cols);
+  const centre = (s: string, w: number) => " ".repeat(Math.max(0, Math.floor((W - w) / 2))) + s;
+  const BAR = 30;
+  const filled = total ? Math.round((done / total) * BAR) : 0;
+  const body = [
+    ...logoRows().map((l) => centre(l, LOGO_W)),
+    "",
+    centre(fg(C.white, bold("C L A U D E   F L E E T")), 23),
+    "",
+    centre(fg(C.dim, cutTo(doing, Math.min(60, W - 4))), width(cutTo(doing, Math.min(60, W - 4)))),
+    total ? centre(fg(C.cyan, "━".repeat(filled)) + fg(C.faint, "─".repeat(BAR - filled)) + fg(C.dim, ` ${done}/${total}`), BAR + 1 + `${done}/${total}`.length) : "",
+  ];
+  const top = Math.max(0, Math.floor((rows - body.length) / 2));
+  const out = [...Array(top).fill(""), ...body];
+  while (out.length < rows) out.push("");
+  return out.slice(0, rows).map((l) => clipRow(l, W));
+}
+/** Called by the scan as it reads each session, while the splash is up. */
+export let scanProgress: ((done: number, total: number, name: string) => void) | undefined;
+export const setScanProgress = (f: typeof scanProgress) => (scanProgress = f);
+
 // ───────────────────────── on your glasses ─────────────────────────
 // Even Realities G2 glasses run apps as web pages: the Even app on your phone opens the page and draws what it
 // asks for on the glasses (576 by 288, sixteen shades of green), and passes back taps, double taps and ring
@@ -8754,15 +8824,39 @@ if (import.meta.main) {
     process.exit(0);
   }
 
+  // The splash, up at once and written straight to the terminal: the steps below, and the first read, block for a while.
+  let splashAt = 0;
+  const splash = (doing: string, done = 0, total = 0, force = true) => {
+    if (!force && Date.now() - splashAt < 60) return;
+    splashAt = Date.now();
+    try {
+      fs.writeSync(1, "\x1b[H" + splashScreen(process.stdout.columns || 140, process.stdout.rows || 45, doing, done, total).map((l) => l + "\x1b[K").join("\r\n"));
+    } catch {}
+  };
+  const leaveSplash = () => {
+    try {
+      fs.writeSync(1, leaveScreen(false));
+    } catch {}
+    process.exit(130);
+  };
+  process.on("SIGINT", leaveSplash); // Ctrl-C before the screen is set up: the terminal back as it was
+  fs.writeSync(1, enterScreen(opt.mouse));
+  splash("starting");
   // The phone page is always on (key w shows its link), except for made-up sessions (the demo and tests) or FLEET_WEB=0.
-  if (!process.env.FLEET_HOME && process.env.FLEET_WEB !== "0") startWeb(() => sessions);
+  if (!process.env.FLEET_HOME && process.env.FLEET_WEB !== "0") {
+    splash("opening the page for your phone");
+    startWeb(() => sessions);
+  }
   // Telegram, once key t has paired a bot; likewise only for real sessions.
   if (!process.env.FLEET_HOME) {
+    splash("looking for your other machines and the Telegram bot");
     peersWanted = true;
     tgWanted = true;
     tg.getSessions = () => sessions;
     tgClaim();
   }
+  splash("reading your sessions");
+  setScanProgress((done, total, name) => splash(`reading ${name}`, done, total, false));
 
   const out = process.stdout;
   let onScreen: string[] | undefined; // the frame the terminal shows, so the next writes only the rows that differ
@@ -8878,8 +8972,10 @@ if (import.meta.main) {
     });
   };
 
-  out.write(enterScreen(opt.mouse));
-  refresh();
+  refresh(); // the first read, under the splash
+  setScanProgress(undefined);
+  process.off("SIGINT", leaveSplash);
+  clear();
   retitle();
   draw();
   // Four frames a second, so spinners and celebrations move smoothly; the data is read every two seconds,
