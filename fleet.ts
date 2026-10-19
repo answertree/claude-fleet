@@ -6141,7 +6141,7 @@ details.tasks[open]>summary::before,details.wfg[open]>summary::before,details.ta
 .pick.armed{background:var(--amber);color:#1a1405;border-color:var(--amber)}.pick.armed .k{background:#00000022;color:#1a1405}
 .chips{display:flex;flex-wrap:nowrap;gap:6px;margin:6px -14px 8px;padding:0 14px;overflow-x:auto;scroll-snap-type:x proximity;-webkit-overflow-scrolling:touch;scrollbar-width:none;-webkit-mask-image:linear-gradient(90deg,transparent 0,#000 14px,#000 calc(100% - 28px),transparent);mask-image:linear-gradient(90deg,transparent 0,#000 14px,#000 calc(100% - 28px),transparent)}.chips::-webkit-scrollbar{display:none}.chips .chip{flex:none;white-space:nowrap;scroll-snap-align:start}.chip{background:transparent;color:var(--text);border:1px solid #2f3946;border-radius:999px;padding:7px 12px;font:500 13.5px -apple-system,system-ui,sans-serif}
 .chip.key{color:var(--dim)}.chip.armed{background:var(--amber);color:#1a1405;border-color:var(--amber)}.picks-note{color:var(--dim);font-size:12px;margin:6px 0 2px}
-.live{margin-top:8px;padding-left:10px;border-left:2px solid #2f3946}.live:empty{display:none}.live p{margin:6px 0;font-size:13px;white-space:pre-wrap}.live .you{color:var(--blue)}.live .st{color:var(--dim);font-size:12.5px;margin:4px 0}
+.talk .st{color:var(--dim);font-size:12.5px;margin:4px 0 2px}
 .sent{font-size:12px;margin-top:4px;color:var(--dim)}.sent.ok{color:var(--green)}.sent.err{color:var(--red)}
 </style></head><body>
 <div id="splash"><div class="tilt"><div class="logo"><img src="__ICON__" alt=""><i class="d"></i><i class="s"></i><b><i class="d"></i><i class="s"></i></b></div></div><div class="title">Claude Fleet</div><div class="what" id="splash-what">Reaching your Mac…</div></div>
@@ -6339,7 +6339,7 @@ function roster(R) {
 const whole = new Set();
 function talkLine(sid, m) {
   const k = sid + ":" + m.t, all = m.full && whole.has(k);
-  const p = el("p", m.who + (m.full ? " cut" : ""), (m.who === "you" ? "▸ " : "◆ ") + (all ? m.full : m.text));
+  const p = el("p", m.who + (m.full ? " cut" : ""), (m.who === "you" ? "▸ " : "◆ ") + (all ? m.full : m.text)); p.dataset.k = k;
   p.append(el("span", "", m.ago));
   if (m.full) {
     p.append(el("span", "more", all ? "show less" : "show all"));
@@ -6388,7 +6388,7 @@ function answerButtons(s) {
 }
 function armable(s, id, cls, content, what, act) {
   const full = s.sid + ":" + id, on = armed.id === full && Date.now() < armed.until;
-  const b = el("button", cls + (on ? " armed" : "")); b.type = "button";
+  const b = el("button", cls + (on ? " armed" : "")); b.type = "button"; b.dataset.k = full;
   if (on) b.append(cls.startsWith("pick") ? el("span", "k", "↵") : "", "Tap again: " + what); else b.append(...content);
   b.addEventListener("click", async () => {
     if (!(armed.id === full && Date.now() < armed.until)) { armed = { id: full, until: Date.now() + 3000 }; setTimeout(tick, 3100); return tick(); }
@@ -6453,21 +6453,21 @@ function card(s) {
   const R = s.roster;
   if (s.tasks && s.tasks.total) c.append(taskList(s.tasks));
   if (R && (R.main || R.workflows.length || R.agents.length || R.finished)) c.append(roster(R));
-  if (s.talk.length) { const d = el("details", "talk"); if (s.state === "needs") d.open = true; d.append(el("summary", "", "conversation")); for (const m of s.talk) d.append(talkLine(s.sid, m)); c.append(d); }
+  const tk = talkSection(s); if (tk) c.append(tk);
   const m = el("details", "message"); if (s.state === "needs" || following.has(s.sid)) m.open = true; m.append(el("summary", "", s.state === "needs" ? "answer" : "send a message"));
   const f = el("form", "send"); const ta = el("textarea"); ta.rows = 2; ta.placeholder = s.state === "needs" ? "your answer…" : "type to " + s.name + "…"; ta.value = drafts.get(s.sid) || ""; ta.dataset.sid = s.sid;
   ta.addEventListener("input", () => drafts.set(s.sid, ta.value));
   m.append(answerButtons(s));
   const go = el("button", "", "Send"); go.type = "submit"; f.append(ta, go); m.append(f);
   const note = el("div", "sent" + (notes.get(s.sid)?.cls ? " " + notes.get(s.sid).cls : ""), notes.get(s.sid)?.text || ""); m.append(note);
-  m.append(liveBox(s));
+
   f.addEventListener("submit", async (e) => {
     e.preventDefault(); const text = ta.value.trim(); if (!text) return;
     go.disabled = true; note.className = "sent"; note.textContent = "sending…";
     try {
       const r = await fetch("api/send?t=" + encodeURIComponent(token), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sid: s.sid, text }) });
       const d = await r.json().catch(() => ({ ok: false, error: "fleet said " + r.status }));
-      if (d.ok) { following.set(s.sid, { text, at: Date.now() }); drafts.delete(s.sid); ta.value = ""; notes.set(s.sid, { cls: "ok", text: "sent ✓ " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) }); }
+      if (d.ok) { following.set(s.sid, { text, at: Date.now() }); open.set(s.sid + "talk", true); const tk = f.closest(".card")?.querySelector("details.talk"); if (tk) tk.open = true; drafts.delete(s.sid); ta.value = ""; notes.set(s.sid, { cls: "ok", text: "sent ✓ " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) }); }
       else notes.set(s.sid, { cls: "err", text: "not sent: " + (d.error || "unknown") });
     } catch { notes.set(s.sid, { cls: "err", text: "not sent: can't reach fleet" }); }
     const n = notes.get(s.sid); note.className = "sent " + n.cls; note.textContent = n.text; go.disabled = false; ta.blur(); tick();
@@ -6477,6 +6477,16 @@ function card(s) {
   return c;
 }
 let last = 0, open = new Map();
+// A node's layout: its tags, classes and what each message or button is for, not its words or figures.
+const shapeOf = (n) => n.nodeType === 3 ? "#" : n.nodeType !== 1 ? "?" : n.tagName + "." + (n.getAttribute("class") || "") + "|" + (n.dataset ? n.dataset.k || "" : "") + "(" + [...n.childNodes].map(shapeOf).join(",") + ")";
+// Bring a node up to date from one laid out the same, in place: its words and attributes; a text box keeps what you typed.
+function patch(a, b) {
+  if (a.nodeType === 3) { if (a.nodeValue !== b.nodeValue) a.nodeValue = b.nodeValue; return; }
+  if (a.nodeType !== 1) return;
+  for (const { name, value } of [...b.attributes]) if (a.getAttribute(name) !== value) a.setAttribute(name, value);
+  for (const { name } of [...a.attributes]) if (!b.hasAttribute(name)) a.removeAttribute(name);
+  for (let i = 0; i < a.childNodes.length; i++) patch(a.childNodes[i], b.childNodes[i]);
+}
 // The splash finishes its turn (the logo back at rest), holds 400 ms on the logo, then the app fades in quickly.
 let leaving = false;
 function leaveSplash() {
@@ -6521,19 +6531,24 @@ function swipeAway(c, sid) {
   c.addEventListener("pointerup", end); c.addEventListener("pointercancel", end);
 }
 const drafts = new Map(), notes = new Map();
-// After you send: your words, what the session is doing, and its replies as they are written; kept up to date even
-// while you type the next one (the rest of the card holds still then). For a quarter of an hour.
+// After you send, the conversation opens and follows: your words at once, what the session is doing, and its
+// replies as they are written. For a quarter of an hour, or until you close it.
 const following = new Map(); // sid → { text, at }
-function liveBox(s) {
-  const box = el("div", "live"), f = following.get(s.sid);
-  if (!f || Date.now() - f.at > 15 * 60_000) { following.delete(s.sid); return box; }
-  box.append(el("p", "you", "▸ " + f.text));
-  const replies = s.talk.filter((m) => m.who === "claude" && m.t >= f.at - 3000);
-  for (const m of replies) box.append(talkLine(s.sid, m));
-  const busy = s.state === "working" || s.state === "stalled";
-  const st = el("div", "st" + (busy ? " pulse" : ""), busy ? "◐ " + (s.sub && s.sub.source !== "reply" && s.sub.text ? s.sub.text : "thinking…") : s.state === "needs" ? "▲ it's asking you something" : replies.length ? "" : "waiting for Claude…");
-  if (st.textContent) box.append(st);
-  return box;
+function talkSection(s) {
+  const f = following.get(s.sid);
+  if (f && Date.now() - f.at > 15 * 60_000) following.delete(s.sid);
+  const live = following.get(s.sid);
+  if (!s.talk.length && !live) return undefined;
+  const d = el("details", "talk"); if (s.state === "needs") d.open = true;
+  d.append(el("summary", "", "conversation"));
+  for (const m of s.talk) d.append(talkLine(s.sid, m));
+  if (live) {
+    if (!s.talk.some((m) => m.who === "you" && m.t >= live.at - 5000)) { const p = el("p", "you", "▸ " + live.text); p.dataset.k = "sent"; d.append(p); } // until the transcript has it
+    const busy = s.state === "working" || s.state === "stalled";
+    if (busy) d.append(el("div", "st pulse", "◐ " + (s.sub && s.sub.source !== "reply" && s.sub.text ? s.sub.text : "thinking…")));
+    else if (s.state === "needs") d.append(el("div", "st", "▲ it's asking you something"));
+  }
+  return d;
 }
 // Asked twice a second; the page is only redrawn when what fleet says has changed, or when you have done something.
 let lastText = "";
@@ -6554,11 +6569,6 @@ async function tick(force = true) {
     // The five-hour forecast, always.
     fivePanel(d.five);
     const cards = document.getElementById("cards");
-    // Never redraw under your thumbs: while you are typing a message the cards hold still.
-    if (document.activeElement && document.activeElement.tagName === "TEXTAREA" && cards.contains(document.activeElement)) {
-      for (const c of cards.querySelectorAll(".card")) { const s = d.sessions.find((x) => x.sid === c.dataset.sid), old = c.querySelector(".live"); if (s && old) old.replaceWith(liveBox(s)); }
-      return void (lastText = "");
-    }
     for (const det of cards.querySelectorAll("details")) open.set(det.closest(".card")?.dataset.sid + det.className, det.open);
     if (swiping || (!force && Date.now() < touchedUntil)) return void (lastText = ""); // nor under a card being swiped, or a finger scrolling
     const build = (s) => { const c = card(s); c.dataset.sid = s.sid; for (const det of c.querySelectorAll("details")) { const k = s.sid + det.className; if (open.has(k)) det.open = open.get(k); } return c; };
@@ -6575,7 +6585,25 @@ async function tick(force = true) {
       list.push(b);
       if (showGone) for (const s of gone) { const c = build(s); c.classList.add("gone"); const pb = el("button", "putback", "Put back"); pb.type = "button"; pb.addEventListener("click", () => { const a = putAway(); delete a[s.sid]; savePutAway(a); tick(); }); c.prepend(pb); list.push(c); }
     }
-    cards.replaceChildren(...list);
+    // Cards are updated in place, so nothing flickers and animations run on: a card laid out as before has only its
+    // words and figures changed; one laid out differently is replaced, except the one you are typing in, where only
+    // its conversation is.
+    const typing = document.activeElement && document.activeElement.tagName === "TEXTAREA" && cards.contains(document.activeElement) ? document.activeElement.closest(".card") : null;
+    const keyOf = (n) => (n.dataset && n.dataset.sid ? "s:" + n.dataset.sid + (n.classList.contains("gone") ? ":gone" : "") : "x:" + n.className);
+    const was = new Map([...cards.children].map((n) => [keyOf(n), n]));
+    const next = list.map((n) => {
+      const o = was.get(keyOf(n));
+      if (!o) return n;
+      if (shapeOf(o) === shapeOf(n)) return patch(o, n), o;
+      if (o !== typing) return n;
+      const ot = o.querySelector("details.talk"), nt = n.querySelector("details.talk");
+      if (ot && nt) shapeOf(ot) === shapeOf(nt) ? patch(ot, nt) : ot.replaceWith(nt);
+      return o;
+    });
+    // Only what changed is touched: moving a card would take the focus from its text box.
+    const keep = new Set(next);
+    for (const n of [...cards.children]) if (!keep.has(n)) n.remove();
+    next.forEach((n, i) => { if (cards.children[i] !== n) cards.insertBefore(n, cards.children[i] || null); });
     document.getElementById("clock").textContent = new Date(d.now).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     document.getElementById("foot").textContent = (d.hidden ? d.hidden + " idle or finished not shown · " : "") + "live";
     document.title = (d.counts.needs ? "▲" + d.counts.needs + " " : "") + "Claude Fleet";
