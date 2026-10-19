@@ -6116,6 +6116,16 @@ details.tasks[open]>summary::before,details.wfg[open]>summary::before,details.ta
 @keyframes fall{to{transform:translateY(260px) rotate(540deg)}}
 .party{color:var(--amber);font-weight:700;margin-top:4px}
 .empty{color:var(--dim);text-align:center;margin:40px 0}
+#splash{position:fixed;inset:0;z-index:50;background:radial-gradient(120% 80% at 50% 38%,#18212d 0%,var(--bg) 62%);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;transition:opacity .35s ease,transform .35s ease}
+#splash.gone{opacity:0;transform:scale(1.04);pointer-events:none}
+#splash .logo{position:relative;width:96px;height:96px;border-radius:24px;overflow:hidden;box-shadow:0 10px 40px #000a,0 0 0 1px #ffffff14;animation:float 3s ease-in-out infinite}
+#splash .logo img{width:100%;height:100%;display:block}
+#splash .logo i{position:absolute;inset:-40%;background:linear-gradient(115deg,transparent 38%,#ffffff10 44%,#ffffffb0 50%,#ffffff10 56%,transparent 62%);transform:translateX(-70%);animation:shine 1.6s cubic-bezier(.4,0,.2,1) .15s infinite}
+@keyframes shine{0%{transform:translateX(-70%)}60%,100%{transform:translateX(70%)}}
+@keyframes float{50%{transform:translateY(-4px)}}
+#splash .title{font-size:22px;font-weight:700;letter-spacing:-.01em;background:linear-gradient(100deg,#8a95a5 30%,#fff 50%,#8a95a5 70%);background-size:250% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:sheen 1.6s linear .15s infinite}
+@keyframes sheen{from{background-position:120% 0}to{background-position:-130% 0}}
+#splash .what{color:var(--dim);font-size:13px;min-height:1.4em}
 .card.done{touch-action:pan-y;user-select:none;-webkit-user-select:none}.swipe-hint{color:var(--dim);font-size:11.5px;margin-top:8px;text-align:right}
 .shelf{display:block;margin:6px auto 12px;background:transparent;color:var(--text);border:1px solid var(--line);border-radius:999px;padding:9px 16px;font:600 13.5px -apple-system,system-ui,sans-serif}
 .card.gone{opacity:.62}.putback{display:block;margin-left:auto !important;background:transparent;color:var(--cyan);border:1px solid #2f3946;border-radius:999px;padding:4px 11px;font:600 12.5px -apple-system,system-ui,sans-serif;margin:-2px 0 6px 8px}
@@ -6125,10 +6135,11 @@ details.tasks[open]>summary::before,details.wfg[open]>summary::before,details.ta
 .picks{display:flex;flex-direction:column;gap:7px;margin:8px 0 10px}.pick{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:#1d2530;color:var(--white);border:1px solid #2f3946;border-radius:12px;padding:11px 12px;font:600 15px -apple-system,system-ui,sans-serif}
 .pick .k{flex:none;width:26px;height:26px;border-radius:8px;background:#2a3442;color:var(--cyan);display:grid;place-items:center;font-size:14px;font-weight:700}
 .pick.armed{background:var(--amber);color:#1a1405;border-color:var(--amber)}.pick.armed .k{background:#00000022;color:#1a1405}
-.chips{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 8px}.chip{background:transparent;color:var(--text);border:1px solid #2f3946;border-radius:999px;padding:7px 12px;font:500 13.5px -apple-system,system-ui,sans-serif}
+.chips{display:flex;flex-wrap:nowrap;gap:6px;margin:6px -14px 8px;padding:0 14px;overflow-x:auto;scroll-snap-type:x proximity;-webkit-overflow-scrolling:touch;scrollbar-width:none;-webkit-mask-image:linear-gradient(90deg,transparent 0,#000 14px,#000 calc(100% - 28px),transparent);mask-image:linear-gradient(90deg,transparent 0,#000 14px,#000 calc(100% - 28px),transparent)}.chips::-webkit-scrollbar{display:none}.chips .chip{flex:none;white-space:nowrap;scroll-snap-align:start}.chip{background:transparent;color:var(--text);border:1px solid #2f3946;border-radius:999px;padding:7px 12px;font:500 13.5px -apple-system,system-ui,sans-serif}
 .chip.key{color:var(--dim)}.chip.armed{background:var(--amber);color:#1a1405;border-color:var(--amber)}.picks-note{color:var(--dim);font-size:12px;margin:6px 0 2px}
 .sent{font-size:12px;margin-top:4px;color:var(--dim)}.sent.ok{color:var(--green)}.sent.err{color:var(--red)}
 </style></head><body>
+<div id="splash"><div class="logo"><img src="__ICON__" alt=""><i></i></div><div class="title">Claude Fleet</div><div class="what" id="splash-what">Reaching your Mac…</div></div>
 <header><h1><img src="/icon-192.png" alt="">Claude Fleet</h1><span id="clock"></span></header>
 <div id="quip">Waking the fleet…</div>
 <div class="gauges" id="gauges"></div>
@@ -6247,12 +6258,11 @@ function agentRow(a, child) {
 }
 function wfRow(w) {
   const right = el("span");
-  if (w.total <= 30) {
-    const st = el("span", "steps");
-    for (let i = 0; i < w.done; i++) { const x = el("span", "", "✓"); x.style.color = "#50c878"; st.append(x); }
-    for (let i = 0; i < w.doing; i++) st.append(el("span", "", "◐"));
-    right.append(st, " ");
-  }
+  // A tick per step while there are few; past five, a count, so the name and the progress keep their room.
+  const st = el("span", "steps");
+  if (w.done) { const x = el("span", "", w.done > 5 ? "✓ " + w.done : "✓".repeat(w.done)); x.style.color = "#50c878"; st.append(x); }
+  if (w.doing) st.append(el("span", "", (w.done ? " " : "") + (w.doing > 4 ? "◐ " + w.doing : "◐".repeat(w.doing))));
+  if (st.childNodes.length) right.append(st, " ");
   right.append(w.done + "/" + w.total + " · " + w.age);
   const what = el("span", "what");
   if (w.outcome === "running") w.phases.forEach((p, i) => {
@@ -6298,8 +6308,9 @@ function talkLine(sid, m) {
 }
 // Answer buttons: the numbered choices on the session's own screen (read every few seconds while it waits),
 // then Esc and Enter, then quick replies. A button arms on the first tap and sends on the second.
-const QUICK = ["yes, go ahead", "continue", "looks good, carry on", "stop and tell me where you are"];
+const QUICK = ["yes, go ahead", "continue", "looks good, carry on", "do what you think is best", "stop and tell me where you are", "what's left?", "summarise what you've done", "run the tests", "fix the failing tests", "commit and open a PR", "merge it once CI is green", "show me the diff", "keep it simpler", "try a different approach", "explain that simply", "wait, I'll check and come back"];
 const screens = new Map(); // sid → { at, options, error, loading }
+const chipScroll = new Map(); // sid → how far its quick replies are scrolled
 let armed = { id: "", until: 0 };
 async function post(path, body) {
   try {
@@ -6326,6 +6337,8 @@ function answerButtons(s) {
     else box.append(el("div", "picks-note", !sc || sc.loading && !sc.options ? "reading its screen…" : sc.error ? sc.error : "no numbered choice on its screen"));
   }
   const chips = el("div", "chips");
+  const at = chipScroll.get(s.sid); if (at) requestAnimationFrame(() => (chips.scrollLeft = at));
+  chips.addEventListener("scroll", () => chipScroll.set(s.sid, chips.scrollLeft), { passive: true });
   if (waiting) chips.append(armable(s, "esc", "chip key", ["Esc"], "Esc", { key: "X" }), armable(s, "enter", "chip key", ["Enter"], "Enter", { key: "E" }));
   QUICK.forEach((q, i) => chips.append(armable(s, "q" + i, "chip", [q], "“" + q + "”", { text: q })));
   if (!waiting) chips.prepend(armable(s, "esc", "chip key", ["Esc"], "Esc", { key: "X" }));
@@ -6424,14 +6437,18 @@ function card(s) {
 let last = 0, open = new Map();
 // Finished cards a swipe has put away, by session, kept on this phone.
 const isDone = (s) => s.state === "justDone" || s.state === "finished";
-let showGone = false, swiping = false;
+let showGone = false, swiping = false, touchedUntil = 0, touching = false;
+addEventListener("pointerdown", () => { touching = true; touchedUntil = Infinity; }, { passive: true });
+addEventListener("pointerup", () => { touching = false; touchedUntil = Date.now() + 700; }, { passive: true });
+addEventListener("pointercancel", () => { touching = false; touchedUntil = Date.now() + 700; }, { passive: true });
+addEventListener("scroll", () => { if (!touching) touchedUntil = Math.max(touchedUntil, Date.now() + 250); }, { passive: true, capture: true });
 function putAway() { try { return JSON.parse(localStorage.getItem("fleet-put-away") || "{}") || {}; } catch { return {}; } }
 function savePutAway(a) { try { localStorage.setItem("fleet-put-away", JSON.stringify(a)); } catch {} }
 // A finished card follows a sideways swipe; far enough and it slides off and is put away. Up and down still scrolls.
 function swipeAway(c, sid) {
   let x0 = null, y0 = 0, dx = 0, locked = false;
   const reset = () => { x0 = null; locked = false; swiping = false; };
-  c.addEventListener("pointerdown", (e) => { if (e.target.closest("button,textarea,summary,a,input,.talk")) return; x0 = e.clientX; y0 = e.clientY; dx = 0; locked = false; });
+  c.addEventListener("pointerdown", (e) => { if (e.target.closest("button,textarea,summary,a,input,.talk,.chips")) return; x0 = e.clientX; y0 = e.clientY; dx = 0; locked = false; });
   c.addEventListener("pointermove", (e) => {
     if (x0 === null) return;
     dx = e.clientX - x0; const dy = e.clientY - y0;
@@ -6475,7 +6492,7 @@ async function tick(force = true) {
     // Never redraw under your thumbs: while you are typing a message the cards hold still.
     if (document.activeElement && document.activeElement.tagName === "TEXTAREA" && cards.contains(document.activeElement)) return void (lastText = "");
     for (const det of cards.querySelectorAll("details")) open.set(det.closest(".card")?.dataset.sid + det.className, det.open);
-    if (swiping) return void (lastText = ""); // nor under a card being swiped away
+    if (swiping || (!force && Date.now() < touchedUntil)) return void (lastText = ""); // nor under a card being swiped, or a finger scrolling
     const build = (s) => { const c = card(s); c.dataset.sid = s.sid; for (const det of c.querySelectorAll("details")) { const k = s.sid + det.className; if (open.has(k)) det.open = open.get(k); } return c; };
     // Finished sessions swiped away stay away (on this phone) until they start again; a button at the bottom shows them.
     const away = putAway();
@@ -6494,7 +6511,8 @@ async function tick(force = true) {
     document.getElementById("clock").textContent = new Date(d.now).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     document.getElementById("foot").textContent = (d.hidden ? d.hidden + " idle or finished not shown · " : "") + "live";
     document.title = (d.counts.needs ? "▲" + d.counts.needs + " " : "") + "Claude Fleet";
-  } catch (e) { document.getElementById("foot").replaceChildren(el("span", "stale", "can't reach fleet — is it still running?")); }
+    const sp = document.getElementById("splash"); if (sp && !sp.classList.contains("gone")) { sp.classList.add("gone"); setTimeout(() => sp.remove(), 400); }
+  } catch (e) { document.getElementById("foot").replaceChildren(el("span", "stale", "can't reach fleet — is it still running?")); const w = document.getElementById("splash-what"); if (w) w.textContent = "Can't reach fleet yet: is your Mac awake, and on Tailscale?"; }
 }
 tick(); setInterval(() => tick(false), 500);
 </script></body></html>`;
@@ -6581,6 +6599,9 @@ export function webIcon(n: number): Buffer {
 const ICON_SIZES: Record<string, number> = { "/apple-touch-icon.png": 180, "/apple-touch-icon-precomposed.png": 180, "/favicon.ico": 32, "/icon-192.png": 192, "/icon-512.png": 512, "/icon-maskable-512.png": 512 };
 /** The app icon: the files in icons/ beside fleet.ts (the F), or the drawn diamond if they are missing. */
 const iconFiles = new Map<string, Buffer | null>();
+/** The icon, inline, so the splash shows it before anything else has loaded. */
+let splashIconUrl = "";
+const splashIcon = () => splashIconUrl || (splashIconUrl = "data:image/png;base64," + appIcon("/apple-touch-icon.png").toString("base64"));
 export function appIcon(route: string): Buffer {
   const name = route === "/icon-maskable-512.png" ? "icon-maskable-512.png" : `icon-${ICON_SIZES[route]}.png`;
   if (!iconFiles.has(name))
@@ -6743,7 +6764,7 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
   }
   const tail = tailnetAddress();
   const host = tail ?? "127.0.0.1";
-  const headers = { "cache-control": "no-store", "referrer-policy": "no-referrer", "x-frame-options": "DENY", "x-content-type-options": "nosniff", "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" };
+  const headers = { "cache-control": "no-store", "referrer-policy": "no-referrer", "x-frame-options": "DENY", "x-content-type-options": "nosniff", "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" };
   const base = Number(process.env.FLEET_WEB_PORT) || 4777;
   const serveOn = (port: number) => {
     try {
@@ -6816,7 +6837,7 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
           if (ICON_SIZES[url.pathname]) return new Response(appIcon(url.pathname), { headers: { ...headers, "content-type": "image/png", "cache-control": "max-age=86400" } });
           if (!sameToken(url.searchParams.get("t") ?? "", token)) return new Response("not without the link fleet showed you", { status: 403, headers });
           if (url.pathname === "/manifest.webmanifest") return Response.json(webManifest(token), { headers: { ...headers, "content-type": "application/manifest+json" } });
-          if (url.pathname === "/") return new Response(WEB_PAGE.replace("__TOKEN__", token), { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
+          if (url.pathname === "/") return new Response(WEB_PAGE.replace("__TOKEN__", token).replace("__ICON__", splashIcon()), { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
           if (url.pathname === "/api/state") return (web.watchedAt = Date.now()), Response.json(webState(getSessions(), now()), { headers });
           if (url.pathname === "/glasses") return new Response(GLASSES_PAGE, { headers: { ...headers, "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" } });
           if (url.pathname === "/api/glasses") return (web.watchedAt = Date.now()), Response.json(glassesState(getSessions(), now()), { headers });
