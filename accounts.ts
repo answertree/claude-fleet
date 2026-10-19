@@ -1,4 +1,4 @@
-// Every Claude account's usage on one screen: key c in the fleet, or `bun fleet.ts accounts`.
+// Every Claude account's usage on one screen: key u in the fleet, or `bun fleet.ts accounts`.
 //
 // Each other account is a Claude Code config folder of its own (CLAUDE_CONFIG_DIR=~/.claude-work claude,
 // then /login), listed in ~/.config/claude-fleet/accounts.json. The fleet reads each folder's stored login
@@ -11,6 +11,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
+import { createInterface } from "node:readline/promises";
 import {
   C,
   ICON,
@@ -50,7 +51,7 @@ import {
   type UsageFigures,
 } from "./fleet.ts";
 
-const ACCOUNTS_HELP = `Every Claude account's usage on one screen (key c in the fleet shows the same).
+const ACCOUNTS_HELP = `Every Claude account's usage on one screen (key u in the fleet shows the same).
 
 Usage: bun fleet.ts accounts [command]
 
@@ -293,6 +294,8 @@ export async function fetchAccount(
     st.nextTry = now + retryDelay(st.reason, st.failures);
   }
 }
+/** Read every listed account now, whenever its next read was due (key r on the usage screen). */
+export const retryAccounts = (now = clock()) => Promise.all(loadAccounts().accounts.map((a) => fetchAccount(a, now)));
 /** Called on every refresh of the fleet: read each listed account that is due. */
 export function tickAccounts(now: number) {
   for (const a of loadAccounts().accounts)
@@ -395,12 +398,12 @@ function limitRow(
 }
 
 /** The accounts screen, `W` by `H`: a block of two limits for each account, and how to add one. */
-export function accountsScreen(W: number, H: number, now: number): string[] {
+export function accountsScreen(W: number, H: number, now: number, leave = "closes"): string[] {
   const out: string[] = [];
   const title = new Row(W);
   title.segs(2, [
-    [`${ICON.claude} CLAUDE ACCOUNTS`, C.cyan, true],
-    ["   usage on every login · read only", C.dim],
+    [`${ICON.claude} CLAUDE USAGE`, C.cyan, true],
+    ["   every account you use · read only", C.dim],
   ]);
   out.push(title.toString(), "");
   const { problems } = loadAccounts();
@@ -465,17 +468,13 @@ export function accountsScreen(W: number, H: number, now: number): string[] {
     r.put(2, fitOrDrop("Usage is off (--no-usage): no account's login is read.", W - 3), C.text);
     out.push(r.toString(), "");
   } else if (!loadAccounts().accounts.length) {
-    const say = (text: string, color = C.dim) => {
-      const r = new Row(W);
-      r.put(2, fitOrDrop(text, W - 3), color);
-      out.push(r.toString());
-    };
-    say("No other accounts listed yet. For each one:", C.text);
-    say(
-      "1  CLAUDE_CONFIG_DIR=~/.claude-work claude     then /login with that account, /exit",
-    );
-    say("2  bun fleet.ts accounts add work ~/.claude-work");
-    out.push("");
+    const r = new Row(W);
+    r.segs(2, [
+      ["No other accounts yet. Press ", C.text],
+      ["a", C.white, true],
+      [" to add one: fleet opens Claude's sign-in page for it.", C.text],
+    ]);
+    out.push(r.toString(), "");
   }
   for (const p of problems) {
     const r = new Row(W);
@@ -487,14 +486,17 @@ export function accountsScreen(W: number, H: number, now: number): string[] {
   }
   while (out.length < H - 1) out.push("");
   const foot = new Row(W);
-  foot.put(
-    2,
-    fitOrDrop(
-      `any key closes ${ICON.sep} list: ${tilde(accountsPath())} ${ICON.sep} bun fleet.ts accounts --help`,
-      W - 3,
-    ),
-    C.dim,
-  );
+  const keys: Seg[] = [
+    ...(opt.usage ? ([["r", C.white, true], [" retry now   ", C.dim]] as Seg[]) : []),
+    ["a", C.white, true],
+    [" add account   ", C.dim],
+    ...(loadAccounts().accounts.length ? ([["x", C.white, true], [" remove   ", C.dim]] as Seg[]) : []),
+    ["any other key ", C.dim],
+    [leave, C.dim],
+  ];
+  const col = foot.segs(2, keys);
+  const where = `list: ${tilde(accountsPath())}`;
+  if (col + 3 + width(where) <= W) foot.putr(W - 1, where, C.faint);
   return [...out.slice(0, H - 1), foot.toString()];
 }
 
@@ -515,6 +517,143 @@ const exists = (p: string) => {
   }
 };
 
+// ───────────────────────── setting an account up ─────────────────────────
+//
+// Adding an account is a short conversation in the ordinary terminal (the fleet steps aside for it, as
+// it does for key r): a name, a folder, then Claude Code's own sign-in (`claude auth login`, which opens
+// the browser) run with CLAUDE_CONFIG_DIR set to that folder, so the login lands there and nowhere else.
+// Afterwards it checks that the sign-in was recorded and that the keychain holds it where fleet looks.
+
+/** How a wizard talks: a question answered with a line, a line said, and a pause before something else takes the terminal. */
+export interface WizardIO {
+  ask(question: string): Promise<string>;
+  say(line: string): void;
+  pause(): void;
+}
+/** What a wizard does outside itself; the tests replace each. */
+export interface WizardDeps {
+  run: (args: string[], dir: string) => number | null; // claude, with CLAUDE_CONFIG_DIR=dir: its exit status, null when it did not start
+  has: (service: string) => boolean; // whether a keychain entry exists
+  file: string; // the accounts list
+}
+const claudeIn = (args: string[], dir: string): number | null => {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const env: Record<string, string | undefined> = { ...process.env, CLAUDE_CONFIG_DIR: dir };
+  delete env.CLAUDECODE; // fleet may itself have been started from a Claude Code session
+  const r = spawnSync(process.env.FLEET_CLAUDE_CMD || "claude", args, { stdio: "inherit", env });
+  return r.error ? null : r.status;
+};
+const realDeps = (): WizardDeps => ({ run: claudeIn, has: keychainHas, file: accountsPath() });
+const yes = (answer: string) => /^\s*y/i.test(answer);
+/** A folder name from an account name: ~/.claude-work for "Work". */
+export const suggestedDir = (name: string): string => `~/.claude-${name.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "account"}`;
+
+/** Ask for an account, sign it in and list it. Returns it, or undefined when nothing was listed. */
+export async function addAccountWizard(io: WizardIO, deps: WizardDeps = realDeps()): Promise<AccountConfig | undefined> {
+  const { accounts } = loadAccounts(deps.file);
+  io.say("Add a Claude account to fleet. It signs in to a folder of its own, so the account you are using now is not touched.");
+  io.say("");
+  let name = "";
+  for (;;) {
+    name = safeLine(await io.ask("Name for it (work, client, …; enter to stop): "));
+    if (!name) return undefined;
+    if (width(name) > 24) io.say(`${ICON.failed} at most 24 characters`);
+    else if (accounts.some((a) => a.name === name)) io.say(`${ICON.failed} ${name} is listed already`);
+    else break;
+  }
+  let cfg: AccountConfig | undefined;
+  while (!cfg) {
+    const suggested = suggestedDir(name);
+    const dir = (await io.ask(`Folder for its login [${suggested}]: `)).trim() || suggested;
+    const parsed = parseAccounts([{ name, dir }]);
+    const taken = parsed.accounts[0] && accounts.find((a) => a.dir === parsed.accounts[0].dir);
+    if (taken) io.say(`${ICON.failed} ${taken.name} uses that folder already`);
+    else if (parsed.problems.length) io.say(`${ICON.failed} ${parsed.problems[0].replace(`${name}: `, "")}`);
+    else cfg = parsed.accounts[0];
+  }
+  const before = emailOf(path.join(cfg.dir, ".claude.json"));
+  let signIn = true;
+  if (before) signIn = yes(await io.ask(`That folder is signed in as ${before} already. Sign in again? [y/N] `));
+  if (signIn) {
+    const email = (await io.ask("Its email, to fill in on the sign-in page (enter to skip): ")).trim();
+    io.say("");
+    io.say("Opening Claude's sign-in page in your browser (claude auth login). Sign in with that account.");
+    io.pause();
+    const status = deps.run(["auth", "login", "--claudeai", ...(email ? ["--email", email] : [])], cfg.dir);
+    io.say("");
+    if (status !== 0) {
+      io.say(`${ICON.failed} the sign-in did not finish (${status === null ? "claude did not start" : `claude exited ${status}`})`);
+      if (!yes(await io.ask("List it anyway? [y/N] "))) return undefined;
+    }
+  }
+  const email = emailOf(path.join(cfg.dir, ".claude.json"));
+  io.say(email ? `${ICON.done} signed in as ${email}` : `${ICON.failed} no sign-in is recorded in ${tilde(cfg.dir)} yet`);
+  if (process.platform === "darwin") {
+    const found = keychainServices(cfg).find(deps.has);
+    io.say(found ? `${ICON.done} its login is in the keychain, where fleet looks` : `${ICON.failed} fleet cannot find its login in the keychain; bun fleet.ts accounts --check says more`);
+  } else if (!exists(path.join(cfg.dir, ".credentials.json"))) io.say(`${ICON.failed} no login file in ${tilde(cfg.dir)}`);
+  saveAccounts([...accounts, cfg], deps.file);
+  io.say(`${ICON.done} listed ${name}: fleet reads its usage every five minutes`);
+  return cfg;
+}
+
+/** Take an account off the list, and, if you say so, sign it out of Claude in its folder. Returns its name, or undefined. */
+export async function removeAccountWizard(io: WizardIO, deps: WizardDeps = realDeps()): Promise<string | undefined> {
+  const { accounts } = loadAccounts(deps.file);
+  if (!accounts.length) return void io.say("No accounts are listed.");
+  accounts.forEach((a, i) => io.say(`  ${i + 1}  ${a.name}  ${tilde(a.dir)}`));
+  const pick = Number((await io.ask("Remove which one? (number; enter to stop) ")).trim());
+  const a = Number.isInteger(pick) ? accounts[pick - 1] : undefined;
+  if (!a) return undefined;
+  saveAccounts(
+    accounts.filter((x) => x !== a),
+    deps.file,
+  );
+  io.say(`${ICON.done} took ${a.name} off the list`);
+  if (yes(await io.ask(`Also sign it out of Claude (claude auth logout in ${tilde(a.dir)})? [y/N] `))) {
+    io.pause();
+    const status = deps.run(["auth", "logout"], a.dir);
+    io.say(status === 0 ? `${ICON.done} signed out` : `${ICON.failed} claude ${status === null ? "did not start" : `exited ${status}`}`);
+  }
+  return a.name;
+}
+
+/** Run a wizard in the ordinary terminal (raw mode off), with ctrl-c giving up. `hold` waits for enter at the end, so its last words can be read. */
+export async function inTerminal<T>(wizard: (io: WizardIO) => Promise<T>, hold = false): Promise<T | undefined> {
+  let rl: ReturnType<typeof createInterface> | undefined;
+  const ac = new AbortController();
+  const line = () => {
+    if (!rl) {
+      rl = createInterface({ input: process.stdin, output: process.stdout });
+      rl.on("SIGINT", () => ac.abort());
+    }
+    return rl;
+  };
+  const io: WizardIO = {
+    ask: (q) => line().question(q, { signal: ac.signal }),
+    say: (text) => process.stdout.write(text + "\n"),
+    pause: () => {
+      rl?.close(); // claude gets the terminal to itself
+      rl = undefined;
+    },
+  };
+  process.stdout.write("\n");
+  try {
+    const result = await wizard(io);
+    if (hold) await io.ask("\nPress enter to go back. ");
+    return result;
+  } catch (e: any) {
+    if (e?.name !== "AbortError") throw e;
+    process.stdout.write("\nstopped\n");
+    return undefined;
+  } finally {
+    io.pause();
+  }
+}
+/** The keys the accounts screen answers itself, for the fleet's key handler: anything else closes it. */
+export const accountsKey = (key: string): "add" | "remove" | "retry" | undefined => (key === "a" ? "add" : key === "x" ? "remove" : key === "r" ? "retry" : undefined);
+export const accountWizard = (kind: "add" | "remove") => inTerminal((io) => (kind === "add" ? addAccountWizard(io) : removeAccountWizard(io)), true);
+
 /** `bun fleet.ts accounts …`. It never returns. */
 export async function accountsMain(argv: string[]): Promise<never> {
   const put = (s: string) => process.stdout.write(s + "\n");
@@ -527,27 +666,21 @@ export async function accountsMain(argv: string[]): Promise<never> {
     process.exit(0);
   }
   const { accounts, problems } = loadAccounts();
+  if (argv[0] === "add" && !argv[1]) process.exit((await inTerminal((io) => addAccountWizard(io))) ? 0 : 1);
+  if (argv[0] === "remove" && !argv[1]) process.exit((await inTerminal((io) => removeAccountWizard(io))) ? 0 : 1);
   if (argv[0] === "add") {
     const name = safeLine(argv[1] ?? "");
-    const dir = argv[2] ?? `~/.claude-${name}`;
-    const next = parseAccounts([
-      ...accounts.map((a) => ({ ...a })),
-      { name, dir },
-    ]);
+    const dir = argv[2] ?? suggestedDir(name);
+    const next = parseAccounts([...accounts.map((a) => ({ ...a })), { name, dir }]);
     const added = next.accounts.find((a) => a.name === name);
-    if (!added || next.accounts.length !== accounts.length + 1)
-      fail(next.problems.at(-1) ?? "could not add that account");
+    if (!added || next.accounts.length !== accounts.length + 1) fail(next.problems.at(-1) ?? "could not add that account");
     saveAccounts(next.accounts);
     put(`listed ${name}: ${tilde(added!.dir)}`);
-    if (!exists(path.join(added!.dir, ".claude.json")))
-      put(
-        `not logged in there yet: CLAUDE_CONFIG_DIR=${tilde(added!.dir)} claude, then /login and /exit`,
-      );
+    if (!emailOf(path.join(added!.dir, ".claude.json"))) put(`not signed in there yet: CLAUDE_CONFIG_DIR=${tilde(added!.dir)} claude auth login`);
     process.exit(0);
   }
   if (argv[0] === "remove") {
-    if (!accounts.some((a) => a.name === argv[1]))
-      fail(`no account called ${argv[1] ?? "(none given)"}`);
+    if (!accounts.some((a) => a.name === argv[1])) fail(`no account called ${argv[1]}`);
     saveAccounts(accounts.filter((a) => a.name !== argv[1]));
     put(`took ${argv[1]} off the list`);
     process.exit(0);
@@ -559,15 +692,11 @@ export async function accountsMain(argv: string[]): Promise<never> {
       put(`${a.name}  ${tilde(a.dir)}`);
       put(`  folder       ${exists(a.dir) ? "there" : "MISSING"}`);
       const email = emailOf(path.join(a.dir, ".claude.json"));
-      put(`  logged in as ${email || "(no login recorded in .claude.json)"}`);
-      put(
-        `  login file   ${exists(path.join(a.dir, ".credentials.json")) ? "there" : "none (normal on a Mac)"}`,
-      );
+      put(`  signed in as ${email || "(no sign-in recorded in .claude.json)"}`);
+      put(`  login file   ${exists(path.join(a.dir, ".credentials.json")) ? "there" : "none (normal on a Mac)"}`);
       if (process.platform === "darwin") {
         const found = keychainServices(a).find(keychainHas);
-        put(
-          `  keychain     ${found ? `found: ${found}` : `none of ${keychainServices(a).join(", ")}`}`,
-        );
+        put(`  keychain     ${found ? `found: ${found}` : `none of ${keychainServices(a).join(", ")}`}`);
       }
     }
     process.exit(0);
@@ -579,46 +708,57 @@ export async function accountsMain(argv: string[]): Promise<never> {
     const reads: Promise<unknown>[] = opt.usage ? accounts.map((a) => fetchAccount(a, now)) : [];
     if (opt.usage) reads.push(fetchUsage(now));
     await Promise.all(reads);
-    process.stdout.write(
-      accountsScreen(
-        Number(process.env.COLUMNS) || process.stdout.columns || 100,
-        Number(process.env.LINES) || process.stdout.rows || 30,
-        clock(),
-      ).join("\n") + "\n",
-    );
+    process.stdout.write(accountsScreen(Number(process.env.COLUMNS) || process.stdout.columns || 100, Number(process.env.LINES) || process.stdout.rows || 30, clock(), "quits").join("\n") + "\n");
     process.exit(0);
   }
   const out = process.stdout;
+  let away = false; // a wizard has the terminal
   const restore = guardTerminal(() => {
     out.write(leaveScreen(false));
     if (process.stdin.isTTY) process.stdin.setRawMode(false);
   });
-  const draw = () =>
-    out.write(
-      "\x1b[H" +
-        accountsScreen(out.columns || 100, out.rows || 30, clock()).join("\n"),
-    );
+  const draw = () => {
+    if (!away) out.write("\x1b[H" + accountsScreen(out.columns || 100, out.rows || 30, clock(), "quits").join("\n"));
+  };
   const tick = () => {
     const t = clock();
     if (opt.usage && t >= usage.nextTry) void fetchUsage(t).then(draw);
-    for (const a of opt.usage ? loadAccounts().accounts : [])
-      if (t >= stateOf(a).nextTry) void fetchAccount(a, t).then(draw);
+    for (const a of opt.usage ? loadAccounts().accounts : []) if (t >= stateOf(a).nextTry) void fetchAccount(a, t).then(draw);
     draw();
   };
-  out.write(enterScreen(false));
+  const enter = () => {
+    out.write(enterScreen(false));
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(true);
+      process.stdin.resume();
+    }
+  };
+  enter();
   tick();
   setInterval(tick, 1000);
   out.on("resize", () => {
     out.write("\x1b[2J");
     draw();
   });
-  if (process.stdin.isTTY) {
-    process.stdin.setRawMode(true);
-    process.stdin.resume();
-    process.stdin.on("data", () => {
+  if (process.stdin.isTTY)
+    process.stdin.on("data", async (d: Buffer) => {
+      if (away) return;
+      const kind = accountsKey(d.toString());
+      if (kind === "retry") {
+        if (opt.usage) void fetchUsage().then(draw);
+        if (opt.usage) void retryAccounts().then(draw);
+        return;
+      }
+      if (!kind) {
+        restore();
+        process.exit(0);
+      }
+      away = true;
       restore();
-      process.exit(0);
+      await accountWizard(kind);
+      away = false;
+      enter();
+      tick();
     });
-  }
   return new Promise<never>(() => {});
 }
