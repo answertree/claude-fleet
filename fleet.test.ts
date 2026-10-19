@@ -964,6 +964,27 @@ describe("a workflow between its agents", () => {
     expect(F.seen.events.map((e) => e.kind).filter((k) => k === "failed" || k === "workflowDone")).toEqual(["workflowDone"]);
   });
 
+  test("resumed after it ended (out of usage, then picked up again): running while its agents write, and finished again once they stop", () => {
+    setUp();
+    // It ended an hour ago (the state file says completed); one agent of that run handed in its result.
+    journal([{ type: "started", agentId: "a1", phase: "Pipe" }, { type: "result", agentId: "a1" }], NOW - 60 * MIN);
+    agentFile("a1", NOW - 60 * MIN, true);
+    fs.writeFileSync(path.join(dir, "workflows", "wf_gap.json"), JSON.stringify({ workflowName: "pipe-and-fix", status: "completed", startTime: NOW - 70 * MIN, durationMs: 10 * MIN }));
+    expect(statusAt(NOW).status).toBe("completed");
+    // Picked up again: a new agent writing in the same folder, a minute ago, after the recorded end.
+    put(path.join(wfDir, "agent-a2.jsonl"), [toolCall(NOW - MIN - 2000), toolResult(NOW - MIN)], NOW - MIN); // thinking, no tool waiting
+    const live = statusAt(NOW);
+    expect(live.status).toBe("running");
+    expect(live.s.workflows[0].agents.map((a) => [a.id, a.done])).toEqual([["a1", true], ["a2", false]]);
+    expect(live.s.workflows[0].finished).toBe(0);
+    // Its agents silent for longer than the quiet spell: what the state file says again.
+    expect(statusAt(NOW + 10 * MIN).status).toBe("completed");
+    // Unless one is waiting on a tool (a long test run): still going, for up to an hour of silence.
+    put(path.join(wfDir, "agent-a3.jsonl"), [toolCall(NOW - 2 * MIN)], NOW - 2 * MIN);
+    expect(statusAt(NOW + 10 * MIN).status).toBe("running");
+    expect(statusAt(NOW + 70 * MIN).status).toBe("completed");
+  });
+
   test("a workflow silent for minutes with no agent running and no state file has stopped; if it starts again, that was not a failure", () => {
     setUp();
     Object.assign(F.seen, { at: NOW - 30 * MIN, events: [], known: new Map(), primed: false });
@@ -5439,6 +5460,62 @@ describe("the splash", () => {
       expect(lines.some((l) => l.trim() === "reading vfs-overhaul")).toBe(true);
       expect(lines.some((l) => l.includes("3/7"))).toBe(true);
       expect(lines.filter((l) => l.includes(">_")).length).toBe(2); // the two prompts in the F's arms
+    }
+  });
+});
+
+describe("a background job waiting on you", () => {
+  test("a question it records counts, even while it still says it is working; once answered or finished it does not", () => {
+    expect(F.jobWaiting({ state: "blocked", needs: "" })).toBe(true);
+    expect(F.jobWaiting({ state: "working", needs: "answer: Tea or coffee? (Tea · Coffee)" })).toBe(true);
+    expect(F.jobWaiting({ state: "working", needs: "" })).toBe(false);
+    expect(F.jobWaiting({ state: "done", needs: "answer: Tea or coffee? (Tea · Coffee)" })).toBe(false);
+    const s = { sid: "s1", name: "tea", kind: "bg", status: "busy", cwd: "/x", startedAt: 0, pid: 1, mains: [], agents: [], workflows: [], job: { state: "working", detail: "", needs: "answer: Tea or coffee? (Tea · Coffee)" } } as any;
+    expect(F.factsOf(s).needs).toBe("answer: Tea or coffee? (Tea · Coffee)");
+  });
+});
+
+describe("on your glasses", () => {
+  test("text for the glasses keeps only what their font can draw", () => {
+    expect(F.glassesSafe("✓ merged · ✗ 2 failing ⇡ #412 ↻ CI ≡ wf ⏳ ⠋ ok 🚀")).toBe("merged · x 2 failing ↑ #412 ~ CI = wf ◐ ● ok");
+  });
+
+  test("the page, its data and Even's SDK are served; the page and data need the link, the SDK (public code) does not", async () => {
+    process.env.FLEET_WEB_HOST = "127.0.0.1";
+    process.env.FLEET_WEB_PORT = "5177";
+    process.env.FLEET_WEB_TOKEN_FILE = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "fleet-glasses-")), "web-token");
+    for (const k of ["server", "url", "error", "shared", "retake"] as const) delete (F.web as any)[k];
+    const pressed: [string, string][] = [];
+    F.web.keys = async (s, key) => (pressed.push([s.sid, key]), { ok: true });
+    F.web.peek = async () => ({ ok: true, screen: "Tea or coffee?\n ❯ 1. Tea\n   2. Coffee\n" });
+    const session = { sid: "s1", name: "tea time", kind: "bg", status: "busy", cwd: "/x", startedAt: 0, pid: 1, mains: [], agents: [], workflows: [], job: { state: "working", detail: "", needs: "answer: Tea or coffee?" } } as any;
+    const web = F.startWeb(() => [session], () => Date.now());
+    try {
+      const url = new URL(web.url!);
+      const token = url.searchParams.get("t")!;
+      const base = `${url.protocol}//${url.host}`;
+      expect((await fetch(`${base}/glasses`)).status).toBe(403);
+      const page = await fetch(`${base}/glasses?t=${token}`);
+      expect([page.status, page.headers.get("content-security-policy")?.includes("script-src 'self'")]).toEqual([200, true]);
+      expect(await page.text()).toContain('from "/glasses/sdk.js"');
+      const sdk = await fetch(`${base}/glasses/sdk.js`);
+      expect([sdk.status, sdk.headers.get("content-type")]).toEqual([200, "text/javascript; charset=utf-8"]);
+      expect(await sdk.text()).toContain("waitForEvenAppBridge");
+      const data: any = await (await fetch(`${base}/api/glasses?t=${token}`)).json();
+      expect(data.sessions.map((s: any) => [s.mark, s.name, s.needs])).toEqual([["▲", "tea time", "answer: Tea or coffee?"]]);
+      // The answer screen: the choices on the session's screen, and a tap pressing one there.
+      const post = (p: string, body: unknown) => fetch(`${base}${p}?t=${token}`, { method: "POST", headers: { "content-type": "application/json", origin: base }, body: JSON.stringify(body) });
+      expect(await (await post("/api/choices", { sid: "s1" })).json()).toEqual({ ok: true, options: [{ key: "1", label: "Tea" }, { key: "2", label: "Coffee" }] });
+      expect((await post("/api/keys", { sid: "s1", key: "2" })).status).toBe(200);
+      expect(pressed).toEqual([["s1", "2"]]);
+      expect((await fetch(`${base}/api/keys?t=${token}`, { method: "POST", headers: { "content-type": "application/json", origin: "https://evil.example" }, body: JSON.stringify({ sid: "s1", key: "1" }) })).status).toBe(403);
+    } finally {
+      web.server?.stop();
+      delete F.web.keys;
+      delete F.web.peek;
+      delete process.env.FLEET_WEB_HOST;
+      delete process.env.FLEET_WEB_PORT;
+      delete process.env.FLEET_WEB_TOKEN_FILE;
     }
   });
 });

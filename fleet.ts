@@ -34,6 +34,8 @@ const HIDE_TOP = process.env.FLEET_HIDE_PROCESSES === "1"; // leave other progra
 export const WINDOWS = [5, 15, 30, 60, 180];
 const TAIL_BYTES = 2 * 1024 * 1024;
 const ACTIVE_MS = 60_000;
+const WF_RESUME_GRACE_MS = 60_000; // an agent's last lines written just after its workflow's state file are still that run's
+const WF_TOOL_MS = 60 * 60_000; // a resumed agent waiting on a tool (a long test run) is still going for up to this long; the stall watch speaks up long before
 const WF_QUIET_MS = 5 * 60_000; // a workflow with no state file that has written nothing for this long, with no agent running, has stopped
 const FINAL_TOOLS = new Set(["SubagentHandback", "StructuredOutput"]);
 const CTX_LOG_MS = 15 * 60_000; // how far back a session's context readings are kept, for the runway forecast
@@ -1728,11 +1730,13 @@ export function phaseTrail(wf: Workflow): PhaseStep[] {
 /** How a workflow ended: ✓ completed, ✗ anything else that is not running (failed, stopped, cancelled). */
 export const wfOutcome = (wf: Workflow): "running" | "completed" | "failed" => (wf.status === "running" ? "running" : wf.status === "completed" ? "completed" : "failed");
 
+/** An agent that has handed in its result (its last tool call is a final one, answered). */
+const finishedItself = (tail: Tail) => !!tail.lastTool && FINAL_TOOLS.has(tail.lastTool.name) && tail.lastResultT >= tail.lastTool.t;
 function loadAgent(file: string, wf?: string, started?: any, done = false): Agent | undefined {
   const tail = pump(file);
   if (!tail) return undefined;
   const m = meta(file);
-  const finalTool = !!tail.lastTool && FINAL_TOOLS.has(tail.lastTool.name) && tail.lastResultT >= tail.lastTool.t;
+  const finalTool = finishedItself(tail);
   return {
     id: path.basename(file, ".jsonl").replace(/^agent-/, ""),
     label: safeLine(started?.label || m.description || path.basename(file, ".jsonl")),
@@ -1793,6 +1797,12 @@ export function scan(now: number): Session[] {
             const a = loadAgent(path.join(wfDir, name), wfId, j.started.get(id), j.results.has(id) || !!state);
             if (a) wfAgents.push(a);
           }
+          // Resumed: a workflow that ended (out of usage, say) and was picked up again keeps its old state file until the new run
+          // ends, while its agents carry on in the same folder. An agent writing after the recorded end, lately, is that new run.
+          const ended = state ? count(state.startTime) + count(state.durationMs) : 0;
+          const going = (a: Agent) => now - a.tail.mtime < WF_QUIET_MS || (!!pendingOf(a.tail) && now - a.tail.mtime < WF_TOOL_MS);
+          const resumed = state ? wfAgents.filter((a) => !j.results.has(a.id) && a.tail.mtime > ended + WF_RESUME_GRACE_MS && going(a)) : [];
+          for (const a of resumed) a.done = finishedItself(a.tail);
           const lastT = Math.max(j.mtime, ...wfAgents.map((a) => a.tail.mtime), 0);
           const running = wfAgents.filter((a) => !a.done);
           const script = scripts.find((x) => x.endsWith(`-${wfId}.js`));
@@ -1802,12 +1812,12 @@ export function scan(now: number): Session[] {
             name: safeLine(state?.workflowName || (script ? script.slice(0, -(wfId.length + 4)) : wfId)),
             // The state file is written when a workflow ends. Without it the workflow is still going, even at a moment when no agent
             // is (just launched, between two agents, the last one just reported), unless it has written nothing for minutes.
-            status: state?.status ? safeLine(state.status) : running.length || now - lastT < WF_QUIET_MS ? "running" : "stopped",
+            status: resumed.length ? "running" : state?.status ? safeLine(state.status) : running.length || now - lastT < WF_QUIET_MS ? "running" : "stopped",
             phase: currentPhase(j.phases, running),
             phases,
             seen: j.phases,
             started: count(state?.startTime) || Math.min(...wfAgents.map((a) => a.tail.birth), now),
-            finished: state ? count(state.startTime) + count(state.durationMs) : 0,
+            finished: state && !resumed.length ? ended : 0,
             agents: wfAgents,
             lastT,
             tokens: typeof state?.totalTokens === "number" ? state.totalTokens : undefined,
@@ -1862,7 +1872,7 @@ export function scan(now: number): Session[] {
       // away summary, a title). Seen to change while the dashboard watched: its state file's time, written when it asked. Already
       // waiting when first seen: the earlier of that and its transcript's last write, as the state file may have been written since.
       const held = waitingSince.get(sid);
-      if (job?.state === "blocked") {
+      if (job && jobWaiting(job)) {
         if (held?.needs === job.needs) job.since = held.since;
         else {
           let stamped = 0;
@@ -1874,7 +1884,7 @@ export function scan(now: number): Session[] {
           if (job.since === Infinity) job.since = undefined;
         }
       }
-      waitingSince.set(sid, { needs: job?.state === "blocked" ? job.needs : "", since: job?.since ?? 0, used: scanSeq });
+      waitingSince.set(sid, { needs: job && jobWaiting(job) ? job.needs : "", since: job?.since ?? 0, used: scanSeq });
 
       const title = mains.map((m) => m.title).find(Boolean);
       const named = safeLine(reg.name && reg.name !== sid.slice(0, 8) ? reg.name : title || (reg.name ?? sid.slice(0, 8)));
@@ -2715,12 +2725,18 @@ export interface Facts {
   working: boolean; // busy, or a background job that says it is working
   now: string; // one-line summary of what it is doing: the now-line
 }
+/**
+ * Whether a background job is waiting on you. It says "blocked", or it records a question (`needs`) while it has
+ * not finished: a question asked with AskUserQuestion is recorded while the job still says "working", and the
+ * question is cleared as soon as it is answered.
+ */
+export const jobWaiting = (job: { state: string; needs: string }): boolean => job.state === "blocked" || (!!job.needs && !["done", "failed", "stopped", "error", "cancelled"].includes(job.state));
 export function factsOf(s: Session): Facts {
   const main = [...s.mains].sort((x, y) => y.mtime - x.mtime)[0];
   const ask = main && pendingOf(main)?.name === "AskUserQuestion" ? pendingOf(main) : undefined;
   const needs = ask
     ? ask.hint || "has a question for you"
-    : s.job?.state === "blocked"
+    : s.job && jobWaiting(s.job)
       ? s.job.needs || s.job.detail || "waiting on you"
       : "";
   const idle = s.status !== "busy";
@@ -5772,6 +5788,60 @@ const hexOf = (c: RGB) => "#" + c.map((v) => v.toString(16).padStart(2, "0")).jo
 /** Coloured text as the page draws it: [text, colour] pairs. */
 const segsJson = (segs: Seg[]) => segs.filter(([t]) => t).map(([t, c, bold]) => ({ t, c: c ? hexOf(c) : undefined, b: bold || undefined }));
 
+/**
+ * A session's roster as the detail view lists it, for the phone page and the glasses: the main thread while it is
+ * busy, each workflow (its phases, how many agents have finished, tokens, activity) with its agents under it, the
+ * standalone agents, and how many agents finished in the window. The same choice of rows as the terminal.
+ */
+export function rosterOfView(v: View, now: number, win: Win) {
+  const agent = (a: Agent) => {
+    const st = stateOf(a, now);
+    const stalled = v.stall.threads.includes(a.id);
+    const p = pendingOf(a.tail);
+    return {
+      label: a.label,
+      state: stalled ? "stalled" : st, // active (writing), tool (waiting on a tool), quiet, done, or stalled
+      tool: st !== "done" && p ? p.name : undefined,
+      doing: st === "done" ? "finished" : p ? p.hint || "" : st === "quiet" ? "no activity" : "thinking",
+      model: a.model || undefined,
+      spark: bucketsIn([a.tail.tools], win),
+      ago: ago(now - lastWriteOf(a.tail)),
+    };
+  };
+  const main = v.facts.main;
+  return {
+    main: v.showMain && main ? agent({ id: "main", label: "main thread", type: "", model: "", tail: main, done: false }) : undefined,
+    workflows: v.groups
+      .filter((g) => g.wf)
+      .map((g) => {
+        const wf = g.wf!;
+        const outcome = wfOutcome(wf);
+        const done = wf.agents.filter((a) => a.done).length;
+        return {
+          name: wf.name,
+          outcome, // running, completed or failed
+          status: outcome === "failed" ? wf.status || "failed" : undefined,
+          phases: outcome === "running" ? phaseTrail(wf) : [],
+          done,
+          doing: outcome === "running" ? wf.agents.length - done : 0,
+          total: wf.agents.length,
+          tokens: wf.tokens !== undefined ? human(wf.tokens) : undefined,
+          spark: bucketsIn(wf.agents.map((a) => a.tail.tools), win),
+          age: outcome === "running" ? `up ${ago(now - wf.started)}` : ago(now - Math.max(wf.finished, wf.lastT)),
+          agents: g.rows.map(agent),
+          more: Math.max(0, g.rows.length > 12 ? g.rows.length - 12 : 0),
+        };
+      })
+      .map((w) => ({ ...w, agents: w.agents.slice(0, 12) })),
+    agents: v.groups
+      .filter((g) => !g.wf)
+      .flatMap((g) => g.rows)
+      .slice(0, 12)
+      .map(agent),
+    finished: v.doneCount,
+  };
+}
+
 /** Everything the page shows, from the same views the terminal draws. */
 export function webState(sessions: Session[], now: number) {
   const all = buildViews(sessions, now);
@@ -5814,6 +5884,7 @@ export function webState(sessions: Session[], now: number) {
         prs: (s.side?.prs ?? []).slice(0, PR_SHOWN).map((p) => segsJson(prSegs([p], s.side?.cwd ?? s.cwd))),
         changes: s.side && (s.side.edits.length || gitOf(s)) ? segsJson(changeSegs(s.side.edits, gitOf(s), true)) : undefined,
         tasks: s.tasks ? { done: s.tasks.done, total: s.tasks.total, open: s.tasks.items.filter((t) => t.status !== "completed").map((t) => ({ status: t.status, text: taskText(t), since: t.since ? ago(now - t.since) : undefined, blocked: t.blocked || undefined })) } : undefined,
+        roster: rosterOfView(v, now, win),
         workflows: s.workflows.filter((w) => w.status === "running" && w.lastT >= win.start).map((w) => ({ name: w.name, phase: w.phase, done: w.agents.filter((a) => a.done).length, total: w.agents.length })),
         agents: threads.map((a) => {
           const p = pendingOf(a.tail);
@@ -5872,6 +5943,14 @@ h1{font-size:15px;margin:0;color:var(--cyan);letter-spacing:.08em}h1 b{color:var
 .ctx{display:flex;height:6px;margin-top:6px;border-radius:3px;overflow:hidden;background:var(--faint);flex:1}.ctx i{display:block;height:100%}
 details{margin-top:8px}summary{cursor:pointer;color:var(--dim);font-size:12px;list-style:none}summary::-webkit-details-marker{display:none}summary::before{content:"▸ ";color:var(--faint)}details[open] summary::before{content:"▾ "}
 .talk p{margin:6px 0;font-size:13px;white-space:pre-wrap;word-break:break-word}.talk .you{color:var(--blue)}.talk .claude{color:var(--text)}.talk span{color:var(--dim);font-size:11px;margin-left:6px}
+.roster{margin-top:10px;padding-top:6px;border-top:1px solid var(--line)}
+.r{display:grid;grid-template-columns:1.1em minmax(0,1fr) auto;column-gap:7px;align-items:baseline;font-size:12px;padding:4px 0}
+.r.child{padding-left:16px}.r .g{text-align:center}.r .nm{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.r.wf .nm{color:var(--text)}.r.wf.live .nm{color:var(--white);font-weight:700}.r .right{color:var(--dim);white-space:nowrap;font-size:11px}
+.r .sub{grid-column:2/4;display:flex;gap:8px;align-items:center;min-width:0;color:var(--dim);font-size:11px;margin-top:1px}
+.r .what{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.r .tool{color:var(--cyan)}.r .steps{letter-spacing:1px}
+.r.more,.r.done-line{display:block;color:var(--dim);font-size:11px}.mini{display:flex;align-items:flex-end;gap:1px;height:12px;width:64px;flex:none}.mini i{flex:1;min-height:1px;border-radius:1px}
+.pulse{animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.3}}
 .tasks div,.agents div{font-size:12px;margin:2px 0}.st-in_progress{color:var(--white)}.st-pending{color:var(--dim)}
 .foot{color:var(--faint);font-size:11px;text-align:center;margin-top:16px}.stale{color:var(--red)}
 .confetti{position:absolute;inset:0;pointer-events:none;overflow:hidden}.confetti i{position:absolute;top:-10px;width:6px;height:10px;opacity:.9;animation:fall 2.6s linear infinite}
@@ -5904,6 +5983,61 @@ function quip(d) {
   if (!c.needs && !c.stalled) parts.push(["nothing needs you, carry on", "all under control, apparently", "you could probably go outside"][Math.floor(d.now / 60000) % 3]);
   return parts.map((p) => (typeof p === "string" ? [p] : p));
 }
+// The roster, as the detail view lists it: the main thread, each workflow with its agents under it, other agents.
+const GLYPH = { active: ["●", "#50c878", "pulse"], tool: ["◐", "#f5f7fa"], quiet: ["○", "#6b7380"], done: ["✓", "#50c878"], stalled: ["◐", "#f0625c"] };
+function mini(values, color) {
+  const m = el("span", "mini"), n = 24, step = values.length / n, cols = [];
+  for (let i = 0; i < n; i++) { let v = 0; for (let j = Math.floor(i * step); j < Math.floor((i + 1) * step); j++) v += values[j] || 0; cols.push(v); }
+  const max = Math.max(1, ...cols);
+  for (const v of cols) { const b = el("i"); b.style.height = (v ? Math.max(18, Math.sqrt(v / max) * 100) : 0) + "%"; b.style.background = color; m.append(b); }
+  return m;
+}
+function rrow(cls, glyph, name, right, what, spark, color) {
+  const r = el("div", "r " + cls);
+  const g = el("span", "g" + (glyph[2] ? " " + glyph[2] : ""), glyph[0]); g.style.color = glyph[1];
+  const rt = el("span", "right"); if (right) rt.append(right);
+  const sub = el("div", "sub"); sub.append(what, mini(spark || [], color));
+  r.append(g, el("span", "nm", name), rt, sub);
+  return r;
+}
+function agentRow(a, child) {
+  const w = el("span", "what");
+  if (a.tool) w.append(el("span", "tool", a.tool), " " + (a.doing || "")); else w.append(a.doing || "");
+  return rrow(child ? "child" : "", GLYPH[a.state] || GLYPH.quiet, a.label, (a.model ? a.model + " · " : "") + a.ago, w, a.spark, a.label === "main thread" ? "#5b7fbf" : "#4fb8c4");
+}
+function wfRow(w) {
+  const right = el("span");
+  if (w.total <= 30) {
+    const st = el("span", "steps");
+    for (let i = 0; i < w.done; i++) { const x = el("span", "", "✓"); x.style.color = "#50c878"; st.append(x); }
+    for (let i = 0; i < w.doing; i++) st.append(el("span", "", "◐"));
+    right.append(st, " ");
+  }
+  right.append(w.done + "/" + w.total + " · " + w.age);
+  const what = el("span", "what");
+  if (w.outcome === "running") w.phases.forEach((p, i) => {
+    const x = el("span", "", (p.state === "done" ? "✓ " : p.state === "now" ? "◐ " : "○ ") + p.name);
+    x.style.color = p.state === "done" ? "#6b7380" : p.state === "now" ? "#f5f7fa" : "#4a515c";
+    if (p.state === "now") x.style.fontWeight = "700";
+    if (i) what.append("  ");
+    what.append(x);
+  });
+  else { what.append(w.outcome === "completed" ? "completed" + (w.tokens ? " · " + w.tokens + " tok" : "") : w.status || "failed"); if (w.outcome !== "completed") what.style.color = "#f0625c"; }
+  const glyph = w.outcome === "running" ? ["≡", "#be94ff"] : w.outcome === "completed" ? ["✓", "#50c878"] : ["✗", "#f0625c"];
+  return rrow("wf" + (w.outcome === "running" ? " live" : ""), glyph, w.name, right, what, w.spark, "#9b7bd9");
+}
+function roster(R) {
+  const box = el("div", "roster");
+  if (R.main) box.append(agentRow(R.main, false));
+  for (const w of R.workflows) {
+    box.append(wfRow(w));
+    for (const a of w.agents) box.append(agentRow(a, true));
+    if (w.more) box.append(el("div", "r child more", "+ " + w.more + " more agents"));
+  }
+  for (const a of R.agents) box.append(agentRow(a, false));
+  if (R.finished) box.append(el("div", "r done-line", "✓ " + R.finished + " agent" + (R.finished === 1 ? "" : "s") + " finished in the window"));
+  return box;
+}
 function card(s) {
   const c = el("section", "card" + (s.state === "needs" ? " needs" : "")); c.style.setProperty("--c", s.color);
   const head = el("div", "head"); head.append(el("div", "name", s.name), el("div", "state", s.word.toUpperCase() + (s.time ? " · " + s.time : ""))); c.append(head);
@@ -5916,9 +6050,9 @@ function card(s) {
   for (const b of s.bg) c.append(row("↻", "#56cdd6", b.desc + " · " + b.ago));
   for (const p of s.prs) c.append(row("⇡", "#c6cdd7", segs(p)));
   if (s.changes) c.append(row("±", "#6b7380", segs(s.changes)));
-  for (const w of s.workflows) c.append(row("≡", "#be94ff", w.name + " · " + w.phase + " · " + w.done + "/" + w.total));
+  const R = s.roster;
+  if (R && (R.main || R.workflows.length || R.agents.length || R.finished)) c.append(roster(R));
   if (s.tasks && s.tasks.total) { const d = el("details", "tasks"); d.append(el("summary", "", "tasks " + s.tasks.done + "/" + s.tasks.total + " done")); for (const t of s.tasks.open) d.append(el("div", "st-" + t.status, (t.status === "in_progress" ? "◐ " : "○ ") + t.text + (t.since ? " · " + t.since : "") + (t.blocked ? " · blocked" : ""))); c.append(d); }
-  if (s.agents.length) { const d = el("details", "agents"); d.append(el("summary", "", s.agents.length + (s.agents.length === 1 ? " agent" : " agents"))); for (const a of s.agents) d.append(el("div", "", (a.state === "active" ? "⠋ " : a.state === "tool" ? "◐ " : "○ ") + a.label + " — " + a.doing + " · " + a.ago)); c.append(d); }
   if (s.talk.length) { const d = el("details", "talk"); if (s.state === "needs") d.open = true; d.append(el("summary", "", "conversation")); for (const m of s.talk) { const p = el("p", m.who, (m.who === "you" ? "▸ " : "◆ ") + m.text); p.append(el("span", "", m.ago)); d.append(p); } c.append(d); }
   const m = el("details", "message"); if (s.state === "needs") m.open = true; m.append(el("summary", "", s.state === "needs" ? "answer" : "send a message"));
   const f = el("form", "send"); const ta = el("textarea"); ta.rows = 2; ta.placeholder = s.state === "needs" ? "your answer…" : "type to " + s.name + "…"; ta.value = drafts.get(s.sid) || ""; ta.dataset.sid = s.sid;
@@ -6117,6 +6251,8 @@ function withSession(s: Session, fn: (server: string[], pane: string, via: strin
         let ready = false;
         for (let i = 0; i < 60 && !ready; i++) {
           await pause(250);
+          // claude attach has already exited (no such session, or it could not attach): no point waiting.
+          if (spawnSync(tmuxCmd(), [...server, "has-session"], { timeout: 3000 }).status !== 0) return { ok: false, error: "could not open the session" };
           const screen = spawnSync(tmuxCmd(), [...server, "capture-pane", "-p"], { encoding: "utf8", timeout: 3000 }).stdout ?? "";
           ready = screen.includes("❯") && screen === last;
           last = screen;
@@ -6240,29 +6376,47 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
             }
             return new Response("not allowed", { status: 405, headers });
           }
-          if (req.method === "POST" && url.pathname === "/api/send") {
+          if (req.method === "POST" && (url.pathname === "/api/send" || url.pathname === "/api/keys" || url.pathname === "/api/choices")) {
             if (!sameToken(url.searchParams.get("t") ?? "", token)) return new Response("not without the link fleet showed you", { status: 403, headers });
             // Only the page itself may send: another site's form or script carries its own origin, or the wrong type.
             const origin = req.headers.get("origin");
             if ((origin && origin !== `${url.protocol}//${url.host}`) || !req.headers.get("content-type")?.startsWith("application/json")) return new Response("not from here", { status: 403, headers });
-            let body: { sid?: unknown; text?: unknown };
+            let body: { sid?: unknown; text?: unknown; key?: unknown };
             try {
               body = await req.json();
             } catch {
               return new Response("bad message", { status: 400, headers });
             }
             const target = getSessions().find((x) => x.sid === body.sid);
-            if (!target || typeof body.text !== "string") return Response.json({ ok: false, error: "no such session" }, { status: 404, headers });
+            if (!target) return Response.json({ ok: false, error: "no such session" }, { status: 404, headers });
+            // The glasses: a key pressed in the session (a numbered choice, Enter, Esc), or the choices on its screen.
+            if (url.pathname === "/api/keys") {
+              if (typeof body.key !== "string") return Response.json({ ok: false, error: "no key" }, { status: 400, headers });
+              const r = await (web.keys ?? keysToSession)(target, body.key);
+              return Response.json(r, { status: r.ok ? 200 : 409, headers });
+            }
+            if (url.pathname === "/api/choices") {
+              const r = await (web.peek ?? peekSession)(target);
+              return Response.json({ ok: r.ok, error: r.error, options: r.screen ? screenOptions(r.screen).map((o) => ({ key: o.key, label: glassesSafe(o.label) })) : [] }, { headers });
+            }
+            if (typeof body.text !== "string") return Response.json({ ok: false, error: "no message" }, { status: 400, headers });
             const r = await (web.send ?? sendToSession)(target, body.text);
             return Response.json(r, { status: r.ok ? 200 : 409, headers });
           }
           if (req.method !== "GET") return new Response("not allowed", { status: 405, headers });
           // The icon is the only thing served without the secret: phones fetch it without the link's query.
+          // Even's SDK for the glasses page: public code (MIT), so it needs no secret.
+          if (url.pathname === "/glasses/sdk.js") {
+            const sdk = glassesSdkFile();
+            return sdk ? new Response(sdk, { headers: { ...headers, "content-type": "text/javascript; charset=utf-8", "cache-control": "max-age=3600" } }) : new Response("not found", { status: 404, headers });
+          }
           if (ICON_SIZES[url.pathname]) return new Response(appIcon(url.pathname), { headers: { ...headers, "content-type": "image/png", "cache-control": "max-age=86400" } });
           if (!sameToken(url.searchParams.get("t") ?? "", token)) return new Response("not without the link fleet showed you", { status: 403, headers });
           if (url.pathname === "/manifest.webmanifest") return Response.json(webManifest(token), { headers: { ...headers, "content-type": "application/manifest+json" } });
           if (url.pathname === "/") return new Response(WEB_PAGE.replace("__TOKEN__", token), { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
           if (url.pathname === "/api/state") return Response.json(webState(getSessions(), now()), { headers });
+          if (url.pathname === "/glasses") return new Response(GLASSES_PAGE, { headers: { ...headers, "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" } });
+          if (url.pathname === "/api/glasses") return Response.json(glassesState(getSessions(), now()), { headers });
           return new Response("not found", { status: 404, headers });
         },
       });
@@ -6307,7 +6461,13 @@ export function webScreen(cols: number, rows: number): string[] {
   const W = Math.max(40, cols);
   const out: string[] = ["", fg(C.cyan, bold("  ◆ CLAUDE FLEET")) + fg(C.white, " on your phone"), ""];
   if (!web.url) out.push(fg(C.red, `  ${web.error ?? "the web page did not start"}`));
-  else {
+  else if (webGlasses) {
+    // The Even app scans this to open fleet on G2 glasses (in its developer settings: scan a QR code).
+    const link = web.url.replace("/?t=", "/glasses?t=");
+    for (const line of qrRows(link) ?? []) out.push("  " + line);
+    out.push("", fg(C.text, "  " + link));
+    out.push(fg(C.white, "  On your Even Realities G2 glasses: scan this in the Even app."), fg(C.dim, "  The phone needs Tailscale on, as for the phone page. g shows the phone's code again."));
+  } else {
     const qr = qrRows(web.url) ?? [];
     for (const line of qr) out.push("  " + line);
     out.push("", fg(C.text, "  " + web.url));
@@ -6321,7 +6481,7 @@ export function webScreen(cols: number, rows: number): string[] {
   }
   while (out.length < rows - 1) out.push("");
   out.length = Math.max(0, rows - 1);
-  out.push(fg(C.dim, fit("  any key or click returns to the fleet", W)));
+  out.push(fg(C.dim, fit(webGlasses ? "  g: the phone's code · any other key returns" : "  g: the code for G2 glasses · any other key returns", W)));
   return out.map((l) => clipRow(l, W));
 }
 
@@ -8038,6 +8198,308 @@ export function splashScreen(cols: number, rows: number, doing: string, done = 0
 export let scanProgress: ((done: number, total: number, name: string) => void) | undefined;
 export const setScanProgress = (f: typeof scanProgress) => (scanProgress = f);
 
+// ───────────────────────── on your glasses ─────────────────────────
+// Even Realities G2 glasses run apps as web pages: the Even app on your phone opens the page and draws what it
+// asks for on the glasses (576 by 288, sixteen shades of green), and passes back taps, double taps and ring
+// scrolls. Fleet serves that page at /glasses, with the same secret and over the same tailnet as the phone page;
+// key w, then g, shows its QR code for the Even app to scan. The page uses Even's SDK (MIT, vendor/).
+
+const GLASSES_SDK = path.join(import.meta.dir, "vendor", "even_hub_sdk.js");
+let glassesSdk: Buffer | null | undefined;
+const glassesSdkFile = () => {
+  if (glassesSdk === undefined)
+    try {
+      glassesSdk = fs.readFileSync(GLASSES_SDK);
+    } catch {
+      glassesSdk = null;
+    }
+  return glassesSdk;
+};
+/** Text the glasses can draw: their font has no ✓ ✗ ⇡ ↻ ≡ ⏳ or spinner, and silently drops what it lacks. */
+export const glassesSafe = (s: string) =>
+  s
+    .replace(/[✓✔]\s*/g, "") // no tick in their font: the word beside it says it
+    .replace(/✗|✘/g, "x")
+    .replace(/[⇡↗]/g, "↑")
+    .replace(/↻/g, "~")
+    .replace(/≡/g, "=")
+    .replace(/[⏳⌛]/g, "◐")
+    .replace(/[⠀-⣿]/g, "●")
+    .replace(/[^\x20-\x7e -ÿ‐-‧←-↙─-◿☀-⛿]/g, "")
+    .replace(/[ \t]+/g, " ")
+    .trim();
+/** The roster in lines the glasses can draw: each workflow with up to four of its agents, then other agents. */
+function glassesRoster(r: ReturnType<typeof rosterOfView>): string[] {
+  const mark = (st: string) => (st === "active" ? "●" : st === "tool" ? "◐" : st === "stalled" ? "◐!" : st === "done" ? "■" : "○");
+  const agent = (a: ReturnType<typeof rosterOfView>["agents"][number], indent = "") => indent + glassesSafe(`${mark(a.state)} ${a.label}: ${a.tool ? `${a.tool} ${a.doing}` : a.doing}`).slice(0, 90);
+  const out: string[] = [];
+  for (const w of r.workflows) {
+    const now = w.phases.find((p) => p.state === "now")?.name;
+    out.push(glassesSafe(`${w.outcome === "running" ? "=" : w.outcome === "completed" ? "■" : "x"} ${w.name}${now ? ` · ${now}` : w.outcome === "completed" ? " · done" : ` · ${w.status ?? "failed"}`} · ${w.done}/${w.total}${w.tokens ? ` · ${w.tokens} tok` : ""}`));
+    for (const a of w.agents.slice(0, 4)) out.push(agent(a, "  "));
+    if (w.agents.length > 4) out.push(`  + ${w.agents.length - 4} more`);
+  }
+  for (const a of r.agents.slice(0, 4)) out.push(agent(a));
+  if (r.agents.length > 4) out.push(`+ ${r.agents.length - 4} more agents`);
+  return out;
+}
+const GLASSES_MARK: Record<string, string> = { needs: "▲", stalled: "◐", working: "●", yours: "▶", idle: "○", done: "○" };
+/** Everything the glasses page shows, in plain, short, drawable text. */
+export function glassesState(sessions: Session[], now: number) {
+  const st = webState(sessions, now);
+  const order = ["needs", "stalled", "working", "yours", "idle", "done"];
+  return {
+    clock: new Date(now).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }),
+    counts: st.counts,
+    sessions: [...st.sessions]
+      .sort((a, b) => order.indexOf(a.state) - order.indexOf(b.state))
+      .map((s) => {
+        const full = sessions.find((x) => x.sid === s.sid);
+        const said = s.talk.filter((t) => t.who === "claude").at(-1);
+        return {
+          sid: s.sid,
+          name: glassesSafe(s.name),
+          host: full ? machineOf(full) : undefined,
+          state: s.state,
+          mark: GLASSES_MARK[s.state] ?? "○",
+          word: glassesSafe(s.word),
+          time: glassesSafe(s.time ?? ""),
+          needs: s.needs ? glassesSafe(capText(flatReply(s.needs), 400)) : undefined,
+          now: glassesSafe(capText(s.sub.text || "", 300)),
+          ctx: s.ctx ? { pct: s.ctx.pct, runway: s.ctx.runway ? glassesSafe(s.ctx.runway) : undefined } : undefined,
+          tasks: s.tasks?.total ? `${s.tasks.done}/${s.tasks.total}` : undefined,
+          doing: s.tasks?.open.find((t) => t.status === "in_progress")?.text,
+          agents: s.agents.length,
+          fails: s.fails?.n,
+          prs: s.prs.map((p) => glassesSafe(segText(p))),
+          said: said ? glassesSafe(capText(said.text, 500)) : undefined,
+          roster: glassesRoster(s.roster),
+        };
+      }),
+  };
+}
+
+export const GLASSES_PAGE = `<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Claude Fleet</title>
+<style>body{margin:0;padding:24px;background:#000;color:#4be37a;font:15px/1.5 ui-monospace,Menlo,monospace}h1{font-size:17px;margin:0 0 12px}p{margin:6px 0;color:#9adbb0}</style>
+</head><body>
+<h1>◆ Claude Fleet on your glasses</h1>
+<p id="s">Waiting for the Even app…</p>
+<p>Scroll the ring to move, tap to open, double-tap to go back.</p>
+<script type="module">
+import { waitForEvenAppBridge, TextContainerProperty, ListContainerProperty, ListItemContainerProperty, CreateStartUpPageContainer, RebuildPageContainer, TextContainerUpgrade, OsEventTypeList as E } from "/glasses/sdk.js";
+const token = new URLSearchParams(location.search).get("t") || "";
+const say = (t) => (document.getElementById("s").textContent = t);
+const W = 576, H = 288, HEAD = 62;
+const QUICK = ["yes, go ahead", "continue", "looks good, carry on", "stop and tell me where you are"];
+const cut = (s, n) => (s && s.length > n ? s.slice(0, n - 1) + "…" : s || "");
+const bar = (pct) => "━".repeat(Math.round(pct / 10)) + "─".repeat(10 - Math.round(pct / 10));
+let data = { sessions: [], counts: {}, clock: "" }, view = "home", sel = 0, sid = null, page = 0, pages = [""], choices = [], homeKey = "", started = false, flash = "", flashUntil = 0, busy = false, seenNeeds = new Set();
+
+const bridge = await waitForEvenAppBridge();
+say("Connected: Claude Fleet is on your glasses.");
+
+const text = (id, name, x, y, w, h, content, capture) => new TextContainerProperty({ xPosition: x, yPosition: y, width: w, height: h, borderWidth: 0, borderColor: 0, paddingLength: 4, containerID: id, containerName: name, content: cut(content, 1000), isEventCapture: capture ? 1 : 0 });
+// A list sits directly under what is above it: the glasses centre a list's items in its height, so it is only as tall as they are.
+const list = (id, name, y, h, items) => new ListContainerProperty({ xPosition: 0, yPosition: y, width: W, height: Math.min(h, items.length * 40 + 8), borderWidth: 0, borderColor: 0, paddingLength: 4, containerID: id, containerName: name, isEventCapture: 1, itemContainer: new ListItemContainerProperty({ itemCount: items.length, itemWidth: 0, isItemSelectBorderEn: 1, itemName: items.map((i) => cut(i, 64)) }) });
+// Input is ignored for a moment after a screen appears: a new list sends an event of its own (it reads as a tap), and
+// a tap on a list arrives twice (from the list, then from the system), so the second half would act on the new screen.
+let settleUntil = 0;
+async function show(page) {
+  settleUntil = Date.now() + 1200;
+  // The first page is created once; every later one replaces it.
+  if (!started) {
+    started = true;
+    const r = await bridge.createStartUpPageContainer(new CreateStartUpPageContainer(page));
+    if (r !== 0) say("The glasses would not take the page (" + r + ").");
+  } else await bridge.rebuildPageContainer(new RebuildPageContainer(page));
+}
+const upgrade = (id, name, content) => bridge.textContainerUpgrade(new TextContainerUpgrade({ containerID: id, containerName: name, content: cut(content, 1000) }));
+const current = () => data.sessions.find((s) => s.sid === sid);
+const label = (s) => s.mark + " " + s.name + (s.host ? " · " + s.host : "");
+
+// ── home: a header and a list of sessions ──
+function counts() {
+  const c = data.counts || {};
+  return [c.needs ? "▲" + c.needs + " need you" : "", c.stalled ? "◐" + c.stalled + " stuck" : "", c.working ? "●" + c.working + " working" : "", c.agents ? c.agents + " agents" : ""].filter(Boolean).join("  ") || "all quiet";
+}
+function headText() {
+  const top = "◆ FLEET   " + counts() + "   " + data.clock;
+  if (flash && Date.now() < flashUntil) return top + "\\n" + flash;
+  const s = data.sessions[sel] || data.sessions[0];
+  if (!s) return top + "\\nNothing working, nothing waiting on you.";
+  return top + "\\n" + cut(s.needs ? "▲ " + s.needs : s.word + (s.time ? " " + s.time : "") + (s.now ? " · " + s.now : ""), 60);
+}
+function homeItems() {
+  return data.sessions.length ? data.sessions.slice(0, 20).map(label) : ["○ no sessions right now"];
+}
+async function home() {
+  view = "home";
+  const items = homeItems();
+  homeKey = items.join("|");
+  sel = 0; // a rebuilt list starts at its first item
+  await show({ containerTotalNum: 2, textObject: [text(1, "head", 0, 0, W, HEAD, headText(), false)], listObject: [list(2, "sessions", HEAD, H - HEAD, items)] });
+}
+
+// ── a session, a page at a time ──
+function sessionText(s) {
+  const lines = [s.mark + " " + s.name.toUpperCase() + (s.host ? " · " + s.host : "") + " · " + s.word + (s.time ? " " + s.time : "")];
+  if (s.needs) lines.push("? " + s.needs);
+  else if (s.now) lines.push("> " + s.now);
+  if (s.ctx) lines.push(bar(s.ctx.pct) + " " + s.ctx.pct + "% context" + (s.ctx.runway ? " · " + s.ctx.runway : ""));
+  const facts = [s.tasks && "tasks " + s.tasks, s.agents && s.agents + " agents", s.fails && s.fails + " failed"].filter(Boolean);
+  if (facts.length) lines.push(facts.join(" · ") + (s.doing ? ": " + s.doing : ""));
+  if (s.prs.length) lines.push("PRs " + s.prs.join(" · "));
+  if (s.roster && s.roster.length) lines.push(...s.roster);
+  if (s.said && !s.needs) lines.push("", "Claude: " + s.said);
+  return lines.join("\\n");
+}
+function paginate(t, size = 330) {
+  const out = [];
+  let cur = "";
+  for (const word of t.split(/(\\s+)/)) {
+    if ((cur + word).length > size && cur.trim()) {
+      out.push(cur.trim());
+      cur = "";
+    }
+    cur += word;
+  }
+  if (cur.trim()) out.push(cur.trim());
+  return out.length ? out : [""];
+}
+const sessionPage = () => pages[page] + "\\n\\n" + (pages.length > 1 ? "[" + (page + 1) + "/" + pages.length + "] scroll for more · " : "") + "tap: answer · 2× tap: back";
+async function session(id) {
+  sid = id;
+  view = "session";
+  const s = current();
+  if (!s) return home();
+  pages = paginate(sessionText(s));
+  page = Math.min(page, pages.length - 1);
+  await show({ containerTotalNum: 1, textObject: [text(1, "session", 0, 0, W, H, sessionPage(), true)] });
+}
+
+// ── answering: the choices on its screen, Esc, Enter and quick replies ──
+const BASIC = () => [{ label: "Esc · stop or cancel", key: "X" }, { label: "Enter", key: "E" }, ...QUICK.map((q) => ({ label: "\\u201c" + q + "\\u201d", text: q }))];
+const answerPage = (note) => ({ containerTotalNum: 2, textObject: [text(1, "head", 0, 0, W, 36, cut(note, 50) + " · 2× tap: back", false)], listObject: [list(2, "choices", 36, H - 36, choices.map((c) => c.label))] });
+async function answer() {
+  const s = current();
+  if (!s) return home();
+  view = "answer";
+  const asked = sid;
+  // Esc, Enter and the quick replies at once; the choices on its screen join them when fleet has looked.
+  choices = BASIC();
+  sel = 0;
+  await show(answerPage("Reading its screen…"));
+  const r = await post("/api/choices", { sid });
+  if (view !== "answer" || sid !== asked) return; // gone back meanwhile
+  const options = (r.options || []).map((o) => ({ label: o.key + ". " + o.label, key: o.key }));
+  if (options.length) {
+    choices = [...options, ...BASIC()];
+    sel = 0;
+    await show(answerPage("Tap a choice to press it"));
+  } else await upgrade(1, "head", cut(r.ok ? "No numbered choice on its screen" : r.error || "Can't see its screen", 50) + " · 2× tap: back");
+}
+async function pick(i) {
+  const c = choices[i];
+  const s = current();
+  if (!c || !s) return;
+  busy = true;
+  const r = c.key ? await post("/api/keys", { sid, key: c.key }) : await post("/api/send", { sid, text: c.text });
+  await show({ containerTotalNum: 1, textObject: [text(1, "done", 0, 0, W, H, (r.ok ? "√ " + (c.key ? "Pressed " + (c.key === "X" ? "Esc" : c.key === "E" ? "Enter" : c.key) : "Sent") + " in " + s.name : "x Not done: " + (r.error || "fleet did not answer")), true)] });
+  setTimeout(async () => {
+    busy = false;
+    await refresh();
+    await session(sid);
+  }, 1600);
+}
+
+async function post(path, body) {
+  try {
+    const r = await fetch(path + "?t=" + encodeURIComponent(token), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    return await r.json();
+  } catch {
+    return { ok: false, error: "can't reach fleet" };
+  }
+}
+async function refresh() {
+  try {
+    const r = await fetch("/api/glasses?t=" + encodeURIComponent(token), { cache: "no-store" });
+    if (!r.ok) throw new Error(r.status);
+    data = await r.json();
+    say("Connected: " + counts() + " · " + data.clock);
+  } catch {
+    flash = "fleet can't be reached: is it running?";
+    flashUntil = Date.now() + 5000;
+    return;
+  }
+  // A session that has just started waiting on you: said at the top of the home screen.
+  for (const s of data.sessions)
+    if (s.state === "needs" && !seenNeeds.has(s.sid)) {
+      if (seenNeeds.size || started) {
+        flash = "▲ " + s.name + " needs you";
+        flashUntil = Date.now() + 10000;
+      }
+      seenNeeds.add(s.sid);
+    }
+  for (const id of seenNeeds) if (!data.sessions.some((s) => s.sid === id && s.state === "needs")) seenNeeds.delete(id);
+}
+// Every two seconds: the header in place, the list only when its sessions change (a rebuild resets the selection).
+async function tick() {
+  if (busy) return;
+  await refresh();
+  if (view === "home") {
+    if (homeItems().join("|") !== homeKey) await home();
+    else await upgrade(1, "head", headText());
+  } else if (view === "session") {
+    const s = current();
+    if (!s) return home();
+    const next = paginate(sessionText(s));
+    if (next.join() !== pages.join()) {
+      pages = next;
+      page = Math.min(page, pages.length - 1);
+      await upgrade(1, "session", sessionPage());
+    }
+  }
+}
+
+const typeOf = (env) => (env ? (env.eventType ?? E.CLICK_EVENT) : null);
+bridge.onEvenHubEvent(async (e) => {
+  if (busy) return;
+  const types = [typeOf(e.listEvent), typeOf(e.textEvent), typeOf(e.sysEvent)];
+  if (types.includes(E.SYSTEM_EXIT_EVENT) || types.includes(E.ABNORMAL_EXIT_EVENT)) return;
+  if (Date.now() < settleUntil) return;
+  if (e.listEvent) sel = e.listEvent.currentSelectItemIndex ?? 0;
+  if (types.includes(E.DOUBLE_CLICK_EVENT)) {
+    if (view === "answer") return session(sid);
+    if (view === "session") return home();
+    return bridge.shutDownPageContainer(1);
+  }
+  if (types.includes(E.SCROLL_BOTTOM_EVENT) || types.includes(E.SCROLL_TOP_EVENT)) {
+    if (view === "session") {
+      page = Math.max(0, Math.min(pages.length - 1, page + (types.includes(E.SCROLL_BOTTOM_EVENT) ? 1 : -1)));
+      return upgrade(1, "session", sessionPage());
+    }
+    if (view === "home") return upgrade(1, "head", headText());
+    return;
+  }
+  if (types.includes(E.CLICK_EVENT)) {
+    settleUntil = Date.now() + 800; // the other half of this tap
+    if (view === "home" && data.sessions[sel]) return session(data.sessions[sel].sid);
+    if (view === "session") return answer();
+    if (view === "answer") return pick(sel);
+  }
+});
+await refresh();
+await home();
+setInterval(tick, 2000);
+</script></body></html>`;
+
+let webGlasses = false; // on the w screen, key g: the glasses QR code instead of the phone's
+
 // ───────────────────────── legend ─────────────────────────
 
 let legendOn = false; // key ?: the legend is showing instead of the fleet
@@ -8476,9 +8938,17 @@ if (import.meta.main) {
       for (const e of events) {
         if (e.kind === "other" || (e.kind === "key" && keys.length > PASTE_KEYS)) continue;
         // The legend is closed by a key or a click, which then does nothing else. A button's release is not a click, so the click that opened it does not close it.
+        // On the w screen, g switches between the phone's code and the glasses'.
+        if (webOn && e.kind === "key" && e.key === "g") {
+          webGlasses = !webGlasses;
+          clear();
+          draw();
+          continue;
+        }
         if (legendOn || webOn) {
           legendOn = false;
           webOn = false;
+          webGlasses = false;
           clear();
           draw();
           continue;
