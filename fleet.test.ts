@@ -5609,47 +5609,35 @@ describe("a fleet window and the background service", () => {
   });
 });
 
-describe("the glasses' slide", () => {
+describe("the glasses' slide and dashboards", () => {
   const now = Date.now();
   const mk = (sid: string, name: string, job: object) => ({ sid, name, kind: "bg", status: "busy", cwd: "/x", startedAt: now - 60_000, pid: 1, mains: [], agents: [], workflows: [], job: { detail: "", needs: "", ...job } }) as any;
   const sessions = [mk("s1", "checkout", { state: "working", needs: "Approve dropping the column?" }), mk("s2", "flaky tests", { state: "working" })];
 
-  test("one screen of 72 by 18: the header, a two-row entry for each session, the chosen one lit, and the controls", () => {
-    const rows = F.glassesSlide(sessions, now, 1);
-    const plain = rows.map(strip);
-    expect(rows.length).toBe(18);
-    expect(plain.every((l) => F.width(l) <= 72)).toBe(true);
-    expect(plain[0]).toContain("CLAUDE FLEET");
-    expect(plain.some((l) => l.includes("▲ CHECKOUT"))).toBe(true);
-    expect(plain.some((l) => l.includes("? Approve dropping the column?"))).toBe(true);
-    expect(rows.filter((l) => l.startsWith("\x1b[48;2;255;255;255m")).map(strip).join(" ")).toContain("FLAKY TESTS"); // the chosen one, as a bar
-    expect(plain[17]).toContain("tap: open");
+  test("the phone draws them from fleet's numbers: a header with the five-hour forecast, and each session's graphs", () => {
+    const st = F.glassesState(sessions, now);
+    expect(Object.keys(st.header).sort()).toEqual(["cpu", "five", "machines", "mem", "urgent", "week", "window"].sort());
+    expect(st.header.five).toMatch(/^5h/); // always said, figures or not
+    const s = st.sessions[0];
+    expect(s.needs).toBe("Approve dropping the column?");
+    expect(Object.keys(s.chart).sort()).toEqual(["agents", "ctx", "out", "prs", "spark", "tasks", "tools", "workflows"]);
+    expect(Array.isArray(s.chart.spark)).toBe(true);
   });
 
-  test("it goes to the glasses as four 288 by 144 tiles on black, each with a fingerprint, behind the link's secret", async () => {
-    const tiles = F.glassesTiles(sessions, now, 0);
-    expect(tiles.length).toBe(4);
-    for (const t of tiles) {
-      const png = Buffer.from(t.png, "base64");
-      expect([png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual([288, 144]);
-    }
-    expect(F.glassesTiles(sessions, now, 0).map((t) => t.key)).toEqual(tiles.map((t) => t.key)); // the same slide, the same tiles
-    expect(F.glassesTiles(sessions, now, 1).map((t) => t.key)).not.toEqual(tiles.map((t) => t.key)); // the bar moved
-    process.env.FLEET_WEB_HOST = "127.0.0.1";
-    process.env.FLEET_WEB_PORT = "5377";
-    process.env.FLEET_WEB_TOKEN_FILE = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "fleet-slide-")), "web-token");
-    for (const k of ["server", "url", "error", "shared", "retake", "yieldPort", "older"] as const) delete (F.web as any)[k];
-    const web = F.startWeb(() => sessions, () => now);
+  test("the five-hour line always says something: no figures, or where the limit is going", () => {
+    const was = F.opt.usage;
+    F.opt.usage = false;
     try {
-      const url = new URL(web.url!);
-      expect((await fetch(`http://${url.host}/api/glasses/tiles?sel=1`)).status).toBe(403);
-      const got: any = await (await fetch(`http://${url.host}/api/glasses/tiles?t=${url.searchParams.get("t")}&sel=1`)).json();
-      expect(got.map((t: any) => t.key)).toEqual(F.glassesTiles(sessions, now, 1).map((t) => t.key));
+      expect(F.fiveHourLine(now).text).toMatch(/^5h: no usage figures/);
     } finally {
-      web.server?.stop(true);
-      delete process.env.FLEET_WEB_HOST;
-      delete process.env.FLEET_WEB_PORT;
-      delete process.env.FLEET_WEB_TOKEN_FILE;
+      F.opt.usage = was;
     }
+  });
+
+  test("the page draws on a canvas in the system font, and sends what it drew as the four tiles the glasses allow", () => {
+    expect(F.GLASSES_PAGE).toContain('getContext("2d")');
+    expect(F.GLASSES_PAGE).toContain("-apple-system");
+    expect(F.GLASSES_PAGE).toContain("updateImageRawData");
+    expect(F.GLASSES_PAGE).toContain("width: 288, height: 144");
   });
 });
