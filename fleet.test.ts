@@ -5696,7 +5696,7 @@ describe("the home-screen launch picture", () => {
     expect([p.w, p.h]).toEqual([1170, 2532]);
     const at = (x: number, y: number) => Array.from(p.rgb.subarray((y * p.w + x) * 3, (y * p.w + x) * 3 + 3));
     expect(at(0, p.h - 1)).toEqual([0x0d, 0x11, 0x17]); // the page's background at the edge
-    const S = F.SPLASH_LOGO * 3, top = Math.round(p.h / 2 - ((F.SPLASH_LOGO + 83) / 2) * 3), left = Math.round(p.w / 2 - S / 2);
+    const S = F.SPLASH_LOGO * 3, top = Math.round(p.h / 2 - ((F.SPLASH_LOGO + F.SPLASH_BELOW) / 2) * 3), left = Math.round(p.w / 2 - S / 2);
     const near = (a: number[], b: number[]) => a.every((v, k) => Math.abs(v - b[k]) <= 2);
     expect(near(at(left + 4, top + 4), at(left - 4, top - 4))).toBe(true); // a rounded corner shows the background (a shade on in the gradient)
     expect(at(left + S / 2, top + S / 12)[0]).toBeLessThan(8); // inside, the icon's black

@@ -6063,10 +6063,10 @@ export const WEB_PAGE = `<!doctype html>
 #splash .logo b i.d{background:radial-gradient(circle at 50% 50%,#ffffff80 0,#ffffff2a 18%,transparent 34%)}
 #splash .logo b{position:absolute;inset:0;overflow:hidden;-webkit-mask:url(__LOGO_MASK__) center/100% 100% no-repeat;mask:url(__LOGO_MASK__) center/100% 100% no-repeat}
 #splash .logo i{position:absolute;inset:-40%;will-change:transform,opacity}#splash .logo i.s{background:linear-gradient(115deg,transparent 38%,#ffffff10 44%,#ffffffb0 50%,#ffffff10 56%,transparent 62%);transform:translateX(-211px)}
-#splash .title{font-size:22px;font-weight:700;letter-spacing:-.01em;background:linear-gradient(100deg,#8a95a5 30%,#fff 50%,#8a95a5 70%);background-size:250% 100%;background-position:120% 0;-webkit-background-clip:text;background-clip:text;color:transparent}
+#splash .title{margin-top:28px;font-size:22px;font-weight:700;letter-spacing:-.01em;background:linear-gradient(100deg,#8a95a5 30%,#fff 50%,#8a95a5 70%);background-size:250% 100%;background-position:120% 0;-webkit-background-clip:text;background-clip:text;color:transparent}
 #splash .what{color:var(--dim);font-size:13px;min-height:1.4em}</style>
 __STARTUP__
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0d1117">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black">
@@ -6133,7 +6133,7 @@ details.tasks[open]>summary::before,details.wfg[open]>summary::before,details.ta
 .card.done{touch-action:pan-y;user-select:none;-webkit-user-select:none}.swipe-hint{color:var(--dim);font-size:11.5px;margin-top:8px;text-align:right}
 .shelf{display:block;margin:6px auto 12px;background:transparent;color:var(--text);border:1px solid var(--line);border-radius:999px;padding:9px 16px;font:600 13.5px -apple-system,system-ui,sans-serif}
 .card.gone{opacity:.62}.putback{display:block;margin-left:auto !important;background:transparent;color:var(--cyan);border:1px solid #2f3946;border-radius:999px;padding:4px 11px;font:600 12.5px -apple-system,system-ui,sans-serif;margin:-2px 0 6px 8px}
-.send{display:flex;gap:6px;margin-top:6px;align-items:flex-end}.send textarea{flex:1;min-height:42px;max-height:40vh;resize:vertical;background:var(--bg);color:var(--white);border:1px solid var(--line);border-radius:8px;padding:8px;font:16px/1.35 -apple-system,system-ui,sans-serif}
+.send{display:flex;gap:6px;margin-top:6px;align-items:flex-end}.send textarea{flex:1;height:38px;max-height:40vh;resize:none;overflow-y:hidden;background:var(--bg);color:var(--white);border:1px solid var(--line);border-radius:10px;padding:9px 10px;font:15px/1.3 -apple-system,system-ui,sans-serif}.send textarea:focus{outline:none;border-color:var(--cyan)}
 .send button{background:var(--cyan);color:#0d1117;border:0;border-radius:10px;padding:10px 16px;font:700 15px -apple-system,system-ui,sans-serif}.send button:disabled{opacity:.5}
 .talk p.cut{cursor:pointer}.talk p .more{color:var(--cyan);font-size:12px;margin-left:6px;font-weight:600}
 .picks{display:flex;flex-direction:column;gap:7px;margin:8px 0 10px}.pick{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:#1d2530;color:var(--white);border:1px solid #2f3946;border-radius:12px;padding:11px 12px;font:600 15px -apple-system,system-ui,sans-serif}
@@ -6153,7 +6153,7 @@ details.tasks[open]>summary::before,details.wfg[open]>summary::before,details.ta
 (() => {
   const sp = document.getElementById("splash"), tilt = sp.querySelector(".tilt"), logo = sp.querySelector(".logo"), title = sp.querySelector(".title");
   const sharp = sp.querySelectorAll(".logo i.s"), soft = sp.querySelectorAll(".logo i.d");
-  const DELAY = 225, CYCLE = 2400, L = 192;
+  const DELAY = 0, CYCLE = 3120, L = 192;
   const YAW = [[0, 0], [0.15, -5], [0.55, 14], [0.9, 0], [1, 0]], PITCH = [[0, 0], [0.15, 2], [0.55, -4], [0.9, 0], [1, 0]];
   const along = (pts, p) => { for (let k = 1; k < pts.length; k++) if (p <= pts[k][0]) { const [p0, v0] = pts[k - 1], [p1, v1] = pts[k], u = (p - p0) / (p1 - p0); return v0 + (v1 - v0) * u * u * (3 - 2 * u); } return 0; };
   const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -6455,8 +6455,9 @@ function card(s) {
   if (R && (R.main || R.workflows.length || R.agents.length || R.finished)) c.append(roster(R));
   const tk = talkSection(s); if (tk) c.append(tk);
   const m = el("details", "message"); if (s.state === "needs" || following.has(s.sid)) m.open = true; m.append(el("summary", "", s.state === "needs" ? "answer" : "send a message"));
-  const f = el("form", "send"); const ta = el("textarea"); ta.rows = 2; ta.placeholder = s.state === "needs" ? "your answer…" : "type to " + s.name + "…"; ta.value = drafts.get(s.sid) || ""; ta.dataset.sid = s.sid;
-  ta.addEventListener("input", () => drafts.set(s.sid, ta.value));
+  const f = el("form", "send"); const ta = el("textarea"); ta.rows = 1; ta.placeholder = s.state === "needs" ? "your answer…" : "type to " + s.name + "…"; ta.value = drafts.get(s.sid) || ""; ta.dataset.sid = s.sid;
+  ta.addEventListener("input", () => { drafts.set(s.sid, ta.value); grow(ta); });
+  if (ta.value) requestAnimationFrame(() => grow(ta));
   m.append(answerButtons(s));
   const go = el("button", "", "Send"); go.type = "submit"; f.append(ta, go); m.append(f);
   const note = el("div", "sent" + (notes.get(s.sid)?.cls ? " " + notes.get(s.sid).cls : ""), notes.get(s.sid)?.text || ""); m.append(note);
@@ -6467,7 +6468,7 @@ function card(s) {
     try {
       const r = await fetch("api/send?t=" + encodeURIComponent(token), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sid: s.sid, text }) });
       const d = await r.json().catch(() => ({ ok: false, error: "fleet said " + r.status }));
-      if (d.ok) { following.set(s.sid, { text, at: Date.now() }); open.set(s.sid + "talk", true); const tk = f.closest(".card")?.querySelector("details.talk"); if (tk) tk.open = true; drafts.delete(s.sid); ta.value = ""; notes.set(s.sid, { cls: "ok", text: "sent ✓ " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) }); }
+      if (d.ok) { following.set(s.sid, { text, at: Date.now() }); open.set(s.sid + "talk", true); const tk = f.closest(".card")?.querySelector("details.talk"); if (tk) tk.open = true; drafts.delete(s.sid); ta.value = ""; grow(ta); notes.set(s.sid, { cls: "ok", text: "sent ✓ " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) }); }
       else notes.set(s.sid, { cls: "err", text: "not sent: " + (d.error || "unknown") });
     } catch { notes.set(s.sid, { cls: "err", text: "not sent: can't reach fleet" }); }
     const n = notes.get(s.sid); note.className = "sent " + n.cls; note.textContent = n.text; go.disabled = false; ta.blur(); tick();
@@ -6477,14 +6478,22 @@ function card(s) {
   return c;
 }
 let last = 0, open = new Map();
+// The message box: one line, taller as the words need it (to 40% of the screen, then it scrolls).
+function grow(ta) {
+  ta.style.height = "auto";
+  const max = innerHeight * 0.4, h = Math.min(ta.scrollHeight + 2, max);
+  ta.style.height = h + "px";
+  ta.style.overflowY = ta.scrollHeight + 2 > max ? "auto" : "hidden";
+}
 // A node's layout: its tags, classes and what each message or button is for, not its words or figures.
 const shapeOf = (n) => n.nodeType === 3 ? "#" : n.nodeType !== 1 ? "?" : n.tagName + "." + (n.getAttribute("class") || "") + "|" + (n.dataset ? n.dataset.k || "" : "") + "(" + [...n.childNodes].map(shapeOf).join(",") + ")";
 // Bring a node up to date from one laid out the same, in place: its words and attributes; a text box keeps what you typed.
 function patch(a, b) {
   if (a.nodeType === 3) { if (a.nodeValue !== b.nodeValue) a.nodeValue = b.nodeValue; return; }
   if (a.nodeType !== 1) return;
-  for (const { name, value } of [...b.attributes]) if (a.getAttribute(name) !== value) a.setAttribute(name, value);
-  for (const { name } of [...a.attributes]) if (!b.hasAttribute(name)) a.removeAttribute(name);
+  const own = (name) => a.tagName === "TEXTAREA" && name === "style"; // its height is its own, from what you typed
+  for (const { name, value } of [...b.attributes]) if (!own(name) && a.getAttribute(name) !== value) a.setAttribute(name, value);
+  for (const { name } of [...a.attributes]) if (!own(name) && !b.hasAttribute(name)) a.removeAttribute(name);
   for (let i = 0; i < a.childNodes.length; i++) patch(a.childNodes[i], b.childNodes[i]);
 }
 // The splash finishes its turn (the logo back at rest), holds 400 ms on the logo, then the app fades in quickly.
@@ -6695,8 +6704,9 @@ export function webIcon(n: number): Buffer {
 const ICON_SIZES: Record<string, number> = { "/apple-touch-icon.png": 180, "/apple-touch-icon-precomposed.png": 180, "/favicon.ico": 32, "/icon-192.png": 192, "/icon-512.png": 512, "/icon-maskable-512.png": 512 };
 /** The app icon: the files in icons/ beside fleet.ts (the F), or the drawn diamond if they are missing. */
 const iconFiles = new Map<string, Buffer | null>();
-/** How big the splash draws the icon, in points. */
+/** How big the splash draws the icon, in points, and how much of the splash stands below it (gaps, title, status line). */
 export const SPLASH_LOGO = 192;
+export const SPLASH_BELOW = 16 + 28 + 32 + 16 + 19;
 /** The phones whose home-screen launch picture fleet draws: width and height in points, and pixels to a point. */
 export const STARTUP_SIZES: [number, number, number][] = [[440, 956, 3], [402, 874, 3], [430, 932, 3], [393, 852, 3], [390, 844, 3], [428, 926, 3], [375, 812, 3], [414, 896, 3], [414, 896, 2], [375, 667, 2], [320, 568, 2]];
 /** An 8-bit RGB PNG's pixels (the icons are such). */
@@ -6734,10 +6744,10 @@ export function startupPng(cw: number, ch: number, d: number): Buffer {
       for (let k = 0; k < 3; k++) out[(y * W + x) * 3 + k] = Math.round(glow[k] + (bg[k] - glow[k]) * t);
     }
   // The icon: 192 points, its corners rounded by a quarter, centred above the title as the splash lays it out
-  // (the icon, 16, the title's 32, 16 and the status line's 19 points, centred together).
+  // (the icon, 16 and the title's 28 more, the title's 32, 16 and the status line's 19 points, centred together).
   const icon = rgbOfPng(appIcon("/icon-512.png"));
   if (icon) {
-    const S = SPLASH_LOGO * d, r = S / 4, left = Math.round(W / 2 - S / 2), top = Math.round(H / 2 - ((SPLASH_LOGO + 83) / 2) * d);
+    const S = SPLASH_LOGO * d, r = S / 4, left = Math.round(W / 2 - S / 2), top = Math.round(H / 2 - ((SPLASH_LOGO + SPLASH_BELOW) / 2) * d);
     for (let y = 0; y < S; y++)
       for (let x = 0; x < S; x++) {
         const cx = Math.min(Math.max(x + 0.5, r), S - r), cy = Math.min(Math.max(y + 0.5, r), S - r);
