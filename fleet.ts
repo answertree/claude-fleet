@@ -6042,14 +6042,14 @@ export function webState(sessions: Session[], now: number) {
           return { label: a.label, state: st, doing: p ? `${p.name}${p.hint ? " · " + p.hint : ""}` : st === "active" ? "thinking" : "quiet", ago: ago(now - lastWriteOf(a.tail)) };
         }),
         // Each message cropped, with the whole of it (to a limit) when cropping cut it, for a tap to show.
+        // The recent conversation, both sides, oldest first: each message whole, to a limit (the page scrolls).
         talk: [
-          ...(main?.asks?.length ? main.asks : main?.ask ? [main.ask] : []).map((x) => ({ who: "you", text: capText(x.text, 400), whole: x.text, t: x.t })),
-          ...(main?.says ?? []).map((x) => ({ who: "claude", text: capText(flatReply(x.text), 600), whole: x.text.trim(), t: x.t })),
+          ...(main?.asks?.length ? main.asks : main?.ask ? [main.ask] : []).map((x) => ({ who: "you", text: x.text, t: x.t })),
+          ...(main?.says ?? []).map((x) => ({ who: "claude", text: flatLines(x.text).join("\n"), t: x.t })),
         ]
           .sort((a, b) => a.t - b.t)
           .slice(-12)
-          // The newest three carry the whole of a message cropping cut, for a tap to show; older ones stay cropped.
-          .map((x, i, all) => ({ who: x.who, text: x.text, ...(x.text !== x.whole && i >= all.length - 3 ? { full: capText(x.whole, 6000) } : {}), t: x.t, ago: ago(now - x.t) })),
+          .map((x) => ({ who: x.who, text: capText(x.text, 4000), t: x.t, ago: ago(now - x.t) })),
       };
     }),
   };
@@ -6102,7 +6102,7 @@ h1{display:flex;align-items:center;gap:9px;font-size:21px;font-weight:700;margin
 .five .hl{display:flex;justify-content:space-between;align-items:baseline;gap:10px}.five .big{color:var(--white);font-size:17px;font-weight:650}.five .big em{font-style:normal;color:var(--k)}.five .in{color:var(--k);font-size:15px;font-weight:650;white-space:nowrap}
 .five .tl{position:relative;height:8px;margin:11px 0 5px;border-radius:4px;background:#262d37}.five .tl i{position:absolute;top:0;bottom:0;border-radius:4px}.five .tl b{position:absolute;top:-4px;bottom:-4px;width:2px;border-radius:1px;background:var(--white)}
 .five .ends{position:relative;display:flex;justify-content:space-between;color:var(--dim);font-size:11px}.five .ends .now{position:absolute;transform:translateX(-50%);color:var(--white)}.five .note{color:var(--dim);font-size:12.5px;margin-top:5px}
-.wfg>summary{list-style:none;display:block}.wfg>summary::before{content:none}.wfg>summary .nm::after{content:" ▸";color:var(--dim);font-weight:400}.wfg[open]>summary .nm::after{content:" ▾"}.wfg .count{color:var(--dim);font-size:11px;padding-left:23px;margin:-2px 0 2px}.wfg[open] .count{display:none}
+.wfg .count{color:var(--dim);font-size:11px;padding-left:23px;margin:-2px 0 2px}.wfg[open] .count{display:none}
 .card{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--c);border-radius:16px;padding:12px 14px 14px;margin-bottom:12px;position:relative;overflow:hidden}
 .card.needs{background:#2a2108;border-color:#5a4512;box-shadow:0 0 0 1px #5a4512,0 0 24px #e5b54433;animation:glow 2s ease-in-out infinite}
 @keyframes glow{50%{box-shadow:0 0 0 1px #8a6a1a,0 0 34px #e5b54466}}
@@ -6117,8 +6117,7 @@ h1{display:flex;align-items:center;gap:9px;font-size:21px;font-weight:700;margin
 .row{display:flex;gap:8px;align-items:flex-start;font-size:12px;color:var(--dim);margin-top:3px}.row .lead{flex:none;width:1.2em;text-align:center}.row>span:last-child{flex:1}
 .ctx{display:flex;height:6px;margin-top:6px;border-radius:3px;overflow:hidden;background:var(--faint);flex:1}.ctx i{display:block;height:100%}
 details{margin-top:8px}summary{cursor:pointer;color:var(--dim);font-size:12px;list-style:none}summary::-webkit-details-marker{display:none}summary::before{content:"▸ ";color:var(--faint)}details[open] summary::before{content:"▾ "}
-.talk p{margin:6px 0;font-size:13px;white-space:pre-wrap;word-break:break-word}.talk .you{color:var(--blue)}.talk .claude{color:var(--text)}.talk span{color:var(--dim);font-size:11px;margin-left:6px}
-.roster{margin-top:10px;padding-top:6px;border-top:1px solid var(--line)}
+
 .r{display:grid;grid-template-columns:1.1em minmax(0,1fr) auto;column-gap:7px;align-items:baseline;font-size:12px;padding:4px 0}
 .r.child{padding-left:16px}.r .g{text-align:center}.r .nm{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .r.wf .nm{color:var(--text)}.r.wf.live .nm{color:var(--white);font-weight:700}.r .right{color:var(--dim);white-space:nowrap;font-size:11px}
@@ -6126,10 +6125,7 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--dim);font-size:12px;li
 .r .what{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.r .tool{color:var(--cyan)}.r .steps{letter-spacing:1px}
 .r.more,.r.done-line{display:block;color:var(--dim);font-size:11px}.mini{display:block;width:64px;height:14px;flex:none}
 .pulse{animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.3}}
-.tasks{margin-top:8px;padding-top:6px;border-top:1px solid var(--line)}.tasks>summary{list-style:none;display:block}.tasks>summary::before{content:none}
-.tasks .nm{color:var(--white);font-weight:700}.tasks>summary .nm::after{content:" ▸";color:var(--dim);font-weight:400}.tasks[open]>summary .nm::after{content:" ▾"}
 .tbar{display:flex;gap:2px;width:96px;height:8px;flex:none}.tbar i{flex:1;border-radius:2px;background:#2a313b}.tbar i.d{background:var(--green)}.tbar i.n{background:var(--white)}
-details.tasks[open]>summary::before,details.wfg[open]>summary::before,details.tasks>summary::before,details.wfg>summary::before{content:none;display:none}.tasks[open]>summary .sub{display:none}
 .r.task .nm{font-weight:400;white-space:normal}.r.task.pending .nm{color:var(--dim)}.blk{color:var(--red);font-size:10.5px;font-weight:700;border:1px solid #5a2a28;border-radius:999px;padding:0 6px;margin-left:6px}
 .foot{color:var(--faint);font-size:11px;text-align:center;margin-top:16px}.stale{color:var(--red)}
 .confetti{position:absolute;inset:0;pointer-events:none;overflow:hidden}.confetti i{position:absolute;top:-10px;width:6px;height:10px;opacity:.9;animation:fall 2.6s linear infinite}
@@ -6141,20 +6137,23 @@ details.tasks[open]>summary::before,details.wfg[open]>summary::before,details.ta
 .card.gone{opacity:.62}.putback{display:block;margin-left:auto !important;background:transparent;color:var(--cyan);border:1px solid #2f3946;border-radius:999px;padding:4px 11px;font:600 12.5px -apple-system,system-ui,sans-serif;margin:-2px 0 6px 8px}
 .send{display:flex;gap:6px;margin-top:6px;align-items:flex-end}.send textarea{flex:1;height:38px;max-height:40vh;resize:none;overflow-y:hidden;background:var(--bg);color:var(--white);border:1px solid var(--line);border-radius:10px;padding:9px 10px;font:15px/1.3 -apple-system,system-ui,sans-serif}.send textarea:focus{outline:none;border-color:var(--cyan)}
 .send button{background:var(--cyan);color:#0d1117;border:0;border-radius:10px;padding:10px 16px;font:700 15px -apple-system,system-ui,sans-serif}.send button:disabled{opacity:.5}
-.talk p.cut{cursor:pointer}.talk p .more{color:var(--cyan);font-size:12px;margin-left:6px;font-weight:600}
 .picks{display:flex;flex-direction:column;gap:7px;margin:8px 0 10px}.pick{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:#1d2530;color:var(--white);border:1px solid #2f3946;border-radius:12px;padding:11px 12px;font:600 15px -apple-system,system-ui,sans-serif}
 .pick .k{flex:none;width:26px;height:26px;border-radius:8px;background:#2a3442;color:var(--cyan);display:grid;place-items:center;font-size:14px;font-weight:700}
 .pick.armed{background:var(--amber);color:#1a1405;border-color:var(--amber)}.pick.armed .k{background:#00000022;color:#1a1405}
 .chips{display:flex;flex-wrap:nowrap;gap:6px;margin:6px -14px 8px;padding:0 14px;overflow-x:auto;scroll-snap-type:x proximity;-webkit-overflow-scrolling:touch;scrollbar-width:none;-webkit-mask-image:linear-gradient(90deg,transparent 0,#000 14px,#000 calc(100% - 28px),transparent);mask-image:linear-gradient(90deg,transparent 0,#000 14px,#000 calc(100% - 28px),transparent)}.chips::-webkit-scrollbar{display:none}.chips .chip{flex:none;white-space:nowrap;scroll-snap-align:start}.chip{background:transparent;color:var(--text);border:1px solid #2f3946;border-radius:999px;padding:7px 12px;font:500 13.5px -apple-system,system-ui,sans-serif}
 .chip.key{color:var(--dim)}.chip.armed{background:var(--amber);color:#1a1405;border-color:var(--amber)}.picks-note{color:var(--dim);font-size:12px;margin:6px 0 2px}
-details.chat{margin-top:10px;border-top:1px solid var(--line);padding-top:8px}
-details.chat>summary{display:flex;align-items:baseline;gap:8px;list-style:none}details.chat>summary::before{content:"▸";color:var(--dim);flex:none}details.chat[open]>summary::before{content:"▾"}
-details.chat .ct{color:var(--white);font-weight:650;font-size:14px;flex:none}details.chat .prev{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dim);font-size:13px}details.chat .when{flex:none;color:var(--faint);font-size:11px}
-details.chat[open] .prev,details.chat[open] .when{visibility:hidden}
+/* The sections of a card (tasks, agents and workflows, chat): a rule above each, the same room, the same head. */
+.roster,details.tasks,details.chat{margin-top:10px;padding-top:6px;border-top:1px solid var(--line)}
+details.tasks>summary,details.chat>summary,details.wfg>summary{list-style:none;display:block;cursor:pointer}
+details.tasks>summary::before,details.chat>summary::before,details.wfg>summary::before{content:none;display:none}
+details.tasks .nm,details.chat .nm{color:var(--white);font-weight:700}
+details.tasks>summary .nm::after,details.chat>summary .nm::after,details.wfg>summary .nm::after{content:" ▸";color:var(--dim);font-weight:400}
+details.tasks[open]>summary .nm::after,details.chat[open]>summary .nm::after,details.wfg[open]>summary .nm::after{content:" ▾"}
+details.tasks[open]>summary .sub,details.chat[open]>summary .sub{display:none}
 .log{display:flex;flex-direction:column;gap:6px;max-height:min(42vh,340px);overflow-y:auto;overscroll-behavior:contain;margin:8px -2px 4px;padding:26px 2px 2px;-webkit-mask-image:linear-gradient(transparent 0,#000 30px);mask-image:linear-gradient(transparent 0,#000 30px)}
 .log p{margin:0;max-width:86%;padding:7px 11px;border-radius:15px;font-size:14px;line-height:1.38;white-space:pre-wrap;word-break:break-word}
 .log p.you{align-self:flex-end;background:#1f3d63;color:#e3eeff;border-bottom-right-radius:5px}.log p.claude{align-self:flex-start;background:#1d2530;color:var(--text);border-bottom-left-radius:5px}
-.log p .ago{color:#ffffff55;font-size:10.5px;margin-left:7px}.log p.cut{cursor:pointer}.log p .more{color:var(--cyan);font-size:12px;margin-left:6px;font-weight:600}.log .none{color:var(--dim);font-size:13px;text-align:center;padding:6px}
+.log p .ago{color:#ffffff55;font-size:10.5px;margin-left:7px}.log .none{color:var(--dim);font-size:13px;text-align:center;padding:6px}
 .chat > .st{color:var(--dim);font-size:12.5px;margin:2px 2px 4px}
 .sent{font-size:12px;margin-top:4px;color:var(--dim)}.sent.ok{color:var(--green)}.sent.err{color:var(--red)}
 </style></head><body>
@@ -6349,16 +6348,10 @@ function roster(R) {
   if (R.finished) box.append(el("div", "r done-line", "✓ " + R.finished + " agent" + (R.finished === 1 ? "" : "s") + " finished in the window"));
   return box;
 }
-// A message in the conversation: cropped, and a tap shows the whole of it (and stays so across refreshes).
-const whole = new Set();
+// A message in the chat, whole: the chat scrolls.
 function talkLine(sid, m) {
-  const k = sid + ":" + m.t, all = m.full && whole.has(k);
-  const p = el("p", m.who + (m.full ? " cut" : ""), all ? m.full : m.text); p.dataset.k = k;
+  const p = el("p", m.who, m.text); p.dataset.k = sid + ":" + m.t;
   p.append(el("span", "ago", m.ago));
-  if (m.full) {
-    p.append(el("span", "more", all ? "show less" : "show all"));
-    p.addEventListener("click", () => { if (whole.has(k)) whole.delete(k); else whole.add(k); tick(); });
-  }
   return p;
 }
 // Answer buttons: the numbered choices on the session's own screen (read every few seconds while it waits),
@@ -6563,11 +6556,12 @@ function chatHead(s) {
   if (f && Date.now() - f.at > 15 * 60_000) following.delete(s.sid);
   const live = following.get(s.sid);
   const d = el("details", "chat"); if (s.state === "needs" || live) d.open = true;
+  // Its head is a row like Tasks and the workflows: the latest message beneath, while folded.
   const sm = el("summary"), last = s.talk[s.talk.length - 1];
-  sm.append(el("span", "ct", s.state === "needs" ? "Answer" : "Conversation"));
-  if (last) sm.append(el("span", "prev", (last.who === "you" ? "You: " : "") + last.text.replace(/\\s+/g, " ")), el("span", "when", last.ago));
-  else sm.append(el("span", "prev", "write to " + s.name));
-  d.append(sm);
+  const r = el("div", "r"), g = el("span", "g", "❯"); g.style.color = "#61aaff";
+  const sub = el("div", "sub"); sub.append(el("span", "what", last ? (last.who === "you" ? "You: " : "") + last.text.replace(/\\s+/g, " ") : "Write to " + s.name));
+  r.append(g, el("span", "nm", "Chat"), el("span", "right", last ? last.ago : ""), sub);
+  sm.append(r); d.append(sm);
   const log = el("div", "log"); log.dataset.k = "log"; log.dataset.of = s.sid;
   for (const m of s.talk) log.append(talkLine(s.sid, m));
   if (live && !s.talk.some((m) => m.who === "you" && m.t >= live.at - 5000)) { const p = el("p", "you", live.text); p.dataset.k = "sent"; log.append(p); }
@@ -7069,7 +7063,12 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
           if (!sameToken(url.searchParams.get("t") ?? "", token)) return new Response("not without the link fleet showed you", { status: 403, headers });
           if (url.pathname === "/manifest.webmanifest") return Response.json(webManifest(token), { headers: { ...headers, "content-type": "application/manifest+json" } });
           if (url.pathname === "/") return new Response(WEB_PAGE.replace("__TOKEN__", token).replace("__ICON__", splashIcon()).replaceAll("__LOGO_MASK__", logoMask()).replace("__STARTUP__", STARTUP_LINKS), { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
-          if (url.pathname === "/api/state") return (web.watchedAt = Date.now()), Response.json(webState(getSessions(), now()), { headers });
+          if (url.pathname === "/api/state") {
+            web.watchedAt = Date.now();
+            const body = JSON.stringify(webState(getSessions(), now()));
+            if (!/\bgzip\b/.test(req.headers.get("accept-encoding") ?? "")) return new Response(body, { headers: { ...headers, "content-type": "application/json" } });
+            return new Response(Bun.gzipSync(new TextEncoder().encode(body)), { headers: { ...headers, "content-type": "application/json", "content-encoding": "gzip", vary: "accept-encoding" } });
+          }
           if (url.pathname === "/glasses") return new Response(GLASSES_PAGE, { headers: { ...headers, "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" } });
           if (url.pathname === "/api/glasses") return (web.watchedAt = Date.now()), Response.json(glassesState(getSessions(), now()), { headers });
           return new Response("not found", { status: 404, headers });
