@@ -5465,7 +5465,8 @@ describe("the splash", () => {
 
 describe("a background job waiting on you", () => {
   test("a question it records counts, even while it still says it is working; once answered or finished it does not", () => {
-    expect(F.jobWaiting({ state: "blocked", needs: "" })).toBe(true);
+    expect(F.jobWaiting({ state: "blocked", needs: "" })).toBe(false); // blocked on its own tasks (workflows, commands), not on you
+    expect(F.jobWaiting({ state: "blocked", needs: "approve: Bash npm test" })).toBe(true);
     expect(F.jobWaiting({ state: "working", needs: "answer: Tea or coffee? (Tea · Coffee)" })).toBe(true);
     expect(F.jobWaiting({ state: "working", needs: "" })).toBe(false);
     expect(F.jobWaiting({ state: "done", needs: "answer: Tea or coffee? (Tea · Coffee)" })).toBe(false);
@@ -5516,5 +5517,26 @@ describe("on your glasses", () => {
       delete process.env.FLEET_WEB_PORT;
       delete process.env.FLEET_WEB_TOKEN_FILE;
     }
+  });
+});
+
+describe("a session that finishes while you watch", () => {
+  test("it has its party and stays on the screen until space; one already idle at launch stays out of the way", () => {
+    const now = Date.now();
+    const busy = { sid: "s1", name: "busy one", kind: "bg", status: "busy", cwd: "/x", startedAt: now - 60_000, pid: 1, mains: [], agents: [], workflows: [], job: { state: "working", detail: "", needs: "" } } as any;
+    const idle = { ...busy, sid: "s2", name: "idle one", job: { state: "done", detail: "", needs: "" } } as any;
+    F.heldOpen.clear();
+    expect(F.noteFinished([busy, idle], now)).toEqual([]); // the first look: nothing is news
+    const view = (s: any) => F.buildViews([s], now)[0];
+    expect([F.isHidden(view(busy)), F.isHidden(view(idle))]).toEqual([false, true]);
+    const done = { ...busy, job: { state: "done", detail: "", needs: "" } };
+    expect(F.noteFinished([done, idle], now + 2000)).toEqual(["s1"]);
+    expect(F.partyOn("s1", now + 2000)?.text).toBe("finished");
+    expect([F.isHidden(view(done)), F.isHidden(view(idle))]).toEqual([false, true]); // still on show, party or not
+    expect(F.fleetCounts([done, idle], now + 2000).idle).toBe(1); // only the one kept off the screen
+    expect(F.noteFinished([done, idle], now + 30_000)).toEqual([]); // finished once, not every scan
+    expect(F.isHidden(view(done))).toBe(false);
+    F.markSeen(now + 40_000); // space: seen it
+    expect(F.isHidden(view(done))).toBe(true);
   });
 });

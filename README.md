@@ -133,7 +133,7 @@ Every control has a key, and all but `tab` and `esc` are also buttons on the bot
 | `b` | Ring the terminal bell when a session starts waiting on you, or when something stalls |
 | `u` | Usage: every Claude account's limits on one screen, this Mac's login and each [other account](#other-accounts). Opening it retries a failing read; there `r` retries every read, `a` adds an account and `x` removes one |
 | `m` | The menu: finished agents, bell, phone page, Telegram, in the background, each with its own key too |
-| `space` | Seen it. The button counts what is new since you last pressed it |
+| `space` | Seen it. The button counts what is new since you last pressed it; sessions that finished while you watched go off the screen |
 | `?` | Legend: what every mark and key means. Any key closes it |
 | `esc` | Leave focus (or quit) |
 | `q` | Quit |
@@ -258,6 +258,7 @@ The dashboard reads that URL once a minute; `field` names the JSON field that ho
 Each stays silent until it has something to say.
 
 - *Celebrations.* When a session's pull request merges or its checks all turn green, a workflow completes, or its last task is ticked off, its title shimmers through the rainbow for eight seconds and what it finished (`✦ #412 merged ✦`) stands where its folder and branch were. With the bell on, it rings. Only changes seen while the dashboard is running count, so nothing already finished at launch is celebrated.
+- *Finished.* A session that finishes while you watch (a background job done, or a session gone quiet) celebrates too, and stays on the screen until you press `space`, so you see it end rather than have it vanish. One that was already idle when fleet started stays out of the way. "Needs you" means a session has a question for you: a background job blocked only on its own work (workflows, commands) shows as working.
 
 **Runway: will it hit the wall before the work is done?** Two gauges become forecasts.
 
