@@ -241,6 +241,7 @@ Press `i`, then `y`, and fleet keeps running with every window closed: it starts
 - **It looks after itself.** `fleet.ts --serve` is a small supervisor that runs the screenless fleet and starts it again whenever it stops: after a crash, and after `fleet.ts` changes (a `git pull`), so it is always running the code on disk. Five quick failures in a row and it waits a minute between tries.
 - **The log** is `~/.cache/claude-fleet/service.log`, kept under a megabyte; the `i` screen shows its last lines. It notes when fleet starts and stops, why, and what it is doing: serving the page or not, talking to the Telegram bot or not, how many machines and sessions.
 - **Usage figures, even over ssh or mosh.** On macOS the service runs in your login session, where the keychain is open, so it reads your usage figures and shares them through the figures file: a fleet window in a remote shell, where the keychain is closed, shows them too.
+- **It always serves.** While it runs, fleet windows never hold the phone and glasses page or the Telegram bot, so what you reach is always the current code; a window started before it hands both over within ten seconds. A fleet that finds the port held by a different version says so ("old fleet holds :4777, quit it"), and a window whose `fleet.ts` has changed since it started asks to be restarted.
 - `i` then `y` again stops it and removes it.
 
 ## Deploys

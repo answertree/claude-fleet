@@ -5555,3 +5555,56 @@ describe("a session that finishes while you watch", () => {
     expect(F.partyOn("s1", t0 + 9000)).toBeUndefined();
   });
 });
+
+describe("a fleet window and the background service", () => {
+  test("while the service runs, a window leaves it the page and the Telegram bot, hands them over, and takes them back when it stops", async () => {
+    const svcPid = path.join(process.env.XDG_CACHE_HOME!, "claude-fleet", "service.pid");
+    fs.mkdirSync(path.dirname(svcPid), { recursive: true });
+    process.env.FLEET_WEB_HOST = "127.0.0.1";
+    process.env.FLEET_WEB_PORT = "5277";
+    const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-yield-"));
+    process.env.FLEET_WEB_TOKEN_FILE = path.join(scratch, "web-token");
+    process.env.FLEET_TELEGRAM_FILE = path.join(scratch, "telegram.json"); // never the real pairing
+    const reset = () => {
+      F.web.server?.stop();
+      for (const k of ["server", "url", "error", "shared", "retake", "yieldPort", "older"] as const) delete (F.web as any)[k];
+    };
+    try {
+      // A window that starts while the service runs does not take the port.
+      fs.writeFileSync(svcPid, String(process.pid)); // a running service, as far as the window can tell
+      reset();
+      expect(F.serviceRunning()).toBe(true);
+      F.startWeb(() => [], () => Date.now());
+      await Bun.sleep(300); // its check of who holds the port (nobody answers: the service is "starting")
+      expect([F.web.shared, !!F.web.server]).toEqual([true, false]); // and no page on another port either
+      F.web.retake!(); // nor takes it back while the service runs
+      expect(!!F.web.server).toBe(false);
+      // Nor the Telegram bot.
+      F.writeTg({ token: "123456:" + "A".repeat(35), chat: 42, user: 7 });
+      expect(F.tgClaim()).toBe(false);
+      // The service stops: the window takes the page.
+      fs.rmSync(svcPid);
+      F.web.retake!();
+      expect([F.web.shared, !!F.web.server]).toEqual([false, true]);
+      expect((await fetch(`http://127.0.0.1:5277/?t=${new URL(F.web.url!).searchParams.get("t")}`)).status).toBe(200);
+      // A window holding the page when the service starts hands it over.
+      fs.writeFileSync(svcPid, String(process.pid));
+      F.web.yieldPort!();
+      expect([F.web.shared, !!F.web.server]).toEqual([true, false]);
+      expect(await fetch("http://127.0.0.1:5277/").then(() => "answered", () => "free")).toBe("free");
+    } finally {
+      reset();
+      fs.rmSync(svcPid, { force: true });
+      delete process.env.FLEET_TELEGRAM_FILE;
+      delete process.env.FLEET_WEB_HOST;
+      delete process.env.FLEET_WEB_PORT;
+      delete process.env.FLEET_WEB_TOKEN_FILE;
+    }
+  });
+
+  test("each fleet's code has a fingerprint, so a fleet can tell an older one holding the port", () => {
+    expect(F.FLEET_BUILD).toMatch(/^[0-9a-z]+$/);
+    const body = new TextDecoder().decode(Bun.gunzipSync(F.peerState([], Date.now()).body));
+    expect(JSON.parse(body).build).toBe(F.FLEET_BUILD);
+  });
+});
