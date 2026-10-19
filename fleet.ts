@@ -6050,8 +6050,20 @@ export function webState(sessions: Session[], now: number) {
 }
 
 export const WEB_PAGE = `<!doctype html>
-<html lang="en"><head>
+<html lang="en" style="background:#0d1117"><head>
 <meta charset="utf-8">
+<style>html,body{background:#0d1117}
+#splash{position:fixed;inset:0;z-index:50;background:radial-gradient(120% 80% at 50% 38%,#18212d 0%,var(--bg) 62%);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;transition:opacity .16s ease-out,transform .16s ease-out}
+#splash.gone{opacity:0;transform:scale(1.04);pointer-events:none}
+#splash .logo{position:relative;width:96px;height:96px;border-radius:24px;overflow:hidden;box-shadow:0 10px 40px #000a,0 0 0 1px #ffffff14;animation:float 3s ease-in-out infinite}
+#splash .logo img{width:100%;height:100%;display:block}
+#splash .logo i{position:absolute;inset:-40%;background:linear-gradient(115deg,transparent 38%,#ffffff10 44%,#ffffffb0 50%,#ffffff10 56%,transparent 62%);transform:translateX(-70%);animation:shine 1.6s cubic-bezier(.4,0,.2,1) .15s infinite}
+@keyframes shine{0%{transform:translateX(-70%)}60%,100%{transform:translateX(70%)}}
+@keyframes float{50%{transform:translateY(-4px)}}
+#splash .title{font-size:22px;font-weight:700;letter-spacing:-.01em;background:linear-gradient(100deg,#8a95a5 30%,#fff 50%,#8a95a5 70%);background-size:250% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:sheen 1.6s linear .15s infinite}
+@keyframes sheen{0%{background-position:120% 0}60%,100%{background-position:-130% 0}}
+#splash .what{color:var(--dim);font-size:13px;min-height:1.4em}</style>
+__STARTUP__
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0d1117">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -6116,16 +6128,6 @@ details.tasks[open]>summary::before,details.wfg[open]>summary::before,details.ta
 @keyframes fall{to{transform:translateY(260px) rotate(540deg)}}
 .party{color:var(--amber);font-weight:700;margin-top:4px}
 .empty{color:var(--dim);text-align:center;margin:40px 0}
-#splash{position:fixed;inset:0;z-index:50;background:radial-gradient(120% 80% at 50% 38%,#18212d 0%,var(--bg) 62%);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;transition:opacity .35s ease,transform .35s ease}
-#splash.gone{opacity:0;transform:scale(1.04);pointer-events:none}
-#splash .logo{position:relative;width:96px;height:96px;border-radius:24px;overflow:hidden;box-shadow:0 10px 40px #000a,0 0 0 1px #ffffff14;animation:float 3s ease-in-out infinite}
-#splash .logo img{width:100%;height:100%;display:block}
-#splash .logo i{position:absolute;inset:-40%;background:linear-gradient(115deg,transparent 38%,#ffffff10 44%,#ffffffb0 50%,#ffffff10 56%,transparent 62%);transform:translateX(-70%);animation:shine 1.6s cubic-bezier(.4,0,.2,1) .15s infinite}
-@keyframes shine{0%{transform:translateX(-70%)}60%,100%{transform:translateX(70%)}}
-@keyframes float{50%{transform:translateY(-4px)}}
-#splash .title{font-size:22px;font-weight:700;letter-spacing:-.01em;background:linear-gradient(100deg,#8a95a5 30%,#fff 50%,#8a95a5 70%);background-size:250% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:sheen 1.6s linear .15s infinite}
-@keyframes sheen{from{background-position:120% 0}to{background-position:-130% 0}}
-#splash .what{color:var(--dim);font-size:13px;min-height:1.4em}
 .card.done{touch-action:pan-y;user-select:none;-webkit-user-select:none}.swipe-hint{color:var(--dim);font-size:11.5px;margin-top:8px;text-align:right}
 .shelf{display:block;margin:6px auto 12px;background:transparent;color:var(--text);border:1px solid var(--line);border-radius:999px;padding:9px 16px;font:600 13.5px -apple-system,system-ui,sans-serif}
 .card.gone{opacity:.62}.putback{display:block;margin-left:auto !important;background:transparent;color:var(--cyan);border:1px solid #2f3946;border-radius:999px;padding:4px 11px;font:600 12.5px -apple-system,system-ui,sans-serif;margin:-2px 0 6px 8px}
@@ -6435,6 +6437,17 @@ function card(s) {
   return c;
 }
 let last = 0, open = new Map();
+// The splash plays its shine to the end of a sweep, holds 200 ms, then the app fades in quickly.
+let leaving = false;
+function leaveSplash() {
+  const sp = document.getElementById("splash");
+  if (!sp || leaving) return;
+  leaving = true;
+  const a = sp.querySelector(".logo i").getAnimations()[0];
+  const local = a ? Number(a.currentTime) - 150 : 960, phase = local < 0 ? local : local % 1600;
+  const wait = phase < 0 ? 960 - phase : phase < 960 ? 960 - phase : 0;
+  setTimeout(() => { sp.classList.add("gone"); setTimeout(() => sp.remove(), 200); }, wait + 200);
+}
 // Finished cards a swipe has put away, by session, kept on this phone.
 const isDone = (s) => s.state === "justDone" || s.state === "finished";
 let showGone = false, swiping = false, touchedUntil = 0, touching = false;
@@ -6511,7 +6524,7 @@ async function tick(force = true) {
     document.getElementById("clock").textContent = new Date(d.now).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     document.getElementById("foot").textContent = (d.hidden ? d.hidden + " idle or finished not shown · " : "") + "live";
     document.title = (d.counts.needs ? "▲" + d.counts.needs + " " : "") + "Claude Fleet";
-    const sp = document.getElementById("splash"); if (sp && !sp.classList.contains("gone")) { sp.classList.add("gone"); setTimeout(() => sp.remove(), 400); }
+    leaveSplash();
   } catch (e) { document.getElementById("foot").replaceChildren(el("span", "stale", "can't reach fleet — is it still running?")); const w = document.getElementById("splash-what"); if (w) w.textContent = "Can't reach fleet yet: is your Mac awake, and on Tailscale?"; }
 }
 tick(); setInterval(() => tick(false), 500);
@@ -6599,6 +6612,65 @@ export function webIcon(n: number): Buffer {
 const ICON_SIZES: Record<string, number> = { "/apple-touch-icon.png": 180, "/apple-touch-icon-precomposed.png": 180, "/favicon.ico": 32, "/icon-192.png": 192, "/icon-512.png": 512, "/icon-maskable-512.png": 512 };
 /** The app icon: the files in icons/ beside fleet.ts (the F), or the drawn diamond if they are missing. */
 const iconFiles = new Map<string, Buffer | null>();
+/** The phones whose home-screen launch picture fleet draws: width and height in points, and pixels to a point. */
+export const STARTUP_SIZES: [number, number, number][] = [[440, 956, 3], [402, 874, 3], [430, 932, 3], [393, 852, 3], [390, 844, 3], [428, 926, 3], [375, 812, 3], [414, 896, 3], [414, 896, 2], [375, 667, 2], [320, 568, 2]];
+/** An 8-bit RGB PNG's pixels (the icons are such). */
+export function rgbOfPng(png: Buffer): { w: number; h: number; rgb: Uint8Array } | undefined {
+  if (png.readUInt32BE(12) !== 0x49484452 || png[24] !== 8 || png[25] !== 2 || png[28] !== 0) return undefined;
+  const w = png.readUInt32BE(16), h = png.readUInt32BE(20);
+  const parts: Buffer[] = [];
+  for (let at = 8; at < png.length; ) {
+    const len = png.readUInt32BE(at), type = png.toString("ascii", at + 4, at + 8);
+    if (type === "IDAT") parts.push(png.subarray(at + 8, at + 8 + len));
+    at += len + 12;
+  }
+  const raw = inflateSync(Buffer.concat(parts)), row = w * 3, rgb = new Uint8Array(row * h);
+  for (let y = 0; y < h; y++) {
+    const f = raw[y * (row + 1)], src = raw.subarray(y * (row + 1) + 1, (y + 1) * (row + 1));
+    for (let x = 0; x < row; x++) {
+      const a = x >= 3 ? rgb[y * row + x - 3] : 0, b = y ? rgb[(y - 1) * row + x] : 0, c = x >= 3 && y ? rgb[(y - 1) * row + x - 3] : 0;
+      const pr = () => { const q = a + b - c, pa = Math.abs(q - a), pb = Math.abs(q - b), pc = Math.abs(q - c); return pa <= pb && pa <= pc ? a : pb <= pc ? b : c; };
+      rgb[y * row + x] = (src[x] + (f === 1 ? a : f === 2 ? b : f === 3 ? (a + b) >> 1 : f === 4 ? pr() : 0)) & 255;
+    }
+  }
+  return { w, h, rgb };
+}
+/** The splash as a still, for the phone to show while the home-screen app starts: its background, and the icon where the splash puts it. */
+const startupPngs = new Map<string, Buffer>();
+export function startupPng(cw: number, ch: number, d: number): Buffer {
+  const key = `${cw}x${ch}@${d}`;
+  const done = startupPngs.get(key);
+  if (done) return done;
+  const W = cw * d, H = ch * d, out = new Uint8Array(W * H * 3);
+  const bg = [0x0d, 0x11, 0x17], glow = [0x18, 0x21, 0x2d];
+  for (let y = 0; y < H; y++)
+    for (let x = 0; x < W; x++) {
+      const t = Math.min(1, Math.hypot((x - W / 2) / (1.2 * W), (y - 0.38 * H) / (0.8 * H)) / 0.62);
+      for (let k = 0; k < 3; k++) out[(y * W + x) * 3 + k] = Math.round(glow[k] + (bg[k] - glow[k]) * t);
+    }
+  // The icon: 96 points, its corners rounded by a quarter, centred above the title as the splash lays it out.
+  const icon = rgbOfPng(appIcon("/icon-512.png"));
+  if (icon) {
+    const S = 96 * d, r = S / 4, left = Math.round(W / 2 - S / 2), top = Math.round(H / 2 - 89.5 * d);
+    for (let y = 0; y < S; y++)
+      for (let x = 0; x < S; x++) {
+        const cx = Math.min(Math.max(x + 0.5, r), S - r), cy = Math.min(Math.max(y + 0.5, r), S - r);
+        const cover = Math.max(0, Math.min(1, r - Math.hypot(x + 0.5 - cx, y + 0.5 - cy) + 0.5));
+        if (!cover) continue;
+        const sx = ((x + 0.5) / S) * icon.w - 0.5, sy = ((y + 0.5) / S) * icon.h - 0.5;
+        const x0 = Math.max(0, Math.floor(sx)), y0 = Math.max(0, Math.floor(sy)), x1 = Math.min(icon.w - 1, x0 + 1), y1 = Math.min(icon.h - 1, y0 + 1), fx = sx - x0, fy = sy - y0;
+        const o = ((top + y) * W + left + x) * 3;
+        for (let k = 0; k < 3; k++) {
+          const v = (icon.rgb[(y0 * icon.w + x0) * 3 + k] * (1 - fx) + icon.rgb[(y0 * icon.w + x1) * 3 + k] * fx) * (1 - fy) + (icon.rgb[(y1 * icon.w + x0) * 3 + k] * (1 - fx) + icon.rgb[(y1 * icon.w + x1) * 3 + k] * fx) * fy;
+          out[o + k] = Math.round(out[o + k] * (1 - cover) + v * cover);
+        }
+      }
+  }
+  const png = pngOf(W, H, out);
+  startupPngs.set(key, png);
+  return png;
+}
+const STARTUP_LINKS = STARTUP_SIZES.map(([w, h, d]) => `<link rel="apple-touch-startup-image" media="(device-width: ${w}px) and (device-height: ${h}px) and (-webkit-device-pixel-ratio: ${d}) and (orientation: portrait)" href="/startup-${w}x${h}@${d}.png">`).join("\n");
 /** The icon, inline, so the splash shows it before anything else has loaded. */
 let splashIconUrl = "";
 const splashIcon = () => splashIconUrl || (splashIconUrl = "data:image/png;base64," + appIcon("/apple-touch-icon.png").toString("base64"));
@@ -6834,10 +6906,12 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
             const sdk = glassesSdkFile();
             return sdk ? new Response(sdk, { headers: { ...headers, "content-type": "text/javascript; charset=utf-8", "cache-control": "max-age=3600" } }) : new Response("not found", { status: 404, headers });
           }
+          const startup = /^\/startup-(\d+)x(\d+)@(\d)\.png$/.exec(url.pathname);
+          if (startup && STARTUP_SIZES.some(([w, h, d]) => `${w}x${h}@${d}` === `${startup[1]}x${startup[2]}@${startup[3]}`)) return new Response(startupPng(+startup[1], +startup[2], +startup[3]), { headers: { ...headers, "content-type": "image/png", "cache-control": "max-age=86400" } });
           if (ICON_SIZES[url.pathname]) return new Response(appIcon(url.pathname), { headers: { ...headers, "content-type": "image/png", "cache-control": "max-age=86400" } });
           if (!sameToken(url.searchParams.get("t") ?? "", token)) return new Response("not without the link fleet showed you", { status: 403, headers });
           if (url.pathname === "/manifest.webmanifest") return Response.json(webManifest(token), { headers: { ...headers, "content-type": "application/manifest+json" } });
-          if (url.pathname === "/") return new Response(WEB_PAGE.replace("__TOKEN__", token).replace("__ICON__", splashIcon()), { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
+          if (url.pathname === "/") return new Response(WEB_PAGE.replace("__TOKEN__", token).replace("__ICON__", splashIcon()).replace("__STARTUP__", STARTUP_LINKS), { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
           if (url.pathname === "/api/state") return (web.watchedAt = Date.now()), Response.json(webState(getSessions(), now()), { headers });
           if (url.pathname === "/glasses") return new Response(GLASSES_PAGE, { headers: { ...headers, "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" } });
           if (url.pathname === "/api/glasses") return (web.watchedAt = Date.now()), Response.json(glassesState(getSessions(), now()), { headers });
