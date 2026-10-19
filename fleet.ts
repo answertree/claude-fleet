@@ -6002,12 +6002,13 @@ export function webState(sessions: Session[], now: number) {
           const st = stateOf(a, now);
           return { label: a.label, state: st, doing: p ? `${p.name}${p.hint ? " · " + p.hint : ""}` : st === "active" ? "thinking" : "quiet", ago: ago(now - lastWriteOf(a.tail)) };
         }),
+        // Each message cropped, with the whole of it (to a limit) when cropping cut it, for a tap to show.
         talk: [
-          ...(main?.ask ? [{ who: "you", text: capText(main.ask.text, 400), t: main.ask.t }] : []),
-          ...(main?.says ?? []).slice(-2).map((x) => ({ who: "claude", text: capText(flatReply(x.text), 600), t: x.t })),
+          ...(main?.ask ? [{ who: "you", text: capText(main.ask.text, 400), whole: main.ask.text, t: main.ask.t }] : []),
+          ...(main?.says ?? []).slice(-2).map((x) => ({ who: "claude", text: capText(flatReply(x.text), 600), whole: x.text.trim(), t: x.t })),
         ]
           .sort((a, b) => a.t - b.t)
-          .map((x) => ({ who: x.who, text: x.text, ago: ago(now - x.t) })),
+          .map((x) => ({ who: x.who, text: x.text, ...(x.text !== x.whole ? { full: capText(x.whole, 20_000) } : {}), t: x.t, ago: ago(now - x.t) })),
       };
     }),
   };
@@ -6070,7 +6071,11 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--dim);font-size:12px;li
 .r .what{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.r .tool{color:var(--cyan)}.r .steps{letter-spacing:1px}
 .r.more,.r.done-line{display:block;color:var(--dim);font-size:11px}.mini{display:block;width:64px;height:14px;flex:none}
 .pulse{animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.3}}
-.tasks div,.agents div{font-size:12px;margin:2px 0}.st-in_progress{color:var(--white)}.st-pending{color:var(--dim)}
+.tasks{margin-top:8px;padding-top:6px;border-top:1px solid var(--line)}.tasks>summary{list-style:none;display:block}.tasks>summary::before{content:none}
+.tasks .nm{color:var(--white);font-weight:700}.tasks>summary .nm::after{content:" ▸";color:var(--dim);font-weight:400}.tasks[open]>summary .nm::after{content:" ▾"}
+.tbar{display:flex;gap:2px;width:96px;height:8px;flex:none}.tbar i{flex:1;border-radius:2px;background:#2a313b}.tbar i.d{background:var(--green)}.tbar i.n{background:var(--white)}
+details.tasks[open]>summary::before,details.wfg[open]>summary::before,details.tasks>summary::before,details.wfg>summary::before{content:none;display:none}.tasks[open]>summary .sub{display:none}
+.r.task .nm{font-weight:400;white-space:normal}.r.task.pending .nm{color:var(--dim)}.blk{color:var(--red);font-size:10.5px;font-weight:700;border:1px solid #5a2a28;border-radius:999px;padding:0 6px;margin-left:6px}
 .foot{color:var(--faint);font-size:11px;text-align:center;margin-top:16px}.stale{color:var(--red)}
 .confetti{position:absolute;inset:0;pointer-events:none;overflow:hidden}.confetti i{position:absolute;top:-10px;width:6px;height:10px;opacity:.9;animation:fall 2.6s linear infinite}
 @keyframes fall{to{transform:translateY(260px) rotate(540deg)}}
@@ -6078,6 +6083,12 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--dim);font-size:12px;li
 .empty{color:var(--dim);text-align:center;margin:40px 0}
 .send{display:flex;gap:6px;margin-top:6px;align-items:flex-end}.send textarea{flex:1;min-height:42px;max-height:40vh;resize:vertical;background:var(--bg);color:var(--white);border:1px solid var(--line);border-radius:8px;padding:8px;font:16px/1.35 -apple-system,system-ui,sans-serif}
 .send button{background:var(--cyan);color:#0d1117;border:0;border-radius:10px;padding:10px 16px;font:700 15px -apple-system,system-ui,sans-serif}.send button:disabled{opacity:.5}
+.talk p.cut{cursor:pointer}.talk p .more{color:var(--cyan);font-size:12px;margin-left:6px;font-weight:600}
+.picks{display:flex;flex-direction:column;gap:7px;margin:8px 0 10px}.pick{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:#1d2530;color:var(--white);border:1px solid #2f3946;border-radius:12px;padding:11px 12px;font:600 15px -apple-system,system-ui,sans-serif}
+.pick .k{flex:none;width:26px;height:26px;border-radius:8px;background:#2a3442;color:var(--cyan);display:grid;place-items:center;font-size:14px;font-weight:700}
+.pick.armed{background:var(--amber);color:#1a1405;border-color:var(--amber)}.pick.armed .k{background:#00000022;color:#1a1405}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 8px}.chip{background:transparent;color:var(--text);border:1px solid #2f3946;border-radius:999px;padding:7px 12px;font:500 13.5px -apple-system,system-ui,sans-serif}
+.chip.key{color:var(--dim)}.chip.armed{background:var(--amber);color:#1a1405;border-color:var(--amber)}.picks-note{color:var(--dim);font-size:12px;margin:6px 0 2px}
 .sent{font-size:12px;margin-top:4px;color:var(--dim)}.sent.ok{color:var(--green)}.sent.err{color:var(--red)}
 </style></head><body>
 <header><h1><img src="/icon-192.png" alt="">Claude Fleet</h1><span id="clock"></span></header>
@@ -6235,6 +6246,94 @@ function roster(R) {
   if (R.finished) box.append(el("div", "r done-line", "✓ " + R.finished + " agent" + (R.finished === 1 ? "" : "s") + " finished in the window"));
   return box;
 }
+// A message in the conversation: cropped, and a tap shows the whole of it (and stays so across refreshes).
+const whole = new Set();
+function talkLine(sid, m) {
+  const k = sid + ":" + m.t, all = m.full && whole.has(k);
+  const p = el("p", m.who + (m.full ? " cut" : ""), (m.who === "you" ? "▸ " : "◆ ") + (all ? m.full : m.text));
+  p.append(el("span", "", m.ago));
+  if (m.full) {
+    p.append(el("span", "more", all ? "show less" : "show all"));
+    p.addEventListener("click", () => { if (whole.has(k)) whole.delete(k); else whole.add(k); tick(); });
+  }
+  return p;
+}
+// Answer buttons: the numbered choices on the session's own screen (read every few seconds while it waits),
+// then Esc and Enter, then quick replies. A button arms on the first tap and sends on the second.
+const QUICK = ["yes, go ahead", "continue", "looks good, carry on", "stop and tell me where you are"];
+const screens = new Map(); // sid → { at, options, error, loading }
+let armed = { id: "", until: 0 };
+async function post(path, body) {
+  try {
+    const r = await fetch(path + "?t=" + encodeURIComponent(token), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    return await r.json().catch(() => ({ ok: false, error: "fleet said " + r.status }));
+  } catch { return { ok: false, error: "can't reach fleet" }; }
+}
+async function readScreen(sid) {
+  const was = screens.get(sid) || {};
+  screens.set(sid, { ...was, loading: true, at: Date.now() });
+  const r = await post("api/choices", { sid });
+  screens.set(sid, { at: Date.now(), options: r.options || [], error: r.ok ? "" : r.error || "can't see its screen" });
+  tick();
+}
+function answerButtons(s) {
+  const box = el("div");
+  const waiting = s.state === "needs";
+  if (waiting) {
+    const sc = screens.get(s.sid);
+    if (!sc || (!sc.loading && Date.now() - sc.at > 8000)) void readScreen(s.sid);
+    const picks = el("div", "picks");
+    for (const o of (sc && sc.options) || []) picks.append(armable(s, "k" + o.key, "pick", [el("span", "k", o.key), el("span", "", o.label)], o.key + ". " + o.label, { key: o.key }));
+    if (picks.childNodes.length) box.append(picks);
+    else box.append(el("div", "picks-note", !sc || sc.loading && !sc.options ? "reading its screen…" : sc.error ? sc.error : "no numbered choice on its screen"));
+  }
+  const chips = el("div", "chips");
+  if (waiting) chips.append(armable(s, "esc", "chip key", ["Esc"], "Esc", { key: "X" }), armable(s, "enter", "chip key", ["Enter"], "Enter", { key: "E" }));
+  QUICK.forEach((q, i) => chips.append(armable(s, "q" + i, "chip", [q], "“" + q + "”", { text: q })));
+  if (!waiting) chips.prepend(armable(s, "esc", "chip key", ["Esc"], "Esc", { key: "X" }));
+  box.append(chips);
+  return box;
+}
+function armable(s, id, cls, content, what, act) {
+  const full = s.sid + ":" + id, on = armed.id === full && Date.now() < armed.until;
+  const b = el("button", cls + (on ? " armed" : "")); b.type = "button";
+  if (on) b.append(cls.startsWith("pick") ? el("span", "k", "↵") : "", "Tap again: " + what); else b.append(...content);
+  b.addEventListener("click", async () => {
+    if (!(armed.id === full && Date.now() < armed.until)) { armed = { id: full, until: Date.now() + 3000 }; setTimeout(tick, 3100); return tick(); }
+    armed = { id: "", until: 0 };
+    notes.set(s.sid, { cls: "", text: "sending…" }); tick();
+    const r = act.key ? await post("api/keys", { sid: s.sid, key: act.key }) : await post("api/send", { sid: s.sid, text: act.text });
+    const at = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    notes.set(s.sid, r.ok ? { cls: "ok", text: (act.key ? "pressed " + what : "sent " + what) + " ✓ " + at } : { cls: "err", text: "not done: " + (r.error || "unknown") });
+    screens.delete(s.sid); tick();
+  });
+  return b;
+}
+// The task list, as a workflow is shown: folded to a row with its progress and the task in hand; open, a row per task still to finish.
+function taskList(T) {
+  const d = el("details", "tasks"), sm = el("summary");
+  const doing = T.open.filter((t) => t.status === "in_progress"), todo = T.open.filter((t) => t.status !== "in_progress");
+  const bar = el("span", "tbar"); const n = Math.min(T.total, 24);
+  for (let i = 0; i < n; i++) { const at = (i / n) * T.total; bar.append(el("i", at < T.done ? "d" : at < T.done + doing.length ? "n" : "")); }
+  const right = el("span", ""); right.style.cssText = "display:inline-flex;gap:8px;align-items:center"; right.append(bar, T.done + "/" + T.total);
+  const what = el("span", "what");
+  if (doing.length) what.append(el("span", "", "◐ " + doing[0].text + (doing.length > 1 ? " +" + (doing.length - 1) : "")));
+  else if (todo.length) what.append("next: " + todo[0].text); else what.append("all done");
+  if (doing.length) what.firstChild.style.color = "#f5f7fa";
+  const r = el("div", "r"); const g = el("span", "g", "☰"); g.style.color = "#56cdd6";
+  const sub = el("div", "sub"); sub.append(what);
+  r.append(g, el("span", "nm", "Tasks"), el("span", "right", ""), sub); r.querySelector(".right").append(right);
+  sm.append(r); d.append(sm);
+  for (const t of [...doing, ...todo]) {
+    const row = el("div", "r child task " + (t.status === "in_progress" ? "now" : "pending"));
+    const gl = el("span", "g", t.status === "in_progress" ? "◐" : "○"); gl.style.color = t.status === "in_progress" ? "#f5f7fa" : "#6b7380";
+    const nm = el("span", "nm", t.text); if (t.blocked) nm.append(el("span", "blk", "blocked"));
+    row.append(gl, nm, el("span", "right", t.since || ""));
+    d.append(row);
+  }
+  if (T.done) d.append(el("div", "r child done-line", "✓ " + T.done + " done"));
+  return d;
+}
 function card(s) {
   const c = el("section", "card" + (s.state === "needs" ? " needs" : "")); c.style.setProperty("--c", s.color);
   // The head: name and state, where it is; its context as a ring, split by what fills it, on the right.
@@ -6260,11 +6359,12 @@ function card(s) {
   if (s.changes) c.append(row("±", "#6b7380", segs(s.changes)));
   const R = s.roster;
   if (R && (R.main || R.workflows.length || R.agents.length || R.finished)) c.append(roster(R));
-  if (s.tasks && s.tasks.total) { const d = el("details", "tasks"); d.append(el("summary", "", "tasks " + s.tasks.done + "/" + s.tasks.total + " done")); for (const t of s.tasks.open) d.append(el("div", "st-" + t.status, (t.status === "in_progress" ? "◐ " : "○ ") + t.text + (t.since ? " · " + t.since : "") + (t.blocked ? " · blocked" : ""))); c.append(d); }
-  if (s.talk.length) { const d = el("details", "talk"); if (s.state === "needs") d.open = true; d.append(el("summary", "", "conversation")); for (const m of s.talk) { const p = el("p", m.who, (m.who === "you" ? "▸ " : "◆ ") + m.text); p.append(el("span", "", m.ago)); d.append(p); } c.append(d); }
+  if (s.tasks && s.tasks.total) c.append(taskList(s.tasks));
+  if (s.talk.length) { const d = el("details", "talk"); if (s.state === "needs") d.open = true; d.append(el("summary", "", "conversation")); for (const m of s.talk) d.append(talkLine(s.sid, m)); c.append(d); }
   const m = el("details", "message"); if (s.state === "needs") m.open = true; m.append(el("summary", "", s.state === "needs" ? "answer" : "send a message"));
   const f = el("form", "send"); const ta = el("textarea"); ta.rows = 2; ta.placeholder = s.state === "needs" ? "your answer…" : "type to " + s.name + "…"; ta.value = drafts.get(s.sid) || ""; ta.dataset.sid = s.sid;
   ta.addEventListener("input", () => drafts.set(s.sid, ta.value));
+  m.append(answerButtons(s));
   const go = el("button", "", "Send"); go.type = "submit"; f.append(ta, go); m.append(f);
   const note = el("div", "sent" + (notes.get(s.sid)?.cls ? " " + notes.get(s.sid).cls : ""), notes.get(s.sid)?.text || ""); m.append(note);
   f.addEventListener("submit", async (e) => {
