@@ -6057,8 +6057,9 @@ export const WEB_PAGE = `<!doctype html>
 #splash.gone{opacity:0;transform:scale(1.04);pointer-events:none}
 #splash .logo{position:relative;width:192px;height:192px;border-radius:48px;overflow:hidden;box-shadow:0 10px 40px #000a,0 0 0 1px #ffffff14;animation:float 3s ease-in-out infinite}
 #splash .logo img{width:100%;height:100%;display:block}
+#splash .logo b i{background:linear-gradient(115deg,transparent 36%,#ffffff30 43%,#fffffff0 50%,#ffffff30 57%,transparent 64%)}
 #splash .logo b{position:absolute;inset:0;overflow:hidden;-webkit-mask:url(__LOGO_MASK__) center/100% 100% no-repeat;mask:url(__LOGO_MASK__) center/100% 100% no-repeat}
-#splash .logo i{position:absolute;inset:-40%;background:linear-gradient(115deg,transparent 36%,#ffffff22 43%,#ffffffe0 50%,#ffffff22 57%,transparent 64%);transform:translateX(-70%);animation:shine 1.6s cubic-bezier(.4,0,.2,1) .15s infinite}
+#splash .logo i{position:absolute;inset:-40%;background:linear-gradient(115deg,transparent 38%,#ffffff10 44%,#ffffffb0 50%,#ffffff10 56%,transparent 62%);transform:translateX(-70%);animation:shine 1.6s cubic-bezier(.4,0,.2,1) .15s infinite}
 @keyframes shine{0%{transform:translateX(-70%)}60%,100%{transform:translateX(70%)}}
 @keyframes float{50%{transform:translateY(-4px)}}
 #splash .title{font-size:22px;font-weight:700;letter-spacing:-.01em;background:linear-gradient(100deg,#8a95a5 30%,#fff 50%,#8a95a5 70%);background-size:250% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:sheen 1.6s linear .15s infinite}
@@ -6142,7 +6143,7 @@ details.tasks[open]>summary::before,details.wfg[open]>summary::before,details.ta
 .chip.key{color:var(--dim)}.chip.armed{background:var(--amber);color:#1a1405;border-color:var(--amber)}.picks-note{color:var(--dim);font-size:12px;margin:6px 0 2px}
 .sent{font-size:12px;margin-top:4px;color:var(--dim)}.sent.ok{color:var(--green)}.sent.err{color:var(--red)}
 </style></head><body>
-<div id="splash"><div class="logo"><img src="__ICON__" alt=""><b><i></i></b></div><div class="title">Claude Fleet</div><div class="what" id="splash-what">Reaching your Mac…</div></div>
+<div id="splash"><div class="logo"><img src="__ICON__" alt=""><i></i><b><i></i></b></div><div class="title">Claude Fleet</div><div class="what" id="splash-what">Reaching your Mac…</div></div>
 <header><h1><img src="/icon-192.png" alt="">Claude Fleet</h1><span id="clock"></span></header>
 <div id="quip">Waking the fleet…</div>
 <div class="gauges" id="gauges"></div>
@@ -6438,7 +6439,7 @@ function card(s) {
   return c;
 }
 let last = 0, open = new Map();
-// The splash plays its shine to the end of a sweep, holds 200 ms, then the app fades in quickly.
+// The splash plays its shine to the end of a sweep, holds 400 ms on the logo, then the app fades in quickly.
 let leaving = false;
 function leaveSplash() {
   const sp = document.getElementById("splash");
@@ -6447,7 +6448,7 @@ function leaveSplash() {
   const a = sp.querySelector(".logo i").getAnimations()[0];
   const local = a ? Number(a.currentTime) - 150 : 960, phase = local < 0 ? local : local % 1600;
   const wait = phase < 0 ? 960 - phase : phase < 960 ? 960 - phase : 0;
-  setTimeout(() => { sp.classList.add("gone"); setTimeout(() => sp.remove(), 200); }, wait + 200);
+  setTimeout(() => { sp.classList.add("gone"); setTimeout(() => sp.remove(), 200); }, wait + 400);
 }
 // Finished cards a swipe has put away, by session, kept on this phone.
 const isDone = (s) => s.state === "justDone" || s.state === "finished";
