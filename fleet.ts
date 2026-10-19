@@ -6317,7 +6317,7 @@ const sameToken = (a: string, b: string) => a.length === b.length && crypto.timi
 function tailnetAddress(): string | undefined {
   if (process.env.FLEET_WEB_HOST) return process.env.FLEET_WEB_HOST;
   try {
-    const r = spawnSync("tailscale", ["ip", "-4"], { encoding: "utf8", timeout: 3000 });
+    const r = spawnSync("tailscale", ["ip", "-4"], { encoding: "utf8", timeout: 10_000 });
     const ip = r.stdout?.split("\n")[0]?.trim();
     return r.status === 0 && ip && /^100\.\d+\.\d+\.\d+$/.test(ip) ? ip : undefined;
   } catch {
@@ -8247,6 +8247,15 @@ export async function serveWorker(): Promise<never> {
   };
   setTimeout(report, 5000);
   setInterval(report, 30_000);
+  // Started while Tailscale was down or updating, the page is on this Mac only: move it onto the tailnet once it is back.
+  setInterval(() => {
+    if (!web.server || web.shared || web.onTailnet || process.env.FLEET_WEB_HOST || !tailnetAddress()) return;
+    svcLog("Tailscale is up: moving the page onto it");
+    web.server.stop(true);
+    for (const k of ["server", "url", "host", "onTailnet", "error"] as const) delete web[k];
+    startWeb(() => sessions);
+    report();
+  }, 30_000);
   for (const sig of ["SIGINT", "SIGTERM"] as const)
     try {
       process.on(sig, () => {
