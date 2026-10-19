@@ -5450,6 +5450,20 @@ describe("key i: in the background", () => {
   });
 });
 
+describe("the splash", () => {
+  test("the logo, the name, what fleet is doing and how far through the sessions, centred, on any screen", () => {
+    for (const [cols, rows] of [[140, 45], [80, 24], [60, 18]]) {
+      const lines = F.splashScreen(cols, rows, "reading vfs-overhaul", 3, 7).map(strip);
+      expect(lines.length).toBe(rows);
+      expect(lines.every((l) => F.width(l) <= cols)).toBe(true);
+      expect(lines.some((l) => l.includes("C L A U D E   F L E E T"))).toBe(true);
+      expect(lines.some((l) => l.trim() === "reading vfs-overhaul")).toBe(true);
+      expect(lines.some((l) => l.includes("3/7"))).toBe(true);
+      expect(lines.filter((l) => l.includes(">_")).length).toBe(2); // the two prompts in the F's arms
+    }
+  });
+});
+
 describe("a background job waiting on you", () => {
   test("a question it records counts, even while it still says it is working; once answered or finished it does not", () => {
     expect(F.jobWaiting({ state: "blocked", needs: "" })).toBe(true);
