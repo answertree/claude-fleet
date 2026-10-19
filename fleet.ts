@@ -17,6 +17,7 @@ import * as os from "node:os";
 import { StringDecoder } from "node:string_decoder";
 import { deflateSync, inflateSync } from "node:zlib";
 import { spawn, spawnSync } from "node:child_process";
+import { accountsMain, accountsScreen, tickAccounts } from "./accounts.ts";
 
 /**
  * Where Claude Code keeps its files; the demo and the tests point FLEET_HOME at made-up sessions. Read each
@@ -71,6 +72,7 @@ Usage: bun fleet.ts [minutes] [options]
 Keys: 1 2 3 view mode (3: timeline) · r open the session waiting on you (or
       the focused one) to reply · + - window · a all sessions · d finished agents
       tab focus next session · b bell · u retry the usage read
+      c every Claude account's usage (see: bun fleet.ts accounts --help)
       space seen it (marks what is new from now on) · esc leave focus (with
       nothing focused, quit) · q quit
       ? what every mark and key means (any key closes it)
@@ -1562,7 +1564,7 @@ function readText(f: string, max = 32 << 20): string | undefined {
     return undefined;
   }
 }
-const readJson = (f: string, max?: number): any => {
+export const readJson = (f: string, max?: number): any => {
   const text = readText(f, max);
   if (text === undefined) return undefined;
   try {
@@ -2131,7 +2133,7 @@ export function loginDecision(k: KeychainOutcome | undefined, f: FileOutcome, re
   return { reason: keychain === REASON.keychainMissing && file === REASON.fileMissing ? REASON.none : keychain, keychain, file };
 }
 
-interface Login {
+export interface Login {
   token: string;
   expiresAt: number;
 }
@@ -2159,25 +2161,31 @@ function ancestorNames(): string[] {
   }
   return names;
 }
-/** The stored login, or the exact reason there is none. The keychain call is the one the dashboard has always made. */
-function readLogin(): { login: Login } | { reason: string } {
+/**
+ * The stored login, or the exact reason there is none. By default the keychain call is the one the dashboard has always
+ * made; another account's folder (key c) passes its own keychain entries, tried in turn while each is "not found", and its own login file.
+ */
+export function readLogin(services = ["Claude Code-credentials"], loginFile = path.join(claudeHome(), ".credentials.json")): { login: Login } | { reason: string } {
   let k: KeychainOutcome | undefined;
   let fromKeychain: Login | undefined;
   if (process.platform === "darwin") {
     k = { status: 127, stderr: "", timedOut: false, parse: "empty" };
     try {
-      const r = spawnSync("security", ["find-generic-password", "-s", "Claude Code-credentials", "-w"], { encoding: "utf8", timeout: 5000 });
-      const parsed: { parse: LoginParse; login?: Login } = r.status === 0 ? parseLogin(r.stdout ?? "") : { parse: "empty" };
-      const timedOut = (r.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT" || (r.status === null && r.signal === "SIGTERM");
-      k = { status: r.error && !timedOut ? 127 : r.status, stderr: String(r.stderr ?? ""), timedOut, parse: parsed.parse };
-      fromKeychain = parsed.login;
+      for (const service of services) {
+        const r = spawnSync("security", ["find-generic-password", "-s", service, "-w"], { encoding: "utf8", timeout: 5000 });
+        const parsed: { parse: LoginParse; login?: Login } = r.status === 0 ? parseLogin(r.stdout ?? "") : { parse: "empty" };
+        const timedOut = (r.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT" || (r.status === null && r.signal === "SIGTERM");
+        k = { status: r.error && !timedOut ? 127 : r.status, stderr: String(r.stderr ?? ""), timedOut, parse: parsed.parse };
+        fromKeychain = parsed.login;
+        if (keychainReason(k, false) !== REASON.keychainMissing) break;
+      }
     } catch {}
   }
   let f: FileOutcome = "missing";
   let fromFile: Login | undefined;
   if (!fromKeychain) {
     try {
-      const file = path.join(claudeHome(), ".credentials.json");
+      const file = loginFile;
       if (!fs.statSync(file).isFile()) throw new Error("not a file"); // a named pipe here would block the dashboard for good
       const parsed = parseLogin(fs.readFileSync(file, "utf8"));
       f = parsed.parse === "empty" ? "not-json" : parsed.parse;
@@ -2319,7 +2327,10 @@ async function readUsage(now: number): Promise<Reading | { reason: string }> {
     const o = readJson(process.env.FLEET_USAGE_FIXTURE);
     return o ? { figures: figuresOnly(o), fetchedAt: typeof o.fetchedAt === "number" ? o.fetchedAt : now } : { reason: REASON.network("fixture not found") };
   }
-  const found = readLogin();
+  return askAnthropic(readLogin(), now);
+}
+/** Ask Anthropic for the figures with a login just read. The login is used for this one request and goes nowhere else. */
+export async function askAnthropic(found: { login: Login } | { reason: string }, now: number): Promise<Reading | { reason: string }> {
   if ("reason" in found) return found;
   if (found.login.expiresAt && found.login.expiresAt < Date.now()) return { reason: REASON.expired };
   let res: Response;
@@ -2414,7 +2425,7 @@ export function usageStateOf(u: { data?: UsageFigures; fetchedAt: number; reason
 }
 export const usageState = (now: number): UsageState => usageStateOf(usage, now);
 
-const hhmm = (t: number) => new Date(t).toTimeString().slice(0, 5);
+export const hhmm = (t: number) => new Date(t).toTimeString().slice(0, 5);
 /** When a limit resets: "resets in 2h10" under a day away, else "resets Fri 09:00". short: "2h10 left" / "Fri 09:00". bare: "2h10" / "Fri 09:00". */
 export function resetText(resetsAt: number, now: number, form: "long" | "short" | "bare" = "long"): string {
   if (!resetsAt || resetsAt <= now) return "";
@@ -4687,9 +4698,9 @@ export type HeaderKind = "tall" | "medium" | "old";
 export const headerKind = (W: number, rows: number, mode: Mode = opt.mode): HeaderKind => (mode === "compact" || W < 100 ? "old" : rows >= 40 ? "tall" : "medium");
 
 /** `text` when it fits in `w` cells; cut with … when enough of it would be left to mean something; else nothing. */
-const fitOrDrop = (text: string, w: number): string => (width(text) <= w ? text : w >= 8 ? fit(text, w, "l", true).replace(/\s+…$/, "…") : "");
+export const fitOrDrop = (text: string, w: number): string => (width(text) <= w ? text : w >= 8 ? fit(text, w, "l", true).replace(/\s+…$/, "…") : "");
 /** The first wording that fits in `w` cells, else the fullest one cut with …. */
-const firstFit = (wordings: string[], w: number): string => wordings.find((x) => width(x) <= w) ?? fitOrDrop(wordings[0], w);
+export const firstFit = (wordings: string[], w: number): string => wordings.find((x) => width(x) <= w) ?? fitOrDrop(wordings[0], w);
 
 /**
  * A limit's gauge, `w` cells: ━ for the part used, in the limit rule's colour, then a faint track. `tick`
@@ -7981,6 +7992,7 @@ export function svcKey(key: string): boolean {
 // ───────────────────────── legend ─────────────────────────
 
 let legendOn = false; // key ?: the legend is showing instead of the fleet
+let acctOn = false; // key c: every Claude account's usage is showing instead of the fleet
 
 /**
  * Key ?: one screen that says what every mark and key means, since the screen itself carries no word
@@ -8037,7 +8049,7 @@ export function legend(cols: number, rows: number): string[] {
     key("tab", "focus the next session"),
     key("esc", "leave focus; with none, quit"),
     key("r w t i", "open one waiting; phone; Telegram; background"),
-    key("b u", "bell on/off; retry usage now"),
+    key("b u c", "bell; retry usage; every account"),
     key("space", "seen it: clears the new marks"),
     key("?", "this legend"),
     key("q", "quit"),
@@ -8176,6 +8188,7 @@ function refresh() {
   holdStalls(sessions, now);
   steadyClock(now);
   if (opt.usage && !opt.once) tickUsage(now); // --once has already made its one read
+  if (opt.usage && !opt.once) tickAccounts(now); // the other accounts in accounts.json, if any
   // Ring once when a session starts waiting on the person, and once for each thing that newly stalls.
   const facts = sessions.map((s) => ({ s, f: factsOf(s) }));
   const asks = facts.filter((x) => x.f.needs).map((x): [string, number] => [x.s.sid, stateSince(x.s, x.f, "needs")]);
@@ -8207,6 +8220,7 @@ function refresh() {
 }
 
 if (import.meta.main) {
+  if (process.argv[2] === "accounts") await accountsMain(process.argv.slice(3)); // never returns
   const command = parseArgs(process.argv.slice(2));
   if (command) {
     process.stdout.write(command === "help" ? HELP : glyphCard());
@@ -8245,7 +8259,7 @@ if (import.meta.main) {
   const out = process.stdout;
   let onScreen: string[] | undefined; // the frame the terminal shows, so the next writes only the rows that differ
   const draw = () => {
-    const lines = legendOn ? legend(out.columns || 140, out.rows || 45) : webOn ? webScreen(out.columns || 140, out.rows || 45) : tgOn ? tgScreen(out.columns || 140, out.rows || 45) : svcOn ? svcScreen(out.columns || 140, out.rows || 45) : render(sessions, out.columns || 140, out.rows || 45, clock());
+    const lines = legendOn ? legend(out.columns || 140, out.rows || 45) : acctOn ? accountsScreen(out.columns || 140, out.rows || 45, clock()) : webOn ? webScreen(out.columns || 140, out.rows || 45) : tgOn ? tgScreen(out.columns || 140, out.rows || 45) : svcOn ? svcScreen(out.columns || 140, out.rows || 45) : render(sessions, out.columns || 140, out.rows || 45, clock());
     out.write(frameDiff(onScreen, lines));
     onScreen = lines;
   };
@@ -8290,6 +8304,10 @@ if (import.meta.main) {
     else if (name === "bell") opt.bell = !opt.bell;
     else if (name === "seen") markSeen(clock());
     else if (name === "legend") legendOn = true;
+    else if (name === "accounts") {
+      acctOn = true;
+      if (opt.usage) tickAccounts(clock());
+    }
     else if (name === "usage") {
       if (opt.usage) void fetchUsage().then(draw); // retry now, whatever the next try was set to
     } else if (name.startsWith("focus:")) focusSid = focusSid === name.slice(6) ? null : name.slice(6);
@@ -8356,7 +8374,7 @@ if (import.meta.main) {
     q: "quit", "\x03": "quit", "\x1b": "back", "\t": "next", w: "web", t: "telegram", i: "service",
     "1": "mode:detail", "2": "mode:compact", "3": "mode:far", r: "reply",
     "+": "win+", "=": "win+", "-": "win-", _: "win-",
-    d: "done", a: "all", b: "bell", u: "usage", " ": "seen", "?": "legend",
+    d: "done", a: "all", b: "bell", u: "usage", c: "accounts", " ": "seen", "?": "legend",
   };
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(true);
@@ -8390,8 +8408,9 @@ if (import.meta.main) {
       for (const e of events) {
         if (e.kind === "other" || (e.kind === "key" && keys.length > PASTE_KEYS)) continue;
         // The legend is closed by a key or a click, which then does nothing else. A button's release is not a click, so the click that opened it does not close it.
-        if (legendOn || webOn) {
+        if (legendOn || webOn || acctOn) {
           legendOn = false;
+          acctOn = false;
           webOn = false;
           clear();
           draw();
