@@ -7045,6 +7045,7 @@ export async function startSession(cwd: string, prompt: string): Promise<Reach> 
   }
 }
 
+let stateCache: { at: number; body: string; gz?: Uint8Array } | undefined;
 /** Start serving the page (once). Every request must carry the secret; anything but the page and its data is a 404. */
 export function startWeb(getSessions: () => Session[], now: () => number = clock): typeof web {
   if (web.server || web.error || web.shared) return web;
@@ -7135,9 +7136,11 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
           if (url.pathname === "/") return new Response(WEB_PAGE.replace("__TOKEN__", token).replace("__ICON__", splashIcon()).replaceAll("__LOGO_MASK__", logoMask()).replace("__STARTUP__", STARTUP_LINKS), { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
           if (url.pathname === "/api/state") {
             web.watchedAt = Date.now();
-            const body = JSON.stringify(webState(getSessions(), now()));
-            if (!/\bgzip\b/.test(req.headers.get("accept-encoding") ?? "")) return new Response(body, { headers: { ...headers, "content-type": "application/json" } });
-            return new Response(Bun.gzipSync(new TextEncoder().encode(body)), { headers: { ...headers, "content-type": "application/json", "content-encoding": "gzip", vary: "accept-encoding" } });
+            // Made once for all the polls within 0.4 s (two phones, a retry), and compressed once.
+            if (!stateCache || Date.now() - stateCache.at > 400) stateCache = { at: Date.now(), body: JSON.stringify(webState(getSessions(), now())) };
+            if (!/\bgzip\b/.test(req.headers.get("accept-encoding") ?? "")) return new Response(stateCache.body, { headers: { ...headers, "content-type": "application/json" } });
+            stateCache.gz ??= Bun.gzipSync(new TextEncoder().encode(stateCache.body));
+            return new Response(stateCache.gz, { headers: { ...headers, "content-type": "application/json", "content-encoding": "gzip", vary: "accept-encoding" } });
           }
           if (url.pathname === "/glasses") return new Response(GLASSES_PAGE, { headers: { ...headers, "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" } });
           if (url.pathname === "/api/glasses") return (web.watchedAt = Date.now()), Response.json(glassesState(getSessions(), now()), { headers });
@@ -8750,13 +8753,21 @@ export async function serveWorker(): Promise<never> {
     svcLog(u.kind === "current" ? "usage figures read" : `usage figures not read: ${u.reason || u.kind}`);
   }
   refresh();
-  // Every two seconds, as the terminal does; twice a second while the phone page or the glasses are looking.
-  let readAt = Date.now();
-  setInterval(() => {
-    if (Date.now() - readAt < (Date.now() - web.watchedAt < 10_000 ? 450 : 1950)) return;
-    readAt = Date.now();
+  // Every two seconds, as the terminal does; twice a second while the phone page or the glasses are looking. Never
+  // back to back: after a scan the thread rests at least half as long again, so with huge sessions the page and the
+  // bot still get their turn. A scan over a second is logged (at most every five minutes) with what took the time.
+  let slowSaid = 0;
+  const pace = () => {
+    const a = performance.now();
     refresh();
-  }, 500);
+    const took = performance.now() - a;
+    if (took > 1000 && Date.now() - slowSaid > 5 * 60_000) {
+      slowSaid = Date.now();
+      svcLog(`a scan took ${Math.round(took)} ms: ${refreshLaps.filter(([, ms]) => ms >= 20).map(([n, ms]) => `${n} ${Math.round(ms)} ms`).join(", ") || "no one step"}`);
+    }
+    setTimeout(pace, Math.max(Date.now() - web.watchedAt < 10_000 ? 500 : 2000, took * 1.5));
+  };
+  setTimeout(pace, 500);
   // Back to the code on disk when any of it changes (fleet.ts, accounts.ts…): stop, and the supervisor starts the new one.
   const code = () => fs.readdirSync(import.meta.dir).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts") && f !== "demo.ts");
   const stamp = () => code().map((f) => `${f}:${fs.statSync(path.join(import.meta.dir, f)).mtimeMs}`).join(" ");
@@ -9945,7 +9956,17 @@ const askedAt = new Map<string, number>(); // …and when each one's question wa
 const stalledNow = new Map<string, number>();
 let retakeAt = 0;
 let tgWanted = false; // set at launch for real sessions: talk to the Telegram bot when this fleet holds it
+/** How long each step of the last refresh took, for the service log when one is slow. */
+export let refreshLaps: [string, number][] = [];
+let lapAt = 0;
+const lap = (name: string) => {
+  const t = performance.now();
+  refreshLaps.push([name, t - lapAt]);
+  lapAt = t;
+};
 function refresh() {
+  refreshLaps = [];
+  lapAt = performance.now();
   if (Date.now() >= retakeAt) {
     retakeAt = Date.now() + 10_000; // when the fleet serving the page or talking to the bot quits, this one takes over
     if (serviceRunning()) web.yieldPort?.();
@@ -9953,19 +9974,24 @@ function refresh() {
     if (tgWanted) tgClaim();
     staleCheck();
   }
+  lap("claims");
   const now = clock();
   const local = scan(now);
+  lap("scan");
   prune(now);
   sampleMachine();
   pollSides(local, now, opt.once);
+  lap("git and PRs");
   // Your other machines' sessions join this one's; their git and pull requests were read by their own fleets.
   pollPeers(now);
   sessions = [...local, ...peerSessions()];
   const fresh = takeFreshPeers();
+  lap("other machines");
   holdStalls(sessions, now);
   steadyClock(now);
   if (opt.usage && !opt.once) tickUsage(now); // --once has already made its one read
   if (opt.usage && !opt.once) tickAccounts(now); // the other accounts in accounts.json, if any
+  lap("usage");
   // Ring once when a session starts waiting on the person, and once for each thing that newly stalls.
   const facts = sessions.map((s) => ({ s, f: factsOf(s) }));
   const asks = facts.filter((x) => x.f.needs).map((x): [string, number] => [x.s.sid, stateSince(x.s, x.f, "needs")]);
@@ -9975,6 +10001,7 @@ function refresh() {
   const stuckNow = new Set(marks.map(([k]) => k.split("/")[0]));
   const stalled = newStalls(stalledNow, marks).filter((k) => !fresh.has(k.split("/")[0]));
   const rings = asked.length + stalled.length;
+  lap("stalls");
   const told = tgWanted ? tgEvents(sessions, asked, stalled) : []; // always, so what changed while another fleet held the bot is not news later
   const botHere = tgWanted && tg.on && (tg.paired = !!readTg().chat);
   if (botHere) {
@@ -9991,10 +10018,13 @@ function refresh() {
     tgSettle(new Set(asks.map(([sid]) => sid)), stuckNow);
     tgSweep();
   }
+  lap("telegram");
   if (opt.bell && !opt.once) process.stdout.write("\x07".repeat(rings));
   noteScan(sessions, now);
   const partied = [...noteParties(sessions, now), ...noteFinished(sessions, now).map((sid) => `${sid} finished`)];
+  lap("events");
   if (botHere) void tgTick(sessions, now, partied);
+  lap("telegram tick");
   if (opt.bell && !opt.once && partied.length) process.stdout.write("\x07");
 }
 
