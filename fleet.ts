@@ -8722,13 +8722,16 @@ export async function serveWorker(): Promise<never> {
     readAt = Date.now();
     refresh();
   }, 500);
-  // Back to the code on disk when it changes: stop, and the supervisor starts the new one.
-  const me = import.meta.path;
-  const born = fs.statSync(me).mtimeMs;
+  // Back to the code on disk when any of it changes (fleet.ts, accounts.ts…): stop, and the supervisor starts the new one.
+  const code = () => fs.readdirSync(import.meta.dir).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts") && f !== "demo.ts");
+  const stamp = () => code().map((f) => `${f}:${fs.statSync(path.join(import.meta.dir, f)).mtimeMs}`).join(" ");
+  const born = stamp();
   setInterval(() => {
     try {
-      if (fs.statSync(me).mtimeMs !== born) {
-        svcLog("fleet.ts changed: restarting onto the new code");
+      const now = stamp();
+      if (now !== born) {
+        const changed = code().filter((f) => !born.includes(`${f}:${fs.statSync(path.join(import.meta.dir, f)).mtimeMs}`));
+        svcLog(`${changed.join(", ") || "the code"} changed: restarting onto the new code`);
         tgRelease();
         process.exit(0);
       }
