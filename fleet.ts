@@ -1432,6 +1432,7 @@ function runFor(cmd: string, args: string[], sync: boolean, done: (out: string |
   }
   let out = "";
   let child: ReturnType<typeof spawn>;
+  sideCost.started++;
   try {
     child = spawn(cmd, args, { stdio: ["ignore", "pipe", "ignore"] });
   } catch {
@@ -1582,17 +1583,25 @@ export function gitDirOf(s: Session): string | undefined {
   return worktreeState.get(base)?.list?.find((w) => w.branch === branch)?.path;
 }
 /** Start the reads a frame will want: each session's git state, and with --prs its newest pull requests. */
+/** Where the time in pollSides went, by kind, and how many commands it started (for the service log). */
+export const sideCost = { git: 0, worktrees: 0, prs: 0, deploys: 0, started: 0 };
+const timed = (k: "git" | "worktrees" | "prs" | "deploys", f: () => void) => {
+  const a = performance.now();
+  f();
+  sideCost[k] += performance.now() - a;
+};
 export function pollSides(sessions: Session[], now: number, sync = false) {
+  Object.assign(sideCost, { git: 0, worktrees: 0, prs: 0, deploys: 0, started: 0 });
   for (const s of sessions) {
     if (!s.side) continue;
     const base = s.side.cwd ?? s.cwd;
-    pollGit(base, now, sync);
+    timed("git", () => pollGit(base, now, sync));
     const dir = gitDirOf(s);
-    if (dir !== base) pollWorktrees(base, now, sync);
-    if (dir && dir !== base) pollGit(dir, now, sync);
-    if (opt.prs) for (const pr of s.side.prs.slice(0, PR_READ)) pollPr(pr, now, sync);
+    if (dir !== base) timed("worktrees", () => pollWorktrees(base, now, sync));
+    if (dir && dir !== base) timed("git", () => pollGit(dir, now, sync));
+    if (opt.prs) for (const pr of s.side.prs.slice(0, PR_READ)) timed("prs", () => pollPr(pr, now, sync));
   }
-  if (opt.prs) pollDeploys(now, sync);
+  if (opt.prs) timed("deploys", () => pollDeploys(now, sync));
 }
 export const gitOf = (s: Session): GitState | undefined => {
   if (s.remote) return s.remote.git;
@@ -9994,7 +10003,7 @@ function refresh() {
   prune(now);
   sampleMachine();
   pollSides(local, now, opt.once);
-  lap("git and PRs");
+  lap(`git and PRs (git ${Math.round(sideCost.git)}, worktrees ${Math.round(sideCost.worktrees)}, prs ${Math.round(sideCost.prs)}, deploys ${Math.round(sideCost.deploys)} ms; ${sideCost.started} started)`);
   // Your other machines' sessions join this one's; their git and pull requests were read by their own fleets.
   pollPeers(now);
   sessions = [...local, ...peerSessions()];
