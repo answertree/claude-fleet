@@ -1684,6 +1684,7 @@ export interface Session {
   job?: { state: string; detail: string; needs: string; since?: number; tokens?: number }; // since: when a blocked job began waiting; tokens: all it has used
   side?: Side; // what it is doing beside the conversation
   jobId?: string;
+  loading?: boolean; // not read yet (fleet starting): shown from its registry entry as "reading…" until a later scan reads it
   remote?: { host: string; ip: string; addr: string; use: { cpu: number; rss: number; known: boolean }; git?: GitState }; // on another machine: which, and what its fleet measured there
 }
 
@@ -1895,9 +1896,53 @@ export const cachedKeys = (): string[] => [...tails.keys(), ...metaCache.keys(),
 /** A session id as Claude Code writes them: letters, digits and dashes. Anything else is not drawn, nor used in a path. */
 const PLAIN_ID = /^[\w-]{1,64}$/;
 
+/** Older than this, a workflow that has ended or an agent's transcript is not read: twice the longest window any view shows. */
+const OLD_MS = 2 * WINDOWS[WINDOWS.length - 1] * 60_000;
+const mtimeOf = (f: string): number => {
+  try {
+    return fs.statSync(f).mtimeMs;
+  } catch {
+    return 0;
+  }
+};
+/** A workflow's state file (written once, when it ends; it carries the whole script and logs), parsed once per change. */
+const stateFiles = new Map<string, { key: string; value: any }>();
+function stateFile(f: string): any {
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(f);
+  } catch {
+    stateFiles.delete(f);
+    return undefined;
+  }
+  const key = `${st.mtimeMs} ${st.size}`;
+  const hit = stateFiles.get(f);
+  if (hit?.key === key) return hit.value;
+  const value = readJson(f);
+  stateFiles.set(f, { key, value });
+  if (stateFiles.size > 5000) stateFiles.delete(stateFiles.keys().next().value as string);
+  return value;
+}
+/** How long a scan may spend reading sessions it has not read before; past it they wait, shown as "reading…", for the
+ *  next scan. So fleet shows its sessions at once and fills each in as it is read. Infinity (the default) reads all. */
+let scanBudgetMs = Infinity;
+export const setScanBudget = (ms: number) => (scanBudgetMs = ms);
+const readOnce = new Set<string>(); // sessions read at least once
+let waited = new Set<string>(); // shown as placeholders by the last scan
+let justRead = new Set<string>(); // placeholders last scan, read this one: what they show is not news
+/** Whether the last scan left any session unread. */
+export let scanPending = false;
+/** The sessions that were placeholders and have now been read (once). Not news, like a machine just come into view. */
+export const takeJustRead = (): Set<string> => {
+  const out = justRead;
+  justRead = new Set();
+  return out;
+};
 export function scan(now: number): Session[] {
   scanSeq++;
+  const began = performance.now();
   const sessions: Session[] = [];
+  const nowWaiting = new Set<string>();
   const CLAUDE = claudeHome();
   const registry = ls(path.join(CLAUDE, "sessions")).filter((f) => f.endsWith(".json"));
   for (const [i, f] of registry.entries()) {
@@ -1905,6 +1950,13 @@ export function scan(now: number): Session[] {
     if (typeof reg?.sessionId !== "string" || !PLAIN_ID.test(reg.sessionId) || !alive(reg.pid)) continue;
     scanProgress?.(i, registry.length, safeLine(String(reg.name || reg.sessionId).slice(0, 40)));
     const sid: string = reg.sessionId;
+    // Past the budget, a session not read before waits: drawn from its registry entry for now.
+    if (!readOnce.has(sid) && performance.now() - began > scanBudgetMs) {
+      const startedAt = Number(reg.startedAt);
+      nowWaiting.add(sid);
+      sessions.push({ sid, pid: reg.pid, name: safeLine(String(reg.name || sid.slice(0, 8))), kind: safeLine(reg.kind), status: safeLine(reg.status), cwd: safeLine(reg.cwd), startedAt: Number.isFinite(startedAt) && startedAt > 0 ? startedAt : now, mains: [], agents: [], workflows: [], loading: true });
+      continue;
+    }
     // One entry that cannot be read is left out; the rest of the fleet is still drawn.
     try {
       const loc = locate(sid, now);
@@ -1918,14 +1970,29 @@ export function scan(now: number): Session[] {
         const sub = path.join(dir, "subagents");
         for (const name of ls(sub)) {
           if (!name.startsWith("agent-") || !name.endsWith(".jsonl")) continue;
+          if (mtimeOf(path.join(sub, name)) < now - OLD_MS) continue; // not written for hours: no view shows it, so it is not read
           const a = loadAgent(path.join(sub, name));
           if (a) agents.push(a);
         }
         for (const wfId of ls(path.join(sub, "workflows"))) {
           if (!wfId.startsWith("wf_")) continue;
           const wfDir = path.join(sub, "workflows", wfId);
+          const state = stateFile(path.join(dir, "workflows", wfId + ".json"));
+          const script = scripts.find((x) => x.endsWith(`-${wfId}.js`));
+          const slug = safeLine(state?.workflowName || (script ? script.slice(0, -(wfId.length + 4)) : wfId));
+          const title = () => wfTitle(wfDescription(wfId, state, () => (script ? loc.dirs.map((d) => path.join(d, "workflows", "scripts", script)).find((f) => fs.existsSync(f)) : undefined))) || slug;
+          // Ended hours ago, and none of its agents written since: no view shows it, so only its state file is read, not its
+          // agents' transcripts (a long-lived session can have thousands). One picked up again writes, and is read in full.
+          if (state && count(state.startTime) + count(state.durationMs) < now - OLD_MS) {
+            const files = ls(wfDir).filter((n) => n.startsWith("agent-") && n.endsWith(".jsonl"));
+            const newest = Math.max(0, ...files.map((n) => mtimeOf(path.join(wfDir, n))));
+            if (newest < now - OLD_MS) {
+              const ended = count(state.startTime) + count(state.durationMs);
+              workflows.push({ id: wfId, name: title(), slug, status: state.status ? safeLine(state.status) : "stopped", phase: "", phases: Array.isArray(state.phases) ? state.phases.map((p: any) => safeLine(p?.title)).filter(Boolean) : [], seen: [], started: count(state.startTime) || ended, finished: ended, agents: [], lastT: Math.max(newest, ended), tokens: typeof state.totalTokens === "number" ? state.totalTokens : undefined });
+              continue;
+            }
+          }
           const j = journal(path.join(wfDir, "journal.jsonl"));
-          const state = readJson(path.join(dir, "workflows", wfId + ".json"));
           const wfAgents: Agent[] = [];
           for (const name of ls(wfDir)) {
             if (!name.startsWith("agent-") || !name.endsWith(".jsonl")) continue;
@@ -1941,11 +2008,11 @@ export function scan(now: number): Session[] {
           for (const a of resumed) a.done = finishedItself(a.tail);
           const lastT = Math.max(j.mtime, ...wfAgents.map((a) => a.tail.mtime), 0);
           const running = wfAgents.filter((a) => !a.done);
-          const script = scripts.find((x) => x.endsWith(`-${wfId}.js`));
           const phases: string[] = Array.isArray(state?.phases) ? state.phases.map((p: any) => safeLine(p?.title)).filter(Boolean) : [];
           workflows.push({
             id: wfId,
-            ...((slug) => ({ name: wfTitle(wfDescription(wfId, state, () => (script ? loc.dirs.map((d) => path.join(d, "workflows", "scripts", script)).find((f) => fs.existsSync(f)) : undefined))) || slug, slug }))(safeLine(state?.workflowName || (script ? script.slice(0, -(wfId.length + 4)) : wfId))),
+            name: title(),
+            slug,
             // The state file is written when a workflow ends. Without it the workflow is still going, even at a moment when no agent
             // is (just launched, between two agents, the last one just reported), unless it has written nothing for minutes.
             status: resumed.length ? "running" : state?.status ? safeLine(state.status) : running.length || now - lastT < WF_QUIET_MS ? "running" : "stopped",
@@ -2041,8 +2108,12 @@ export function scan(now: number): Session[] {
         jobId: job ? String(reg.jobId) : undefined,
         side: sideOf(mains, now),
       });
+      readOnce.add(sid);
+      if (waited.has(sid)) justRead.add(sid);
     } catch {}
   }
+  waited = nowWaiting;
+  scanPending = nowWaiting.size > 0;
   // What was read for sessions and agents that have gone (their transcripts stay on disk, but no scan asks for them) is let go.
   for (const [file, t] of tails) if (scanSeq - t.used > FORGET_SCANS) tails.delete(file);
   for (const file of metaCache.keys()) if (!tails.has(file)) metaCache.delete(file);
@@ -2958,6 +3029,7 @@ export function subheading(s: Session, f: Facts, state: SessionState): Subheadin
   // Your prompt, as you typed it.
   const typed = oneLine(m?.ask?.text || m?.lastPrompt || "");
   const prompt = (): Subheading | undefined => (typed ? { source: "prompt", text: typed, t: m?.ask?.t } : undefined);
+  if (s.loading) return { source: "now", text: "reading…" };
   if (state === "needs") return { source: "question", text: f.needs };
   if (state === "working" || state === "stalled") return nowLine() ?? (s.tasks?.active ? { source: "task", text: s.tasks.active } : undefined) ?? prompt() ?? reply() ?? { source: "none", text: "" };
   // A quiet session with no reply and no now-line: better its last prompt than an empty row.
@@ -3213,6 +3285,7 @@ export function digest(events: FleetEvent[] = seen.events, since = seen.at): { s
 
 /** Sessions nobody needs to look at: finished background jobs, and idle sessions with nothing running under them. */
 export function isQuiet(s: Session, f: Facts, since: number): boolean {
+  if (s.loading) return false; // being read: shown, so the screen fills in where it will stay
   if (f.needs) return false;
   if (s.job) return s.job.state === "done";
   if (s.status === "busy") return false;
@@ -8883,6 +8956,7 @@ export async function serveSupervisor(): Promise<never> {
 
 /** --serve-worker: fleet with no screen. */
 export async function serveWorker(): Promise<never> {
+  setScanBudget(300); // the page and the bot answer from the first moment, the sessions filling in as they are read
   isServiceWorker = true;
   opt.bell = false;
   svcLog(`fleet running with no screen (pid ${process.pid})`);
@@ -8915,6 +8989,7 @@ export async function serveWorker(): Promise<never> {
       slowSaid = Date.now();
       svcLog(`a scan took ${Math.round(took)} ms: ${refreshLaps.filter(([, ms]) => ms >= 20).map(([n, ms]) => `${n} ${Math.round(ms)} ms`).join(", ") || "no one step"}`);
     }
+    if (scanPending) return void setTimeout(pace, 50); // sessions still to read: on with them
     setTimeout(pace, Math.max(web.links > 0 || Date.now() - web.watchedAt < 10_000 ? 500 : 2000, took * 1.5));
   };
   setTimeout(pace, 500);
@@ -10157,6 +10232,7 @@ async function refresh(yields = false) {
   pollPeers(now);
   sessions = [...local, ...peerSessions()];
   const fresh = takeFreshPeers();
+  for (const sid of takeJustRead()) fresh.add(sid); // read at last: what it shows was already so, not news
   lap("other machines");
   if (yields) await breathe();
   holdStalls(sessions, now);
@@ -10407,6 +10483,7 @@ if (import.meta.main) {
     });
   };
 
+  setScanBudget(300); // the screen comes up with every session listed; those not read yet fill in over the next frames
   refresh(); // the first read, under the splash
   setScanProgress(undefined);
   await finishShine();
@@ -10419,7 +10496,7 @@ if (import.meta.main) {
   setInterval(() => {
     if (away) return;
     frame++;
-    if (frame % (FPS * 2) === 0) {
+    if (frame % (FPS * 2) === 0 || scanPending) { // every two seconds, or every frame while sessions are still being read
       refresh();
       retitle();
     }

@@ -772,6 +772,36 @@ setTimeout(() => { throw new Error("boom in a scan"); }, 5);`;
     }
   });
 
+  test("past its time budget a scan lists a session it has not read as \"reading…\", shown, and reads it on a later scan; that first reading is not news", () => {
+    const home = path.join(root, "budget");
+    fs.rmSync(home, { recursive: true, force: true });
+    const sid = "budg0000-0000-4000-8000-000000000001";
+    const file = path.join(home, "projects", "-p", `${sid}.jsonl`);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.mkdirSync(path.join(home, "sessions"), { recursive: true });
+    fs.writeFileSync(path.join(home, "sessions", "1.json"), JSON.stringify({ pid: process.pid, sessionId: sid, name: "slow one", kind: "bg", status: "idle", cwd: "/w", startedAt: NOW - 60 * MIN }));
+    fs.writeFileSync(file, [prompt(NOW - 3 * MIN, "read me"), reply(NOW - 2 * MIN, "Done.")].map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const saved = process.env.FLEET_HOME;
+    process.env.FLEET_HOME = home;
+    try {
+      F.setScanBudget(-1); // nothing new is read
+      const [waiting] = F.scan(NOW).filter((x) => x.sid === sid);
+      expect([waiting.loading, waiting.name, waiting.mains.length, F.scanPending]).toEqual([true, "slow one", 0, true]);
+      const v = F.buildViews([waiting], NOW)[0];
+      expect([F.isHidden(v), F.subheading(waiting, v.facts, v.state).text]).toEqual([false, "reading…"]);
+      F.setScanBudget(Infinity);
+      const [read] = F.scan(NOW + 1000).filter((x) => x.sid === sid);
+      expect([read.loading, read.mains.length, F.scanPending]).toEqual([undefined, 1, false]);
+      expect(F.takeJustRead().has(sid)).toBe(true);
+      F.setScanBudget(-1); // read once: it is read on every scan, budget or not
+      expect(F.scan(NOW + 2000).find((x) => x.sid === sid)?.loading).toBeUndefined();
+      expect(F.takeJustRead().has(sid)).toBe(false);
+    } finally {
+      F.setScanBudget(Infinity);
+      process.env.FLEET_HOME = saved;
+    }
+  });
+
   test("a transcript replaced by a different file at the same path is read afresh", () => {
     const home = path.join(root, "replaced");
     fs.rmSync(home, { recursive: true, force: true });
