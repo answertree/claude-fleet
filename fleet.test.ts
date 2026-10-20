@@ -256,7 +256,7 @@ describe("layout grid", () => {
     expect(F.grid(99).small).toBe(true);
     expect(F.grid(100).small).toBe(false);
     expect(F.grid(130)).toMatchObject({ laneW: 30, lane: 87, textEnd: 84, measure: 72, labelEnd: 37, action: 40, actionEnd: 67 });
-    expect(F.grid(200)).toMatchObject({ laneW: 30, measure: 96, labelEnd: 48, action: 51, actionEnd: 137, figEnd: 199 });
+    expect(F.grid(200)).toMatchObject({ laneW: 30, measure: 96, labelEnd: 78, action: 81, actionEnd: 137, figEnd: 199 }); // wide: titles get the room past a 50-cell action column
     // The header's wide blocks end at column 104, so they need 150 columns; from 130 to 149 the lane sits where they would end.
     for (const W of [130, 140, 149]) expect(F.grid(W)).toMatchObject({ account: 42, machineEnd: 38, gaugeW: 8, histW: 12, accountEnd: W - 46 });
     expect(F.grid(200)).toMatchObject({ account: 61, machineEnd: 57, gaugeW: 12, histW: 20, accountEnd: 154 });
@@ -2219,6 +2219,7 @@ describe("header and chrome", () => {
   }, 30_000);
 
   test("an ended workflow shows ✓ or ✗ in place of ≡, and step glyphs are ticks, never dots", () => {
+    F.seen.clearedAt = 0; // nothing cleared by an earlier space
     expect(strip(F.pips(2, 1, 6, 6))).toBe("✓✓◐○○○");
     expect(strip(F.pips(6, 0, 6, 6))).toBe("✓✓✓✓✓✓");
     expect(F.cells(F.pips(40, 3, 60, 20))).toBe(20); // scaled past the width it is given
@@ -2722,6 +2723,7 @@ describe("the detail view", () => {
   });
 
   test("a workflow that has ended: ✓ or ✗ in place of ≡, and how it ended in place of the trail", () => {
+    F.seen.clearedAt = 0; // nothing cleared by an earlier space
     quietly(() => {
       const s = busy(NOW);
       const ended = (id: string, name: string, status: string, tokens?: number): F.Workflow => ({ ...s.workflows[0], id, name, status, tokens, finished: NOW - 4 * MIN, lastT: NOW - 4 * MIN, agents: s.workflows[0].agents.slice(0, 2) });
@@ -2735,6 +2737,31 @@ describe("the detail view", () => {
       expect(badRow).toContain(F.fg(F.C.red, "failed"));
       expect(okRow).not.toContain("≡");
     });
+  });
+
+  test("space clears away workflows that were killed, stopped or failed; a completed one stays; one resumed since is back", () => {
+    quietly(() => {
+      const s = busy(NOW);
+      const ended = (id: string, name: string, status: string, lastT = NOW - 4 * MIN): F.Workflow => ({ ...s.workflows[0], id, name, status, finished: NOW - 4 * MIN, lastT, agents: s.workflows[0].agents });
+      const names = () => F.buildViews([s], NOW)[0].groups.map((g) => g.wf?.name).filter(Boolean);
+      s.workflows = [ended("wf_2", "link-check", "completed"), ended("wf_3", "reindex-preview", "killed"), ended("wf_4", "lint-sweep", "failed")];
+      F.seen.clearedAt = 0;
+      expect(names()).toEqual(["link-check", "reindex-preview", "lint-sweep"]);
+      F.markSeen(NOW - MIN); // space
+      expect(names()).toEqual(["link-check"]);
+      s.workflows[1] = ended("wf_3", "reindex-preview", "killed", NOW - 10_000); // picked up again: writing after the space
+      expect(names()).toEqual(["link-check", "reindex-preview"]);
+      F.seen.clearedAt = 0;
+    });
+  });
+
+  test("the splash's streak lights the F and nothing else, and only while it sweeps", () => {
+    const plain = F.logoRows(), lit = F.logoRows(0.5);
+    expect(F.logoRows(undefined)).toEqual(plain);
+    expect(lit).not.toEqual(plain);
+    const pad = (rows: string[]) => rows.map((r) => r.match(/ +$/)?.[0] ?? ""); // the cells beside the letter
+    expect(pad(lit)).toEqual(pad(plain));
+    expect([F.shineAt(0), F.shineAt(F.SHINE_MS / 2), F.shineAt(F.SHINE_MS + 10), F.shineAt(1600)]).toEqual([0, 0.5, undefined, 0]);
   });
 
   test("with no left stack the context row still shows, with the key and the figures on its left", () => {

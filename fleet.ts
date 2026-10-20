@@ -571,7 +571,8 @@ export function grid(W: number): Grid {
   const laneEnd = lane + laneW - 1;
   const textEnd = lane - 3;
   const actionEnd = textEnd - (wide ? 17 : 0);
-  const labelEnd = 7 + Math.min(42, Math.floor((actionEnd - 6) * 0.52)) - 1;
+  // Labels (agent names, workflow titles) take about half; once the action column has 50 cells, the rest goes to them, to 72.
+  const labelEnd = 7 + Math.min(72, Math.max(Math.min(42, Math.floor((actionEnd - 6) * 0.52)), actionEnd - 6 - 50)) - 1;
   // The header's wide blocks run to column 104, which the lane leaves free only from 150 columns up. From 130 to 149 the header keeps the narrow blocks.
   const roomy = textEnd >= 104;
   const account = roomy ? 61 : 42;
@@ -3018,6 +3019,7 @@ export interface FleetEvent {
 }
 export const seen = {
   at: 0, // the mark: launch, then the last press of space
+  clearedAt: 0, // the last press of space: workflows that ended badly before it are cleared away
   events: [] as FleetEvent[], // everything new since the mark, oldest first
   known: new Map<string, string>(), // what each thing looked like at the last scan
   primed: false, // false until the first scan has set the baseline
@@ -3025,6 +3027,7 @@ export const seen = {
 /** "Seen it": move the mark to now and forget what came before it. */
 export function markSeen(now: number) {
   seen.at = now;
+  seen.clearedAt = now;
   seen.events = [];
   heldOpen.clear(); // the finished sessions you have now seen go quietly
   for (const sid of quietSince.keys()) wasShown.delete(sid);
@@ -3236,7 +3239,9 @@ export function buildViews(sessions: Session[], now: number, since = frameWindow
       for (const wf of s.workflows) {
         const live = wf.status === "running" && (wf.lastT >= since || wf.agents.some((a) => stall.threads.includes(a.id)));
         const justFinished = wf.status !== "running" && Math.max(wf.finished, wf.lastT) >= since;
-        if (live || justFinished) groups.push({ wf, rows: pick(wf.agents, stall.threads), hidden: 0 }); // a stalled agent is the last to be folded away
+        // Killed, stopped or failed before your last space: cleared away; one resumed since writes again, and is back.
+        const cleared = wfOutcome(wf) === "failed" && Math.max(wf.finished, wf.lastT) <= seen.clearedAt;
+        if ((live || justFinished) && !cleared) groups.push({ wf, rows: pick(wf.agents, stall.threads), hidden: 0 }); // a stalled agent is the last to be folded away
       }
       groups.sort((a, b) => a.wf!.started - b.wf!.started);
       const solo = pick(s.agents, stall.threads);
@@ -8946,12 +8951,17 @@ function logoColour(r: number, c: number): RGB {
   if (r === 3 || r === 4) return c < 3 ? [31, 138, 235] : mix([24, 168, 224], [60, 240, 138], clamp01((c - 3) / 12));
   return mix([31, 123, 255], [123, 60, 255], clamp01((r - 2) / (LOGO_MASK.length - 2)));
 }
-export function logoRows(): string[] {
+/** The logo; with `shine` (0 to 1 through a sweep), a slanted streak of light crosses the F, the letter only. */
+export function logoRows(shine?: number): string[] {
+  const SLANT = 1.4, HALF = 2.2; // the streak leans like the web splash's (cells are twice as tall as wide), and is this wide
+  const from = -SLANT * LOGO_MASK.length - HALF, to = LOGO_W + HALF;
+  const at = shine === undefined ? undefined : from + (to - from) * shine;
   return LOGO_MASK.map((row, r) => {
     let out = "";
     for (let c = 0; c < row.length; c++) {
       const ch = row[c];
-      const [cr, cg, cb] = logoColour(r, c);
+      const glow = at === undefined ? 0 : clamp01(1 - Math.abs(c + r * SLANT - at) / HALF) ** 1.5 * 0.85;
+      const [cr, cg, cb] = glow ? mix(logoColour(r, c), [255, 255, 255], glow) : logoColour(r, c);
       if (ch === "/") out += fg([cr, cg, cb], "◤");
       else if (ch === ">" || ch === "_") out += `\x1b[48;2;${cr};${cg};${cb}m\x1b[1m${fg([255, 255, 255], ch)}\x1b[22m\x1b[49m`;
       else out += `\x1b[48;2;${cr};${cg};${cb}m \x1b[49m`;
@@ -8960,13 +8970,13 @@ export function logoRows(): string[] {
   });
 }
 /** The splash: the logo, the name, what fleet is doing, and how far through the sessions it is. */
-export function splashScreen(cols: number, rows: number, doing: string, done = 0, total = 0): string[] {
+export function splashScreen(cols: number, rows: number, doing: string, done = 0, total = 0, shine?: number): string[] {
   const W = Math.max(30, cols);
   const centre = (s: string, w: number) => " ".repeat(Math.max(0, Math.floor((W - w) / 2))) + s;
   const BAR = 30;
   const filled = total ? Math.round((done / total) * BAR) : 0;
   const body = [
-    ...logoRows().map((l) => centre(l, LOGO_W)),
+    ...logoRows(shine).map((l) => centre(l, LOGO_W)),
     "",
     centre(fg(C.white, bold("C L A U D E   F L E E T")), 23),
     "",
@@ -8978,6 +8988,9 @@ export function splashScreen(cols: number, rows: number, doing: string, done = 0
   while (out.length < rows) out.push("");
   return out.slice(0, rows).map((l) => clipRow(l, W));
 }
+/** The splash's streak: a quick sweep, again every 1.6 s while fleet is still starting; undefined between sweeps. */
+export const SHINE_MS = 650;
+export const shineAt = (ms: number): number | undefined => (ms % 1600 < SHINE_MS ? (ms % 1600) / SHINE_MS : undefined);
 /** Called by the scan as it reads each session, while the splash is up. */
 export let scanProgress: ((done: number, total: number, name: string) => void) | undefined;
 export const setScanProgress = (f: typeof scanProgress) => (scanProgress = f);
@@ -9975,13 +9988,22 @@ if (import.meta.main) {
   }
 
   // The splash, up at once and written straight to the terminal: the steps below, and the first read, block for a while.
-  let splashAt = 0;
+  let splashAt = 0, last = { doing: "", done: 0, total: 0 };
+  const splashFrom = Date.now();
   const splash = (doing: string, done = 0, total = 0, force = true) => {
-    if (!force && Date.now() - splashAt < 60) return;
+    if (!force && Date.now() - splashAt < 33) return;
     splashAt = Date.now();
+    last = { doing, done, total };
     try {
-      fs.writeSync(1, "\x1b[H" + splashScreen(process.stdout.columns || 140, process.stdout.rows || 45, doing, done, total).map((l) => l + "\x1b[K").join("\r\n"));
+      fs.writeSync(1, "\x1b[H" + splashScreen(process.stdout.columns || 140, process.stdout.rows || 45, doing, done, total, shineAt(Date.now() - splashFrom)).map((l) => l + "\x1b[K").join("\r\n"));
     } catch {}
+  };
+  // Ready mid-sweep: the streak runs to its end first (a frame every 33 ms, at most a sweep), so it is never cut off.
+  const finishShine = () => {
+    for (let ms = Date.now() - splashFrom; shineAt(ms) !== undefined; ms = Date.now() - splashFrom) {
+      splash(last.doing, last.done, last.total);
+      Bun.sleepSync(33);
+    }
   };
   const leaveSplash = () => {
     try {
@@ -10124,6 +10146,7 @@ if (import.meta.main) {
 
   refresh(); // the first read, under the splash
   setScanProgress(undefined);
+  finishShine();
   process.off("SIGINT", leaveSplash);
   clear();
   retitle();
