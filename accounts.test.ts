@@ -137,6 +137,32 @@ describe("reading an account", () => {
   });
 });
 
+describe("renewing a login", () => {
+  test("starts Claude Code in the account's folder, unseen, closes it, reads again; not again within a quarter hour", async () => {
+    if (Bun.spawnSync(["tmux", "-V"]).exitCode !== 0) return; // needs tmux, as the fleet does
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-renew-"));
+    const seen = path.join(dir, "seen");
+    const fake = path.join(dir, "claude");
+    fs.writeFileSync(fake, `#!/bin/sh\necho "$CLAUDE_CONFIG_DIR" > "${seen}"\nsleep 30\n`, { mode: 0o755 });
+    const a = { name: "work", dir: path.join(dir, ".claude-work") };
+    process.env.FLEET_RENEW_CMD = fake;
+    try {
+      A.stateOf(a).nextTry = Date.now() + 3_600_000;
+      expect(A.renewLogin(a, Date.now(), 400)).toBe(true);
+      expect(A.renewLogin(a, Date.now(), 400)).toBe(false); // under way
+      await Bun.sleep(1200);
+      expect(fs.readFileSync(seen, "utf8").trim()).toBe(a.dir);
+      expect([A.renewedAt(a)?.running, A.stateOf(a).nextTry]).toEqual([false, 0]); // closed, and to be read again
+      expect(A.renewLogin(a, Date.now(), 400)).toBe(false); // too soon
+      expect(A.renewLogin(a, Date.now() + A.RENEW_EVERY_MS + 1, 400)).toBe(true);
+      await Bun.sleep(900);
+    } finally {
+      delete process.env.FLEET_RENEW_CMD;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("the accounts screen", () => {
   test("this Mac first, then each listed account with its email; how to add one when none are listed", async () => {
     const was = F.opt.usage;
