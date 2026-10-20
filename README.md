@@ -188,6 +188,27 @@ It is built to be safe to leave running:
 - Otherwise it serves only the page, its data and its icons.
 - It stops when fleet quits. With several fleets open, the first serves the page and the others show the same link; when it quits, another takes the page over within ten seconds.
 
+## Talk to Fleet
+
+With an OpenAI key, the phone page can talk. Tap the microphone at the top and the page becomes a voice screen, an orb
+that moves as you and Fleet speak, and you can ask about your sessions out loud: what needs you, what a workflow is up
+to, what the flaky test hunt found, how long until the five-hour limit runs out. Fleet answers from the dashboard's own
+data, through tools: the whole fleet, one session in full (its conversation, tasks, agents, pull requests), the usage
+limits, the choices on a waiting session's screen. A harder question (what to look at first, what changed since lunch)
+goes to a reasoning model with all of the fleet's data. Fleet can also answer for you, typing a message into a session
+or pressing one of its choices, but only after saying back exactly what it will do and hearing you say yes.
+
+- **Turning it on:** put `OPENAI_API_KEY=…` in a `.env` beside `fleet.ts` (git ignores it), or in the environment. The
+  microphone appears on the page within a few seconds.
+- **What it uses:** `gpt-realtime-2.1` for the conversation, in the `cedar` voice, with `gpt-live-transcribe` for captions, and
+  `gpt-6-luna` at medium effort for the harder questions; each can be changed (see Environment, below).
+- **Your key stays on your Mac.** The phone talks to OpenAI directly (WebRTC), with a key fleet makes for that one
+  conversation, valid for ten minutes.
+- **HTTPS.** A phone lets a page use its microphone only over HTTPS, so fleet also serves the page at
+  `https://<this Mac's Tailscale name>:4778` with the certificate Tailscale issues for it (renewed daily; HTTPS must be
+  on for your tailnet, in Tailscale's admin under DNS). `w` shows that link. Open over plain `http://`, the voice screen
+  offers to switch.
+
 ## On your glasses
 
 Fleet runs on [Even Realities G2](https://www.evenrealities.com) glasses too, two ways. To try it, press `w`, then `g`, and
@@ -420,6 +441,13 @@ These environment variables exist for tests and screenshots only:
 | `FLEET_WEB_TOKEN_FILE` | Where the phone page's secret is kept (default `~/.config/claude-fleet/web-token`). |
 | `FLEET_WEB_PORT` | The first port to try for the phone page (default 4777). |
 | `FLEET_APP_ORIGINS` | Origins, comma-separated, the installed glasses app may call fleet from, beyond those it allows already (an app's own scheme, `file:`, `null`). Only needed if the service log says it refused your glasses app. |
+| `OPENAI_API_KEY` | Turns on voice on the phone page (also read from a `.env` beside `fleet.ts`). Never sent, logged or shown: the phone gets a key for one conversation at a time. |
+| `FLEET_VOICE_MODEL` | The realtime model Fleet speaks with (default `gpt-realtime-2.1`). |
+| `FLEET_VOICE` | Fleet's voice (default `cedar`; OpenAI's realtime voices are alloy, ash, ballad, coral, echo, sage, shimmer, verse, marin and cedar). |
+| `FLEET_VOICE_TRANSCRIBE` | The model that captions what you say (default `gpt-live-transcribe`). |
+| `FLEET_THINK_MODEL` | The reasoning model Fleet hands harder questions to (default `gpt-6-luna`). |
+| `FLEET_THINK_EFFORT` | Its reasoning effort (default `medium`). |
+| `FLEET_WEB_TLS` | `0` turns off the page's HTTPS server (fleet's port plus one, with Tailscale's certificate for this Mac). |
 | `FLEET_PARTY` | Start a celebration at launch, as `session id=what it finished`, so a single frame can show one (the demo's `--party`). |
 | `FLEET_FOCUS` | Start focused on the session with this id, so a single frame can show focus (the demo's `--focus`). |
 | `FLEET_GIT_FIXTURE` | Take each checkout's `git status --porcelain -b` output from this JSON file (folder to text) instead of running git. |

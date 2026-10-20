@@ -5333,6 +5333,50 @@ describe("key w: the phone page", () => {
     expect(F.GLASSES_PAGE).not.toMatch(/__TOKEN__/);
   });
 
+  test("voice: offered with an OpenAI key, its endpoints need the secret and the page's origin, and say why without a key", async () => {
+    const saved = process.env.OPENAI_API_KEY;
+    process.env.FLEET_WEB_HOST = "127.0.0.1";
+    process.env.FLEET_WEB_PORT = "4981";
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-voice-"));
+    process.env.FLEET_WEB_TOKEN_FILE = path.join(dir, "web-token");
+    for (const k of ["server", "url", "error"] as const) delete (F.web as any)[k];
+    const web = F.startWeb(() => [], () => Date.now());
+    try {
+      const token = new URL(web.url!).searchParams.get("t")!;
+      process.env.OPENAI_API_KEY = "";
+      delete process.env.OPENAI_API_KEY;
+      const noKey = F.openAIKey() === ""; // unless a .env beside fleet.ts has one
+      if (noKey) expect(F.webState([], Date.now()).voice).toBe(false);
+      process.env.OPENAI_API_KEY = "sk-test-not-a-real-key";
+      expect(F.webState([], Date.now()).voice).toBe(true);
+      expect(F.webState([], Date.now()).secure).toBeNull(); // tests and the demo serve no HTTPS
+      const post = (q: string, headers: Record<string, string> = {}) => fetch(`http://127.0.0.1:4981/api/voice/session${q}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: "{}" });
+      expect((await post("?t=wrong")).status).toBe(403);
+      expect((await post(`?t=${token}`, { origin: "https://evil.example" })).status).toBe(403);
+      expect((await fetch(`http://127.0.0.1:4981/api/voice/think?t=${token}`, { method: "POST", headers: { "content-type": "text/plain" }, body: "{}" })).status).toBe(403);
+      delete process.env.OPENAI_API_KEY;
+      if (noKey) expect(await (await post(`?t=${token}`)).json()).toEqual({ ok: false, error: "no OpenAI key: put OPENAI_API_KEY in fleet's .env" });
+      expect(F.WEB_PAGE).toContain('id="mic"');
+      expect(F.WEB_PAGE).toContain("https://api.openai.com/v1/realtime/calls");
+      expect(F.WEB_PAGE).not.toContain("OPENAI_API_KEY"); // the page never sees the key
+      expect(fs.readFileSync(path.join(here, ".gitignore"), "utf8").split("\n")).toContain(".env");
+    } finally {
+      web.server?.stop(true);
+      if (saved === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = saved;
+      delete process.env.FLEET_WEB_HOST;
+      delete process.env.FLEET_WEB_PORT;
+      delete process.env.FLEET_WEB_TOKEN_FILE;
+    }
+  });
+
+  test("pairing from one of your own devices (Tailscale says so) needs no code approved, and asks nothing on Telegram", () => {
+    const p = F.pairStart(Date.now(), true)!;
+    expect(p.status).toBe("approved");
+    expect(F.pairsPending().map((x) => x.id)).not.toContain(p.id);
+    expect(F.pairPoll(p.id, "secret")).toEqual({ status: "approved", token: "secret" });
+  });
+
   test("the page builds no markup from data, so text from a session cannot become HTML", () => {
     expect(F.WEB_PAGE).not.toContain("innerHTML");
     expect(F.WEB_PAGE).not.toContain("insertAdjacentHTML");
