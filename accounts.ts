@@ -3,14 +3,15 @@
 // Each other account is a Claude Code config folder of its own (CLAUDE_CONFIG_DIR=~/.claude-work claude,
 // then /login), listed in ~/.config/claude-fleet/accounts.json. The fleet reads each folder's stored login
 // the way it reads this Mac's own: held in memory for one request to Anthropic's usage address, never
-// refreshed, written, logged or printed. So the login you are working in is never touched, and an
-// expired login says so and waits for a Claude Code session in that folder to renew it.
+// refreshed, written, logged or printed by the fleet. A login that has expired, or soon will, is renewed the
+// way Claude Code renews its own: the fleet starts Claude Code in that folder, unseen, for a few seconds and
+// closes it again (no message is sent), then reads the figures afresh.
 
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import {
   C,
@@ -49,6 +50,7 @@ import {
   type Reading,
   type Seg,
   type UsageFigures,
+  svcLog,
 } from "./fleet.ts";
 
 const ACCOUNTS_HELP = `Every Claude account's usage on one screen (key u in the fleet shows the same).
@@ -228,6 +230,40 @@ export const stateOf = (a: AccountConfig): AccountState => {
   return st;
 };
 
+/** Renewals: when each account last had one, and whether it is under way. At most one every quarter of an hour. */
+const renewals = new Map<string, { at: number; running: boolean }>();
+export const RENEW_EVERY_MS = 15 * 60_000;
+/**
+ * Renew an account's login: Claude Code started in its folder (CLAUDE_CONFIG_DIR) in a tmux of its own, from a
+ * scratch folder, unseen, and closed after `holdMs`. Claude Code renews its login as it starts; no message is
+ * sent, so no usage is spent. Then the account is read again. False when it is too soon to try again, or tmux
+ * is not to be had. FLEET_RENEW_CMD stands in for claude (tests).
+ */
+export function renewLogin(a: AccountConfig, now = Date.now(), holdMs = 10_000): boolean {
+  const was = renewals.get(keyOf(a));
+  if (was && (was.running || now - was.at < RENEW_EVERY_MS)) return false;
+  const server = ["-L", `fleet-renew-${createHash("sha256").update(a.dir).digest("hex").slice(0, 8)}`];
+  const scratch = path.join(os.tmpdir(), "claude-fleet-renew");
+  try {
+    fs.mkdirSync(scratch, { recursive: true });
+  } catch {}
+  spawnSync("tmux", [...server, "kill-server"], { timeout: 3000 });
+  const claude = process.env.FLEET_RENEW_CMD || "claude";
+  const started = spawnSync("tmux", [...server, "new-session", "-d", "-x", "120", "-y", "40", "-c", scratch, "env", `CLAUDE_CONFIG_DIR=${a.dir}`, claude], { timeout: 5000 });
+  if (started.status !== 0) return false;
+  renewals.set(keyOf(a), { at: now, running: true });
+  svcLog(`renewing the ${a.name} login: Claude Code started in ${tilde(a.dir)} for ${Math.round(holdMs / 1000)}s`);
+  setTimeout(() => {
+    spawn("tmux", [...server, "kill-server"], { stdio: "ignore" }).on("close", () => {
+      renewals.set(keyOf(a), { at: now, running: false });
+      stateOf(a).nextTry = 0; // read it again now
+    });
+  }, holdMs);
+  return true;
+}
+/** When an account's login was last renewed (tests and the screen). */
+export const renewedAt = (a: AccountConfig) => renewals.get(keyOf(a));
+
 /** One read for an account: its own keychain entries and login file, then Anthropic. FLEET_USAGE_FAIL and FLEET_USAGE_FIXTURE stand in, as for the fleet's own read. */
 async function readAccount(
   a: AccountConfig,
@@ -245,13 +281,15 @@ async function readAccount(
     keychainServices(a),
     path.join(a.dir, ".credentials.json"),
   );
-  // The fleet's wording says any Claude Code session renews an expired login; here it has to be one in this account's folder.
-  if (
-    "login" in found &&
-    found.login.expiresAt &&
-    found.login.expiresAt < Date.now()
-  )
-    return { reason: `token expired · run claude in ${tilde(a.dir)}` };
+  // An expired login is renewed (Claude Code started in its folder, unseen); one that expires within half an hour is
+  // renewed ahead of time, and read meanwhile. Only when a renewal has not helped is the fix left to you.
+  if ("login" in found && found.login.expiresAt) {
+    const left = found.login.expiresAt - Date.now();
+    if (left < 30 * 60_000) {
+      const renewing = renewLogin(a) || !!renewedAt(a)?.running;
+      if (left < 0) return { reason: renewing ? "token expired · renewing…" : `token expired · run claude in ${tilde(a.dir)}` };
+    }
+  }
   return askAnthropic(found, now);
 }
 
