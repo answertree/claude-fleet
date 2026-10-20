@@ -9990,25 +9990,36 @@ if (import.meta.main) {
     process.exit(0);
   }
 
-  // The splash, up at once and written straight to the terminal: the steps below, and the first read, block for a while.
-  let splashAt = 0, last = { doing: "", done: 0, total: 0 };
+  // The splash, up at once: the steps below, and the first read, block the main thread for a while (for seconds, with
+  // huge sessions), so after its first frame it is drawn by a thread of its own (splash.worker.ts) at a steady pace,
+  // and this thread only says what it is doing. Without workers, it is drawn from here as things happen.
   const splashFrom = Date.now();
-  const splash = (doing: string, done = 0, total = 0, force = true) => {
-    if (!force && Date.now() - splashAt < 33) return;
-    splashAt = Date.now();
-    last = { doing, done, total };
+  let splashAt = 0, painter: Worker | undefined;
+  const paint = (doing: string, done = 0, total = 0) => {
     try {
       fs.writeSync(1, "\x1b[H" + splashScreen(process.stdout.columns || 140, process.stdout.rows || 45, doing, done, total, shineAt(Date.now() - splashFrom)).map((l) => l + "\x1b[K").join("\r\n"));
     } catch {}
   };
-  // Ready mid-sweep: the streak runs to its end first (a frame every 33 ms, at most a sweep), so it is never cut off.
-  const finishShine = () => {
-    for (let ms = Date.now() - splashFrom; shineAt(ms) !== undefined; ms = Date.now() - splashFrom) {
-      splash(last.doing, last.done, last.total);
-      Bun.sleepSync(33);
-    }
+  const splash = (doing: string, done = 0, total = 0, force = true) => {
+    if (painter) return void painter.postMessage({ type: "state", doing, done, total });
+    if (!force && Date.now() - splashAt < 33) return;
+    splashAt = Date.now();
+    paint(doing, done, total);
+  };
+  // Done: the streak runs to the end of its sweep (at most a second's wait), then the screen is this thread's again.
+  const finishShine = async () => {
+    const p = painter;
+    if (!p) return;
+    painter = undefined;
+    await new Promise<void>((done) => {
+      const stop = setTimeout(done, 1000);
+      p.onmessage = (e) => e.data === "done" && (clearTimeout(stop), done());
+      p.postMessage({ type: "finish" });
+    });
+    p.terminate();
   };
   const leaveSplash = () => {
+    painter?.terminate();
     try {
       fs.writeSync(1, leaveScreen(false));
     } catch {}
@@ -10017,6 +10028,12 @@ if (import.meta.main) {
   process.on("SIGINT", leaveSplash); // Ctrl-C before the screen is set up: the terminal back as it was
   fs.writeSync(1, enterScreen(opt.mouse));
   splash("starting");
+  try {
+    painter = new Worker(new URL("./splash.worker.ts", import.meta.url).href);
+    painter.postMessage({ type: "start", from: splashFrom, cols: process.stdout.columns || 140, rows: process.stdout.rows || 45 });
+  } catch {
+    painter = undefined;
+  }
   // The phone page is always on (key w shows its link), except for made-up sessions (the demo and tests) or FLEET_WEB=0.
   if (!process.env.FLEET_HOME && process.env.FLEET_WEB !== "0") {
     splash("opening the page for your phone");
@@ -10149,7 +10166,7 @@ if (import.meta.main) {
 
   refresh(); // the first read, under the splash
   setScanProgress(undefined);
-  finishShine();
+  await finishShine();
   process.off("SIGINT", leaveSplash);
   clear();
   retitle();
