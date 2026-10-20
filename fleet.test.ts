@@ -5288,8 +5288,9 @@ describe("key w: the phone page", () => {
     expect(F.pairPoll(b.id, "secret", 6000)).toEqual({ status: "denied" });
     expect(F.pairPoll(F.pairStart(7000)!.id, "secret", 7000 + 11 * 60_000)).toEqual({ status: "expired" }); // ten minutes
     // Which origins are an installed app's.
-    expect(["null", "evenhub://app", "file://", "capacitor://localhost"].map(F.appOrigin)).toEqual([true, true, true, true]);
-    expect(["https://evil.example", "http://127.0.0.1:9", null].map(F.appOrigin)).toEqual([false, false, false]);
+    // The Even app serves an installed app from the phone's own loopback, on a port of its choosing.
+    expect(["null", "evenhub://app", "file://", "capacitor://localhost", "http://127.0.0.1:61242", "http://localhost:8080"].map(F.appOrigin)).toEqual([true, true, true, true, true, true]);
+    expect(["https://evil.example", "http://127.0.0.2:9", "http://127.0.0.1.evil.example", "https://127.0.0.1:443", null].map(F.appOrigin)).toEqual([false, false, false, false, false]);
     // Over HTTP.
     process.env.FLEET_WEB_HOST = "127.0.0.1";
     process.env.FLEET_WEB_PORT = "4979";

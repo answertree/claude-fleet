@@ -7254,11 +7254,13 @@ const timedRequest = (handle: (req: Request, srv: any) => Promise<Response>) => 
 // that package's origin, not fleet's, and it carries no secret (the package is uploaded to Even). It pairs instead: the
 // glasses show a code, you approve it on Telegram or the Fleet page, and the app keeps the secret in its own storage.
 
-/** Origins the installed app may call from: not a web site (an app's own scheme, file:, or "null", as an app's own pages
- *  have), or one named in FLEET_APP_ORIGINS (comma-separated). Other sites stay refused, as before. */
+/** Origins the installed app may call from: the device's own loopback, on any port (the Even app serves an installed app
+ *  from a small server on the phone itself, http://127.0.0.1:<port>), an app's own scheme, file: or "null" (as an app's
+ *  own pages have), or one named in FLEET_APP_ORIGINS (comma-separated). Web sites stay refused, as before. */
 export function appOrigin(origin: string | null): boolean {
   if (!origin) return false;
   if (origin === "null" || !/^https?:\/\//i.test(origin)) return true;
+  if (/^http:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(origin)) return true; // only what runs on that device has this origin
   return (process.env.FLEET_APP_ORIGINS ?? "").split(",").map((x) => x.trim()).filter(Boolean).includes(origin);
 }
 /** The paths the installed app uses: answered to its origin, and asked of first (a preflight) when it sends JSON. */
