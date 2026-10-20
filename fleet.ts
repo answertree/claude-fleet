@@ -8756,18 +8756,31 @@ export async function serveWorker(): Promise<never> {
   // Every two seconds, as the terminal does; twice a second while the phone page or the glasses are looking. Never
   // back to back: after a scan the thread rests at least half as long again, so with huge sessions the page and the
   // bot still get their turn. A scan over a second is logged (at most every five minutes) with what took the time.
-  let slowSaid = 0;
+  let slowSaid = 0, scanning = false, lastScanMs = 0;
   const pace = () => {
     const a = performance.now();
+    scanning = true;
     refresh();
-    const took = performance.now() - a;
-    if (took > 1000 && Date.now() - slowSaid > 5 * 60_000) {
+    scanning = false;
+    const took = (lastScanMs = performance.now() - a);
+    if (took > 400 && Date.now() - slowSaid > 30_000) {
       slowSaid = Date.now();
       svcLog(`a scan took ${Math.round(took)} ms: ${refreshLaps.filter(([, ms]) => ms >= 20).map(([n, ms]) => `${n} ${Math.round(ms)} ms`).join(", ") || "no one step"}`);
     }
     setTimeout(pace, Math.max(Date.now() - web.watchedAt < 10_000 ? 500 : 2000, took * 1.5));
   };
   setTimeout(pace, 500);
+  // A watchdog: a timer that should fire every 100 ms. When it fires late the thread was held, by a scan or by
+  // something else (a reply to the bot, a request), and the log says which, at most every 30 s.
+  let tickAt = performance.now(), heldSaid = 0;
+  setInterval(() => {
+    const late = performance.now() - tickAt - 100;
+    tickAt = performance.now();
+    if (late > 300 && Date.now() - heldSaid > 30_000) {
+      heldSaid = Date.now();
+      svcLog(`the thread was held ${Math.round(late)} ms${lastScanMs > late * 0.6 ? ` by a scan (${Math.round(lastScanMs)} ms: ${refreshLaps.filter(([, ms]) => ms >= 20).map(([n, ms]) => `${n} ${Math.round(ms)}`).join(", ")})` : " by something other than a scan"}`);
+    }
+  }, 100);
   // Back to the code on disk when any of it changes (fleet.ts, accounts.ts…): stop, and the supervisor starts the new one.
   const code = () => fs.readdirSync(import.meta.dir).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts") && f !== "demo.ts");
   const stamp = () => code().map((f) => `${f}:${fs.statSync(path.join(import.meta.dir, f)).mtimeMs}`).join(" ");
