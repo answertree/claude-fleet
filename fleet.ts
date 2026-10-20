@@ -7086,6 +7086,22 @@ export async function startSession(cwd: string, prompt: string): Promise<Reach> 
 }
 
 let stateCache: { at: number; body: string; gz?: Uint8Array } | undefined;
+/** Something that held the thread over 300 ms, for the service log (at most every 30 s). */
+let slowSaidAt = 0;
+export function noteSlow(what: string, ms: number) {
+  if (ms < 300 || Date.now() - slowSaidAt < 30_000 || !isServiceWorker) return;
+  slowSaidAt = Date.now();
+  svcLog(`${what} took ${Math.round(ms)} ms`);
+}
+/** The page's request handler, timed: a slow one names itself in the log (the path, never the secret). */
+const timedRequest = (handle: (req: Request, srv: any) => Promise<Response>) => async (req: Request, srv: any): Promise<Response> => {
+  const a = performance.now();
+  try {
+    return await handle(req, srv);
+  } finally {
+    noteSlow(`a request for ${new URL(req.url).pathname}`, performance.now() - a);
+  }
+};
 /** Start serving the page (once). Every request must carry the secret; anything but the page and its data is a 404. */
 export function startWeb(getSessions: () => Session[], now: () => number = clock): typeof web {
   if (web.server || web.error || web.shared) return web;
@@ -7106,7 +7122,7 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
       const server = Bun.serve({
         hostname: host,
         port,
-        async fetch(req, srv) {
+        fetch: timedRequest(async (req: Request, srv: any): Promise<Response> => {
           const url = new URL(req.url);
           // Another of your machines: allowed when Tailscale says the request comes from your own Tailscale user.
           if (url.pathname.startsWith("/peer/")) {
@@ -7185,7 +7201,7 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
           if (url.pathname === "/glasses") return new Response(GLASSES_PAGE, { headers: { ...headers, "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" } });
           if (url.pathname === "/api/glasses") return (web.watchedAt = Date.now()), Response.json(glassesState(getSessions(), now()), { headers });
           return new Response("not found", { status: 404, headers });
-        },
+        }),
       });
       Object.assign(web, { server, host, onTailnet: !!tail, url: `http://${host}:${port}/?t=${token}`, shared: false });
       return true;
@@ -7774,7 +7790,9 @@ async function tgPoll() {
       tg.status = "";
       for (const u of r.result ?? []) {
         offset = Math.max(offset, u.update_id + 1);
+        const a = performance.now();
         await tgHandle(u).catch(() => {});
+        noteSlow(`a Telegram ${u.callback_query ? "button" : "message"} (${String(u.message?.text ?? u.callback_query?.data ?? "").split(/\s/)[0].slice(0, 20)})`, performance.now() - a);
       }
     }
   } finally {
@@ -8797,12 +8815,11 @@ export async function serveWorker(): Promise<never> {
   // back to back: after a scan the thread rests at least half as long again, so with huge sessions the page and the
   // bot still get their turn. A scan over a second is logged (at most every five minutes) with what took the time.
   let slowSaid = 0, scanning = false, lastScanMs = 0;
-  const pace = () => {
-    const a = performance.now();
+  const pace = async () => {
     scanning = true;
-    refresh();
+    await refresh(true);
     scanning = false;
-    const took = (lastScanMs = performance.now() - a);
+    const took = (lastScanMs = refreshLaps.reduce((n, [, ms]) => n + ms, 0)); // its own time, not the answers given between its steps
     if (took > 400 && Date.now() - slowSaid > 30_000) {
       slowSaid = Date.now();
       svcLog(`a scan took ${Math.round(took)} ms: ${refreshLaps.filter(([, ms]) => ms >= 20).map(([n, ms]) => `${n} ${Math.round(ms)} ms`).join(", ") || "no one step"}`);
@@ -8818,7 +8835,7 @@ export async function serveWorker(): Promise<never> {
     tickAt = performance.now();
     if (late > 300 && Date.now() - heldSaid > 30_000) {
       heldSaid = Date.now();
-      svcLog(`the thread was held ${Math.round(late)} ms${lastScanMs > late * 0.6 ? ` by a scan (${Math.round(lastScanMs)} ms: ${refreshLaps.filter(([, ms]) => ms >= 20).map(([n, ms]) => `${n} ${Math.round(ms)}`).join(", ")})` : " by something other than a scan"}`);
+      svcLog(`the thread was held ${Math.round(late)} ms${Math.max(0, ...refreshLaps.map(([, ms]) => ms)) > late * 0.6 ? ` by a scan (${Math.round(lastScanMs)} ms: ${refreshLaps.filter(([, ms]) => ms >= 20).map(([n, ms]) => `${n} ${Math.round(ms)}`).join(", ")})` : " by something other than a scan"}`);
     }
   }, 100);
   // Back to the code on disk when any of it changes (fleet.ts, accounts.ts…): stop, and the supervisor starts the new one.
@@ -10017,9 +10034,13 @@ const lap = (name: string) => {
   refreshLaps.push([name, t - lapAt]);
   lapAt = t;
 };
-function refresh() {
+/** One read of everything. The service passes `yields`: it then pauses between steps, so the page and the bot are
+ *  answered between them and the longest wait is one step, not the whole read. Elsewhere it runs straight through. */
+async function refresh(yields = false) {
   refreshLaps = [];
   lapAt = performance.now();
+  // Only the service waits between steps: elsewhere there is no await at all, so the read is done when refresh() returns.
+  const breathe = () => new Promise<void>((r) => setImmediate(r)).then(() => void (lapAt = performance.now())); // time answering others is not this read's
   if (Date.now() >= retakeAt) {
     retakeAt = Date.now() + 10_000; // when the fleet serving the page or talking to the bot quits, this one takes over
     if (serviceRunning()) web.yieldPort?.();
@@ -10028,23 +10049,31 @@ function refresh() {
     staleCheck();
   }
   lap("claims");
+  if (yields) await breathe();
   const now = clock();
   const local = scan(now);
   lap("scan");
+  if (yields) await breathe();
   prune(now);
+  lap("prune");
   sampleMachine();
+  lap("machine");
+  if (yields) await breathe();
   pollSides(local, now, opt.once);
   lap(`git and PRs (git ${Math.round(sideCost.git)}, worktrees ${Math.round(sideCost.worktrees)}, prs ${Math.round(sideCost.prs)}, deploys ${Math.round(sideCost.deploys)} ms; ${sideCost.started} started)`);
+  if (yields) await breathe();
   // Your other machines' sessions join this one's; their git and pull requests were read by their own fleets.
   pollPeers(now);
   sessions = [...local, ...peerSessions()];
   const fresh = takeFreshPeers();
   lap("other machines");
+  if (yields) await breathe();
   holdStalls(sessions, now);
   steadyClock(now);
   if (opt.usage && !opt.once) tickUsage(now); // --once has already made its one read
   if (opt.usage && !opt.once) tickAccounts(now); // the other accounts in accounts.json, if any
   lap("usage");
+  if (yields) await breathe();
   // Ring once when a session starts waiting on the person, and once for each thing that newly stalls.
   const facts = sessions.map((s) => ({ s, f: factsOf(s) }));
   const asks = facts.filter((x) => x.f.needs).map((x): [string, number] => [x.s.sid, stateSince(x.s, x.f, "needs")]);
@@ -10055,6 +10084,7 @@ function refresh() {
   const stalled = newStalls(stalledNow, marks).filter((k) => !fresh.has(k.split("/")[0]));
   const rings = asked.length + stalled.length;
   lap("stalls");
+  if (yields) await breathe();
   const told = tgWanted ? tgEvents(sessions, asked, stalled) : []; // always, so what changed while another fleet held the bot is not news later
   const botHere = tgWanted && tg.on && (tg.paired = !!readTg().chat);
   if (botHere) {
@@ -10072,10 +10102,12 @@ function refresh() {
     tgSweep();
   }
   lap("telegram");
+  if (yields) await breathe();
   if (opt.bell && !opt.once) process.stdout.write("\x07".repeat(rings));
   noteScan(sessions, now);
   const partied = [...noteParties(sessions, now), ...noteFinished(sessions, now).map((sid) => `${sid} finished`)];
   lap("events");
+  if (yields) await breathe();
   if (botHere) void tgTick(sessions, now, partied);
   lap("telegram tick");
   if (opt.bell && !opt.once && partied.length) process.stdout.write("\x07");
