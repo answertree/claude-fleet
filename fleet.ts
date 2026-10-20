@@ -2062,15 +2062,22 @@ export function sampleMachine() {
   if (machine.hist.length > 120) machine.hist.shift();
   machine.load = os.loadavg()[0];
 
-  machine.memUsed = os.totalmem() - os.freemem();
+  if (!machine.memUsed) machine.memUsed = os.totalmem() - os.freemem();
+  // vm_stat and ps run in the background, at most every two seconds, and their last answers are used: run here and
+  // waited for, a slow ps (seconds, now and then) held the whole fleet, the page and the bot with it. --once waits.
+  const sync = opt.once;
+  if (!sync && (machineBusy || Date.now() - machineAt < 2000)) return;
+  machineAt = Date.now();
   try {
     if (process.platform === "darwin") {
       // "free" memory on macOS is mostly cache; count what apps, the kernel and the compressor hold.
-      const vm = spawnSync("vm_stat", { encoding: "utf8", timeout: 2000 }).stdout ?? "";
-      const page = Number(/page size of (\d+)/.exec(vm)?.[1] ?? 16384);
-      const pages = (label: string) => Number(new RegExp(label + ":\\s+(\\d+)").exec(vm)?.[1] ?? 0);
-      const used = (pages("Pages active") + pages("Pages wired down") + pages("Pages occupied by compressor")) * page;
-      if (used > 0) machine.memUsed = used;
+      machineBusy = true;
+      runFor("vm_stat", [], sync, (vm = "") => {
+        const page = Number(/page size of (\d+)/.exec(vm)?.[1] ?? 16384);
+        const pages = (label: string) => Number(new RegExp(label + ":\\s+(\\d+)").exec(vm)?.[1] ?? 0);
+        const used = (pages("Pages active") + pages("Pages wired down") + pages("Pages occupied by compressor")) * page;
+        machine.memUsed = used > 0 ? used : os.totalmem() - os.freemem();
+      });
     } else if (process.platform === "linux") {
       const info = fs.readFileSync("/proc/meminfo", "utf8");
       const kb = (label: string) => Number(new RegExp(label + ":\\s+(\\d+)").exec(info)?.[1] ?? 0);
@@ -2078,8 +2085,10 @@ export function sampleMachine() {
     }
   } catch {}
 
-  try {
-    const ps = spawnSync("ps", ["-axo", "pid=,ppid=,pcpu=,rss=,comm="], { encoding: "utf8", timeout: 3000, maxBuffer: 16 << 20 }).stdout ?? "";
+  machineBusy = true;
+  runFor("ps", ["-axo", "pid=,ppid=,pcpu=,rss=,comm="], sync, (ps) => {
+    machineBusy = false;
+    if (ps === undefined) return; // too slow or failed: the last sample stands
     const procs: Proc[] = [];
     const kids = new Map<number, Proc[]>();
     for (const line of ps.split("\n")) {
@@ -2092,8 +2101,9 @@ export function sampleMachine() {
     }
     machine.procs = procs;
     machine.kids = kids;
-  } catch {}
+  });
 }
+let machineAt = 0, machineBusy = false;
 
 /** CPU and memory of a process and everything it started. `known` is false when the process was not in the last sample. */
 /** A session's process tree usage: measured here, or by the fleet on its own machine. */
