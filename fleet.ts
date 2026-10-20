@@ -1283,9 +1283,38 @@ export interface Agent {
   wf?: string;
   phase?: string; // the workflow phase it was started in
 }
+/** What a workflow says it does: its state file's description, or its script's meta.description (from the state file's
+ *  copy of the script, else the script itself). Read once per workflow: scans come twice a second. */
+const wfDescs = new Map<string, string>();
+const metaDescription = (script: unknown): string => {
+  if (typeof script !== "string") return "";
+  const m = /export\s+const\s+meta\s*=\s*\{[\s\S]*?\bdescription\s*:\s*(['"`])((?:\\.|(?!\1)[\s\S])*)\1/.exec(script);
+  return m ? m[2].replace(/\\(.)/g, "$1") : "";
+};
+export function wfDescription(id: string, state: any, scriptPath: () => string | undefined): string {
+  const known = wfDescs.get(id);
+  if (known !== undefined) return known;
+  let d = typeof state?.description === "string" ? state.description : metaDescription(state?.script);
+  if (!d) {
+    const f = scriptPath();
+    if (f) try { d = metaDescription(fs.readFileSync(f, "utf8").slice(0, 20_000)); } catch {}
+  }
+  d = safeLine(d || "").trim();
+  if (d || state) wfDescs.set(id, d); // with no state file yet, look again once the script lands
+  return d;
+}
+/** A workflow's title, from its description: up to its first bracket, comma, semicolon, dash or full stop, capitalised,
+ *  cut at a word. "Diagnose every failed CI job on PR #1240 (read-only), then …" is "Diagnose every failed CI job on PR #1240". */
+export function wfTitle(description: string): string {
+  let t = description.split(/\s\(|,\s|;\s|\s[—–-]\s|\.\s|\.$/)[0].trim();
+  if (t.length < 8) t = description.trim();
+  if (t.length > 64) t = t.slice(0, 63).replace(/\s+\S*$/, "") + "…";
+  return t ? t[0].toUpperCase() + t.slice(1) : "";
+}
 export interface Workflow {
   id: string;
-  name: string;
+  name: string; // what it is called on screen: a title from its description, else its name
+  slug?: string; // its name as written in its script ("bundle-1240-ci-fix")
   status: string;
   phase: string; // the current phase
   phases: string[]; // the declared phase list; known only once the workflow's state file exists
@@ -1856,7 +1885,7 @@ export function scan(now: number): Session[] {
           const phases: string[] = Array.isArray(state?.phases) ? state.phases.map((p: any) => safeLine(p?.title)).filter(Boolean) : [];
           workflows.push({
             id: wfId,
-            name: safeLine(state?.workflowName || (script ? script.slice(0, -(wfId.length + 4)) : wfId)),
+            ...((slug) => ({ name: wfTitle(wfDescription(wfId, state, () => (script ? loc.dirs.map((d) => path.join(d, "workflows", "scripts", script)).find((f) => fs.existsSync(f)) : undefined))) || slug, slug }))(safeLine(state?.workflowName || (script ? script.slice(0, -(wfId.length + 4)) : wfId))),
             // The state file is written when a workflow ends. Without it the workflow is still going, even at a moment when no agent
             // is (just launched, between two agents, the last one just reported), unless it has written nothing for minutes.
             status: resumed.length ? "running" : state?.status ? safeLine(state.status) : running.length || now - lastT < WF_QUIET_MS ? "running" : "stopped",

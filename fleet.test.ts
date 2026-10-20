@@ -5689,6 +5689,29 @@ describe("a fleet window and the background service", () => {
   });
 });
 
+describe("a workflow's title", () => {
+  test("is its description up to the first bracket, comma, semicolon, dash or full stop, capitalised and cut at a word", () => {
+    expect(F.wfTitle("Diagnose every failed CI job on PR #1240 (read-only, parallel), then one fixer pushes")).toBe("Diagnose every failed CI job on PR #1240");
+    expect(F.wfTitle("deploy PR 1240 to staging; watch healthz")).toBe("Deploy PR 1240 to staging");
+    expect(F.wfTitle("Fix it.")).toBe("Fix it."); // too short to cut
+    const long = F.wfTitle("Revise the design until the final adversarial check passes for every lane in every bundle we ship");
+    expect([long.length <= 64, long.endsWith("…"), long.startsWith("Revise the design until")]).toEqual([true, true, true]);
+    expect(F.wfTitle("")).toBe("");
+  });
+  test("comes from the state file's description, else the meta of the script it keeps, else the script on disk; read once", () => {
+    expect(F.wfDescription("wf_t1", { description: "Ship it" }, () => undefined)).toBe("Ship it");
+    expect(F.wfDescription("wf_t2", { script: "export const meta = {\n  name: 'x',\n  description: 'Review the \\'big\\' change',\n}" }, () => undefined)).toBe("Review the 'big' change");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-wf-"));
+    const file = path.join(dir, "x-wf_t3.js");
+    fs.writeFileSync(file, 'export const meta = { name: "x", description: "Merge the four branches", phases: [] }');
+    let asked = 0;
+    expect(F.wfDescription("wf_t3", undefined, () => (asked++, file))).toBe("Merge the four branches");
+    fs.writeFileSync(file, 'export const meta = { name: "x", description: "Something else" }');
+    expect([F.wfDescription("wf_t3", { status: "completed" }, () => (asked++, file)), asked]).toEqual(["Merge the four branches", 1]);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 describe("reaching a background session", () => {
   test("one that will not open is tried once more, a moment later, and the log says why", async () => {
     if (Bun.spawnSync(["tmux", "-V"]).exitCode !== 0) return; // needs tmux, as fleet does
