@@ -3669,7 +3669,7 @@ describe("reply, deploys and the timeline cards", () => {
     expect(F.replyTarget([c], null)).toBeUndefined();
   });
 
-  test("a merge is live when the deploy target serves its commit, not yet when it serves another, and unknown without a reading", () => {
+  test("a merge is live when the deploy target serves its commit, not yet when it serves another, and unknown without a reading", async () => {
     expect(F.mergeLive("4f1c2a9b", "4f1c2a9be0d17c35a8e6f20b9d4c7e1a3b5f8d02", "/w")).toBe(true);
     expect(F.mergeLive("abc1234", undefined, "/w")).toBeUndefined();
     // Another revision: git in the checkout says whether the merge is one of its ancestors. A folder that is not a checkout cannot say.
@@ -3677,8 +3677,17 @@ describe("reply, deploys and the timeline cards", () => {
     const here2 = path.dirname(new URL(import.meta.url).pathname);
     const head = Bun.spawnSync(["git", "-C", here2, "rev-parse", "HEAD"]).stdout.toString().trim();
     const first = Bun.spawnSync(["git", "-C", here2, "rev-list", "--max-parents=0", "HEAD"]).stdout.toString().trim().split("\n")[0];
-    expect(F.mergeLive(first, head, here2)).toBe(true); // the first commit is behind HEAD: live
-    expect(F.mergeLive(head, first, here2)).toBe(false); // HEAD is not behind the first commit: not yet
+    // Git is asked in the background: unknown at first, then the answer.
+    const answer = async (a: string, b: string) => {
+      for (let i = 0; i < 100; i++) {
+        const r = F.mergeLive(a, b, here2);
+        if (r !== undefined) return r;
+        await Bun.sleep(30);
+      }
+    };
+    expect(F.mergeLive(first, head, here2)).toBeUndefined();
+    expect(await answer(first, head)).toBe(true); // the first commit is behind HEAD: live
+    expect(await answer(head, first)).toBe(false); // HEAD is not behind the first commit: not yet
   });
 
   test("the demo's merged pull request says it is live on staging", () => {
