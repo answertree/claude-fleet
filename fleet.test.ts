@@ -5172,6 +5172,54 @@ describe("key w: the phone page", () => {
     }
   });
 
+  test("the live link: the page's data at once over a WebSocket, with the secret and from the page's own origin; a change pushed, the same not again", async () => {
+    process.env.FLEET_WEB_HOST = "127.0.0.1";
+    process.env.FLEET_WEB_PORT = "4978";
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-live-"));
+    process.env.FLEET_WEB_TOKEN_FILE = path.join(dir, "web-token");
+    for (const k of ["server", "url", "error"] as const) delete (F.web as any)[k];
+    const web = F.startWeb(() => [], () => Date.now());
+    const open = (q: string, headers: Record<string, string> = {}) =>
+      new Promise<{ ok: boolean; got: string[]; ws: WebSocket }>((done) => {
+        const got: string[] = [];
+        const ws = new WebSocket(`ws://127.0.0.1:4978/api/live${q}`, { headers } as any);
+        ws.onmessage = (e) => got.push(String(e.data));
+        ws.onopen = () => setTimeout(() => done({ ok: true, got, ws }), 150);
+        ws.onerror = () => done({ ok: false, got, ws });
+      });
+    try {
+      const token = new URL(web.url!).searchParams.get("t")!;
+      expect((await open("?t=wrong")).ok).toBe(false);
+      expect((await open(`?t=${token}`, { origin: "https://evil.example" })).ok).toBe(false);
+      const live = await open(`?t=${token}`, { origin: "http://127.0.0.1:4978" });
+      expect(live.ok).toBe(true);
+      expect(Object.keys(JSON.parse(live.got[0]))).toContain("sessions");
+      expect(F.web.links).toBe(1);
+      F.web.push!(); // nothing new since the scan it was sent: not sent again
+      await Bun.sleep(100);
+      expect(live.got.length).toBe(1);
+      F.scan(Date.now() + 60_000); // a new scan: what the page is told changes (its time, at least), and is pushed
+      F.web.push!();
+      await Bun.sleep(150);
+      expect(live.got.length).toBe(2);
+      // A second page after a scan nobody was pushed: it gets what is current, and so does the first.
+      F.scan(Date.now() + 120_000);
+      const second = await open(`?t=${token}`);
+      await Bun.sleep(100);
+      expect([second.got.length, live.got.length]).toEqual([1, 3]);
+      expect(live.got[2]).toBe(second.got[0]);
+      second.ws.close();
+      live.ws.close();
+      await Bun.sleep(100);
+      expect(F.web.links).toBe(0);
+    } finally {
+      web.server?.stop(true);
+      delete process.env.FLEET_WEB_HOST;
+      delete process.env.FLEET_WEB_PORT;
+      delete process.env.FLEET_WEB_TOKEN_FILE;
+    }
+  });
+
   test("the page builds no markup from data, so text from a session cannot become HTML", () => {
     expect(F.WEB_PAGE).not.toContain("innerHTML");
     expect(F.WEB_PAGE).not.toContain("insertAdjacentHTML");

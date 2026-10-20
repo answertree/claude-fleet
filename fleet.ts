@@ -6710,74 +6710,97 @@ function chatHead(s) {
 function settleLogs() {
   for (const log of document.querySelectorAll("#cards .log")) if (stick.get(log.dataset.of) !== false) log.scrollTop = log.scrollHeight;
 }
-// Asked twice a second; the page is only redrawn when what fleet says has changed, or when you have done something.
-let lastText = "";
+// Fleet pushes what it says over a live link (a WebSocket) whenever it changes; the page draws it, skipping what has
+// not changed. The link comes back by itself if it drops (quickly, then every few seconds), and meanwhile the page
+// asks now and then, so it never goes blank. tick() asks at once: after you have done something.
+let lastText = "", latestText = "", linkDown = false;
 async function tick(force = true) {
   try {
     const r = await fetch("api/state?t=" + encodeURIComponent(token), { cache: "no-store" });
     if (!r.ok) throw new Error(r.status);
-    const text = await r.text(); last = Date.now();
-    if (!force && text === lastText) return;
-    lastText = text;
-    const d = JSON.parse(text);
-    const q = document.getElementById("quip"); q.replaceChildren(); quip(d).forEach(([text, cls], i) => { if (i) q.append(" · "); q.append(el("span", cls || "", text)); });
-    // The gauges as rings: the five-hour and weekly limits (with when each resets), this machine's CPU and memory.
-    const g = document.getElementById("gauges");
-    const lim = (re) => (d.account ? d.account.limits.find((l) => re.test(l.label)) : undefined);
-    const five = lim(/5/), week = lim(/7|week/i);
-    g.replaceChildren(gaugeTile("5 hours", five ? five.pct : undefined, five ? five.resets : "no figures", !!(d.five && d.five.urgent)), gaugeTile("week", week ? week.pct : undefined, week ? week.resets : ""), gaugeTile("cpu", d.machine.cpu, "load " + d.machine.load), gaugeTile("memory", d.machine.mem, d.machine.memText));
-    // The five-hour forecast, always.
-    fivePanel(d.five);
-    const cards = document.getElementById("cards");
-    for (const det of cards.querySelectorAll("details")) open.set(det.closest(".card")?.dataset.sid + det.className, det.open);
-    if (swiping || (!force && Date.now() < touchedUntil)) return void (lastText = ""); // nor under a card being swiped, or a finger scrolling
-    const build = (s) => { const c = card(s); c.dataset.sid = s.sid; for (const det of c.querySelectorAll("details")) { const k = s.sid + det.className; if (open.has(k)) det.open = open.get(k); } return c; };
-    // Finished sessions swiped away stay away (on this phone) until they start again; a button at the bottom shows them.
-    const away = putAway();
-    for (const sid of Object.keys(away)) { const s = d.sessions.find((x) => x.sid === sid); if (!s || !isDone(s)) delete away[sid]; }
-    savePutAway(away);
-    const shown = d.sessions.filter((s) => !away[s.sid]), gone = d.sessions.filter((s) => away[s.sid]);
-    const list = shown.map(build);
-    if (!shown.length) list.push(el("div", "empty", gone.length ? "Nothing else here: everything left has finished." : "No sessions working and nothing waiting on you."));
-    if (gone.length) {
-      const b = el("button", "shelf", showGone ? "Hide completed" : "Show " + gone.length + " completed"); b.type = "button";
-      b.addEventListener("click", () => { showGone = !showGone; tick(); });
-      list.push(b);
-      if (showGone) for (const s of gone) { const c = build(s); c.classList.add("gone"); const pb = el("button", "putback", "Put back"); pb.type = "button"; pb.addEventListener("click", () => { const a = putAway(); delete a[s.sid]; savePutAway(a); tick(); }); c.prepend(pb); list.push(c); }
-    }
-    // Cards are updated in place, so nothing flickers and animations run on: a card laid out as before has only its
-    // words and figures changed; one laid out differently is replaced, except the one you are typing in, where only
-    // its conversation is.
-    const typing = document.activeElement && document.activeElement.tagName === "TEXTAREA" && cards.contains(document.activeElement) ? document.activeElement.closest(".card") : null;
-    const keyOf = (n) => (n.dataset && n.dataset.sid ? "s:" + n.dataset.sid + (n.classList.contains("gone") ? ":gone" : "") : "x:" + n.className);
-    const was = new Map([...cards.children].map((n) => [keyOf(n), n]));
-    const next = list.map((n) => {
-      const o = was.get(keyOf(n));
-      if (!o) return n;
-      if (shapeOf(o) === shapeOf(n)) return patch(o, n), o;
-      if (o !== typing) return n;
-      const ol = o.querySelector(".chat .log"), nl = n.querySelector(".chat .log");
-      if (ol && nl) shapeOf(ol) === shapeOf(nl) ? patch(ol, nl) : ol.replaceWith(nl);
-      const os = o.querySelector(".chat > .st"), ns = n.querySelector(".chat > .st");
-      if (os && ns) patch(os, ns); else if (os) os.remove(); else if (ns && o.querySelector(".chat .log")) o.querySelector(".chat .log").after(ns);
-      return o;
-    });
-    // Only what changed is touched: moving a card would take the focus from its text box.
-    const keep = new Set(next);
-    for (const n of [...cards.children]) if (!keep.has(n)) n.remove();
-    next.forEach((n, i) => { if (cards.children[i] !== n) cards.insertBefore(n, cards.children[i] || null); });
-    settleLogs();
-    document.getElementById("clock").textContent = new Date(d.now).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    document.getElementById("foot").textContent = (d.hidden ? d.hidden + " idle or finished not shown · " : "") + "live";
-    document.title = (d.counts.needs ? "▲" + d.counts.needs + " " : "") + "Claude Fleet";
-    leaveSplash();
+    apply(await r.text(), force);
   } catch (e) { document.getElementById("foot").replaceChildren(el("span", "stale", "can't reach fleet — is it still running?")); const w = document.getElementById("splash-what"); if (w) w.textContent = "Can't reach fleet yet: is your Mac awake, and on Tailscale?"; }
 }
-tick(); setInterval(() => tick(false), 500);
+function apply(text, force) {
+  last = Date.now(); latestText = text;
+  if (!force && text === lastText) return;
+  lastText = text;
+  const d = JSON.parse(text);
+  const q = document.getElementById("quip"); q.replaceChildren(); quip(d).forEach(([text, cls], i) => { if (i) q.append(" · "); q.append(el("span", cls || "", text)); });
+  // The gauges as rings: the five-hour and weekly limits (with when each resets), this machine's CPU and memory.
+  const g = document.getElementById("gauges");
+  const lim = (re) => (d.account ? d.account.limits.find((l) => re.test(l.label)) : undefined);
+  const five = lim(/5/), week = lim(/7|week/i);
+  g.replaceChildren(gaugeTile("5 hours", five ? five.pct : undefined, five ? five.resets : "no figures", !!(d.five && d.five.urgent)), gaugeTile("week", week ? week.pct : undefined, week ? week.resets : ""), gaugeTile("cpu", d.machine.cpu, "load " + d.machine.load), gaugeTile("memory", d.machine.mem, d.machine.memText));
+  // The five-hour forecast, always.
+  fivePanel(d.five);
+  const cards = document.getElementById("cards");
+  for (const det of cards.querySelectorAll("details")) open.set(det.closest(".card")?.dataset.sid + det.className, det.open);
+  if (swiping || (!force && Date.now() < touchedUntil)) return void (lastText = ""); // nor under a card being swiped, or a finger scrolling
+  const build = (s) => { const c = card(s); c.dataset.sid = s.sid; for (const det of c.querySelectorAll("details")) { const k = s.sid + det.className; if (open.has(k)) det.open = open.get(k); } return c; };
+  // Finished sessions swiped away stay away (on this phone) until they start again; a button at the bottom shows them.
+  const away = putAway();
+  for (const sid of Object.keys(away)) { const s = d.sessions.find((x) => x.sid === sid); if (!s || !isDone(s)) delete away[sid]; }
+  savePutAway(away);
+  const shown = d.sessions.filter((s) => !away[s.sid]), gone = d.sessions.filter((s) => away[s.sid]);
+  const list = shown.map(build);
+  if (!shown.length) list.push(el("div", "empty", gone.length ? "Nothing else here: everything left has finished." : "No sessions working and nothing waiting on you."));
+  if (gone.length) {
+    const b = el("button", "shelf", showGone ? "Hide completed" : "Show " + gone.length + " completed"); b.type = "button";
+    b.addEventListener("click", () => { showGone = !showGone; tick(); });
+    list.push(b);
+    if (showGone) for (const s of gone) { const c = build(s); c.classList.add("gone"); const pb = el("button", "putback", "Put back"); pb.type = "button"; pb.addEventListener("click", () => { const a = putAway(); delete a[s.sid]; savePutAway(a); tick(); }); c.prepend(pb); list.push(c); }
+  }
+  // Cards are updated in place, so nothing flickers and animations run on: a card laid out as before has only its
+  // words and figures changed; one laid out differently is replaced, except the one you are typing in, where only
+  // its conversation is.
+  const typing = document.activeElement && document.activeElement.tagName === "TEXTAREA" && cards.contains(document.activeElement) ? document.activeElement.closest(".card") : null;
+  const keyOf = (n) => (n.dataset && n.dataset.sid ? "s:" + n.dataset.sid + (n.classList.contains("gone") ? ":gone" : "") : "x:" + n.className);
+  const was = new Map([...cards.children].map((n) => [keyOf(n), n]));
+  const next = list.map((n) => {
+    const o = was.get(keyOf(n));
+    if (!o) return n;
+    if (shapeOf(o) === shapeOf(n)) return patch(o, n), o;
+    if (o !== typing) return n;
+    const ol = o.querySelector(".chat .log"), nl = n.querySelector(".chat .log");
+    if (ol && nl) shapeOf(ol) === shapeOf(nl) ? patch(ol, nl) : ol.replaceWith(nl);
+    const os = o.querySelector(".chat > .st"), ns = n.querySelector(".chat > .st");
+    if (os && ns) patch(os, ns); else if (os) os.remove(); else if (ns && o.querySelector(".chat .log")) o.querySelector(".chat .log").after(ns);
+    return o;
+  });
+  // Only what changed is touched: moving a card would take the focus from its text box.
+  const keep = new Set(next);
+  for (const n of [...cards.children]) if (!keep.has(n)) n.remove();
+  next.forEach((n, i) => { if (cards.children[i] !== n) cards.insertBefore(n, cards.children[i] || null); });
+  settleLogs();
+  document.getElementById("clock").textContent = new Date(d.now).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  document.getElementById("foot").textContent = (d.hidden ? d.hidden + " idle or finished not shown · " : "") + (linkDown ? "reconnecting…" : "live");
+  document.title = (d.counts.needs ? "▲" + d.counts.needs + " " : "") + "Claude Fleet";
+  leaveSplash();
+}
+// What came while the page held still (a finger on it, or typing) is drawn once it can be.
+setInterval(() => { if (latestText && latestText !== lastText) apply(latestText, false); }, 700);
+let ws, tries = 0, polling = 0;
+function live() {
+  const u = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + location.pathname.replace(/[^/]*$/, "") + "api/live?t=" + encodeURIComponent(token);
+  try { ws = new WebSocket(u); } catch { return again(); }
+  ws.onopen = () => { tries = 0; linkDown = false; clearInterval(polling); polling = 0; if (latestText) apply(latestText, true); }; // "live" again at once
+  ws.onmessage = (e) => { if (typeof e.data === "string") apply(e.data, false); };
+  ws.onclose = () => { ws = undefined; again(); };
+}
+function again() {
+  tries++; linkDown = true;
+  const f = document.getElementById("foot"); if (f && !f.querySelector(".stale")) f.textContent = "reconnecting…";
+  if (!polling && tries >= 2) polling = setInterval(() => tick(false), 3000); // until the link is back
+  setTimeout(live, Math.min(5000, 250 * 2 ** Math.min(tries, 5)));
+}
+// Back from the background (a phone locks its screen): straight back on the link.
+document.addEventListener("visibilitychange", () => { if (!document.hidden && (!ws || ws.readyState > 1)) { tries = 0; live(); } });
+tick(); live();
 </script></body></html>`;
 
 /** The web server, once key w has started it: where it listens and the link to open. */
-export const web: { watchedAt: number; url?: string; host?: string; onTailnet?: boolean; server?: { stop: (closeActive?: boolean) => void }; error?: string; send?: typeof sendToSession; keys?: typeof keysToSession; peek?: typeof peekSession; start?: typeof startSession; shared?: boolean; retake?: () => void; yieldPort?: () => void; older?: boolean } = { watchedAt: 0 };
+export const web: { watchedAt: number; links: number; push?: () => void; url?: string; host?: string; onTailnet?: boolean; server?: { stop: (closeActive?: boolean) => void }; error?: string; send?: typeof sendToSession; keys?: typeof keysToSession; peek?: typeof peekSession; start?: typeof startSession; shared?: boolean; retake?: () => void; yieldPort?: () => void; older?: boolean } = { watchedAt: 0, links: 0 };
 const sameToken = (a: string, b: string) => a.length === b.length && crypto.timingSafeEqual ? (() => { try { return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b)); } catch { return false; } })() : a === b;
 /** This Mac's Tailscale IPv4 address, when it has one. */
 function tailnetAddress(): string | undefined {
@@ -7107,7 +7130,10 @@ export async function startSession(cwd: string, prompt: string): Promise<Reach> 
   }
 }
 
-let stateCache: { at: number; body: string; gz?: Uint8Array } | undefined;
+/** What every page is told, made once a scan and shared: by /api/state, and pushed over the live link when it changes. */
+let stateCache: { seq: number; body: string; gz?: Uint8Array } | undefined;
+let glassesCache: { seq: number; body: string } | undefined;
+let pushed = "";
 /** Something that held the thread over 300 ms, for the service log (at most every 30 s). */
 let slowSaidAt = 0;
 export function noteSlow(what: string, ms: number) {
@@ -7124,9 +7150,18 @@ const timedRequest = (handle: (req: Request, srv: any) => Promise<Response>) => 
     noteSlow(`a request for ${new URL(req.url).pathname}`, performance.now() - a);
   }
 };
+/** The pages' data for this scan, made once and kept until the next. */
+let pageSessions: () => Session[] = () => [];
+let pageNow: () => number = clock;
+function pageState() {
+  if (!stateCache || stateCache.seq !== scanSeq) stateCache = { seq: scanSeq, body: JSON.stringify(webState(pageSessions(), pageNow())) };
+  return stateCache;
+}
 /** Start serving the page (once). Every request must carry the secret; anything but the page and its data is a 404. */
 export function startWeb(getSessions: () => Session[], now: () => number = clock): typeof web {
   if (web.server || web.error || web.shared) return web;
+  pageSessions = getSessions;
+  pageNow = now;
   let token: string;
   try {
     token = webToken();
@@ -7144,6 +7179,24 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
       const server = Bun.serve({
         hostname: host,
         port,
+        websocket: {
+          perMessageDeflate: true, // compressed on the wire
+          open(ws) {
+            web.links++;
+            ws.subscribe("state");
+            // This page gets what is current; if that is newer than the last push, the other linked pages get it too.
+            const body = pageState().body;
+            if (body !== pushed) {
+              pushed = body;
+              ws.publish("state", body); // to every other subscriber
+            }
+            ws.send(body);
+          },
+          close() {
+            web.links = Math.max(0, web.links - 1);
+          },
+          message() {},
+        },
         fetch: timedRequest(async (req: Request, srv: any): Promise<Response> => {
           const url = new URL(req.url);
           // Another of your machines: allowed when Tailscale says the request comes from your own Tailscale user.
@@ -7200,6 +7253,13 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
             return Response.json(r, { status: r.ok ? 200 : 409, headers });
           }
           if (req.method !== "GET") return new Response("not allowed", { status: 405, headers });
+          // The live link: the page's own origin only, and the secret, as for everything else.
+          if (url.pathname === "/api/live") {
+            const origin = req.headers.get("origin");
+            if (!sameToken(url.searchParams.get("t") ?? "", token) || (origin && origin !== `${url.protocol}//${url.host}`)) return new Response("not without the link fleet showed you", { status: 403, headers });
+            if (srv.upgrade(req)) return undefined as unknown as Response;
+            return new Response("a live link needs a WebSocket", { status: 400, headers });
+          }
           // The icon is the only thing served without the secret: phones fetch it without the link's query.
           // Even's SDK for the glasses page: public code (MIT), so it needs no secret.
           if (url.pathname === "/glasses/sdk.js") {
@@ -7214,18 +7274,35 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
           if (url.pathname === "/") return new Response(WEB_PAGE.replace("__TOKEN__", token).replace("__ICON__", splashIcon()).replaceAll("__LOGO_MASK__", logoMask()).replace("__STARTUP__", STARTUP_LINKS), { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
           if (url.pathname === "/api/state") {
             web.watchedAt = Date.now();
-            // Made once for all the polls within 0.4 s (two phones, a retry), and compressed once.
-            if (!stateCache || Date.now() - stateCache.at > 400) stateCache = { at: Date.now(), body: JSON.stringify(webState(getSessions(), now())) };
+            const stateCache = pageState(); // made once a scan, for every page and every poll
             if (!/\bgzip\b/.test(req.headers.get("accept-encoding") ?? "")) return new Response(stateCache.body, { headers: { ...headers, "content-type": "application/json" } });
             stateCache.gz ??= Bun.gzipSync(new TextEncoder().encode(stateCache.body));
             return new Response(stateCache.gz, { headers: { ...headers, "content-type": "application/json", "content-encoding": "gzip", vary: "accept-encoding" } });
           }
           if (url.pathname === "/glasses") return new Response(GLASSES_PAGE, { headers: { ...headers, "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" } });
-          if (url.pathname === "/api/glasses") return (web.watchedAt = Date.now()), Response.json(glassesState(getSessions(), now()), { headers });
+          if (url.pathname === "/api/glasses") {
+            web.watchedAt = Date.now();
+            if (!glassesCache || glassesCache.seq !== scanSeq) glassesCache = { seq: scanSeq, body: JSON.stringify(glassesState(getSessions(), now())) };
+            return new Response(glassesCache.body, { headers: { ...headers, "content-type": "application/json" } });
+          }
           return new Response("not found", { status: 404, headers });
         }),
       });
-      Object.assign(web, { server, host, onTailnet: !!tail, url: `http://${host}:${port}/?t=${token}`, shared: false });
+      Object.assign(web, {
+        server,
+        host,
+        onTailnet: !!tail,
+        url: `http://${host}:${port}/?t=${token}`,
+        shared: false,
+        // After each read: what the pages are told, pushed to those linked when it has changed.
+        push: () => {
+          if (!web.links) return;
+          const body = pageState().body;
+          if (body === pushed) return;
+          pushed = body;
+          server.publish("state", body);
+        },
+      });
       return true;
     } catch {
       return false;
@@ -8838,7 +8915,7 @@ export async function serveWorker(): Promise<never> {
       slowSaid = Date.now();
       svcLog(`a scan took ${Math.round(took)} ms: ${refreshLaps.filter(([, ms]) => ms >= 20).map(([n, ms]) => `${n} ${Math.round(ms)} ms`).join(", ") || "no one step"}`);
     }
-    setTimeout(pace, Math.max(Date.now() - web.watchedAt < 10_000 ? 500 : 2000, took * 1.5));
+    setTimeout(pace, Math.max(web.links > 0 || Date.now() - web.watchedAt < 10_000 ? 500 : 2000, took * 1.5));
   };
   setTimeout(pace, 500);
   // A watchdog: a timer that should fire every 100 ms. When it fires late the thread was held, by a scan or by
@@ -10124,6 +10201,8 @@ async function refresh(yields = false) {
   if (yields) await breathe();
   if (botHere) void tgTick(sessions, now, partied);
   lap("telegram tick");
+  web.push?.();
+  lap("pages");
   if (opt.bell && !opt.once && partied.length) process.stdout.write("\x07");
 }
 
