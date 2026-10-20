@@ -1422,28 +1422,58 @@ const fixture = (name: string): Record<string, unknown> | undefined => {
   }
 };
 /**
+ * Run a command in the background (a fixed program and argument list, never a shell), stopped after `timeoutMs`;
+ * `done` gets its exit code (null when it could not run or was stopped) and its output. The program is started by a
+ * thread of its own (run.worker.ts): under heavy load starting one can take a second, and this thread must not wait.
+ * Without workers, it is started from here.
+ */
+let runner: Worker | null | undefined;
+const running = new Map<number, (code: number | null, out: string) => void>();
+let runId = 0;
+export function runInBackground(cmd: string, args: string[], timeoutMs: number, done: (code: number | null, out: string) => void) {
+  sideCost.started++;
+  if (runner === undefined)
+    try {
+      runner = new Worker(new URL("./run.worker.ts", import.meta.url).href);
+      runner.onmessage = (e: MessageEvent) => {
+        const f = running.get(e.data.id);
+        running.delete(e.data.id);
+        f?.(e.data.code, e.data.out);
+      };
+      runner.unref?.(); // never what keeps fleet running
+    } catch {
+      runner = null;
+    }
+  if (runner) {
+    const id = ++runId;
+    running.set(id, done);
+    runner.postMessage({ id, cmd, args, timeoutMs });
+    return;
+  }
+  let out = "";
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(cmd, args, { stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    return done(null, "");
+  }
+  const timer = setTimeout(() => child.kill(), timeoutMs);
+  child.stdout?.on("data", (d) => {
+    if (out.length < 4 << 20) out += d;
+  });
+  child.on("error", () => (clearTimeout(timer), done(null, "")));
+  child.on("close", (code) => (clearTimeout(timer), done(code, out)));
+}
+/**
  * Run a command with a fixed program and argument list (never a shell), and hand its output to `done`:
- * at once with `sync` (one frame, --once), else in the background, killed after five seconds.
+ * at once with `sync` (one frame, --once), else in the background, stopped after five seconds.
  */
 function runFor(cmd: string, args: string[], sync: boolean, done: (out: string | undefined) => void) {
   if (sync) {
     const r = spawnSync(cmd, args, { encoding: "utf8", timeout: 5000, maxBuffer: 4 << 20 });
     return done(r.status === 0 ? r.stdout : undefined);
   }
-  let out = "";
-  let child: ReturnType<typeof spawn>;
-  sideCost.started++;
-  try {
-    child = spawn(cmd, args, { stdio: ["ignore", "pipe", "ignore"] });
-  } catch {
-    return done(undefined);
-  }
-  const timer = setTimeout(() => child.kill(), 5000);
-  child.stdout?.on("data", (d) => {
-    if (out.length < 4 << 20) out += d;
-  });
-  child.on("error", () => (clearTimeout(timer), done(undefined)));
-  child.on("close", (code) => (clearTimeout(timer), done(code === 0 ? out : undefined)));
+  runInBackground(cmd, args, 5000, (code, out) => done(code === 0 ? out : undefined));
 }
 /** Ask git for a folder's state, at most every 30 seconds. --no-optional-locks keeps it from taking the index lock a session may need. */
 export function pollGit(cwd: string, now: number, sync = false) {
@@ -1551,15 +1581,7 @@ export function mergeLive(mergeSha: string, revision: string | undefined, cwd: s
     } else {
       if (asking.has(key)) return undefined;
       asking.add(key);
-      try {
-        const child = spawn("git", args, { stdio: "ignore" });
-        const timer = setTimeout(() => child.kill(), 10_000);
-        child.on("error", () => (clearTimeout(timer), asking.delete(key), settle(null)));
-        child.on("close", (code) => (clearTimeout(timer), asking.delete(key), settle(code)));
-      } catch {
-        asking.delete(key);
-        settle(null);
-      }
+      runInBackground("git", args, 10_000, (code) => (asking.delete(key), settle(code)));
       return undefined;
     }
   }
@@ -8055,16 +8077,8 @@ export const tailnet: { host?: string; ip?: string; user?: string; found: { host
 let peersWanted = false; // set at launch for real sessions
 export const wantPeers = (on: boolean) => (peersWanted = on);
 
-async function run(cmd: string[], timeoutMs = 4000): Promise<string | undefined> {
-  try {
-    const p = Bun.spawn(cmd, { stdout: "pipe", stderr: "ignore" });
-    const timer = setTimeout(() => p.kill(), timeoutMs);
-    const text = await new Response(p.stdout).text();
-    clearTimeout(timer);
-    return (await p.exited) === 0 ? text : undefined;
-  } catch {
-    return undefined;
-  }
+function run(cmd: string[], timeoutMs = 4000): Promise<string | undefined> {
+  return new Promise((done) => runInBackground(cmd[0], cmd.slice(1), timeoutMs, (code, out) => done(code === 0 ? out : undefined)));
 }
 /** How fleet finds machines and decides whom to trust. Tests replace these. */
 export const peerNet = {
