@@ -1537,11 +1537,31 @@ export function mergeLive(mergeSha: string, revision: string | undefined, cwd: s
   const key = `${mergeSha} ${revision}`;
   if (ancestry.get(key) !== undefined) return ancestry.get(key);
   if (fixture("FLEET_DEPLOY_FIXTURE")) return undefined;
+  // Asked of the checkout in the background (in a big repository it takes a while, and the page and the bot must not
+  // wait on it): unknown until it answers. --once asks and waits.
   if (!ancestry.has(key) && absoluteDir(cwd)) {
-    const r = spawnSync("git", ["--no-optional-locks", "-C", cwd, "merge-base", "--is-ancestor", mergeSha, revision], { timeout: 3000 });
-    ancestry.set(key, r.status === 0 ? true : r.status === 1 ? false : undefined);
-    if (ancestry.size > 500) ancestry.delete(ancestry.keys().next().value as string);
-    if (ancestry.get(key) !== undefined) return ancestry.get(key);
+    const args = ["--no-optional-locks", "-C", cwd, "merge-base", "--is-ancestor", mergeSha, revision];
+    const settle = (status: number | null) => {
+      ancestry.set(key, status === 0 ? true : status === 1 ? false : undefined);
+      if (ancestry.size > 500) ancestry.delete(ancestry.keys().next().value as string);
+    };
+    if (opt.once) {
+      settle(spawnSync("git", args, { timeout: 3000 }).status);
+      if (ancestry.get(key) !== undefined) return ancestry.get(key);
+    } else {
+      if (asking.has(key)) return undefined;
+      asking.add(key);
+      try {
+        const child = spawn("git", args, { stdio: "ignore" });
+        const timer = setTimeout(() => child.kill(), 10_000);
+        child.on("error", () => (clearTimeout(timer), asking.delete(key), settle(null)));
+        child.on("close", (code) => (clearTimeout(timer), asking.delete(key), settle(code)));
+      } catch {
+        asking.delete(key);
+        settle(null);
+      }
+      return undefined;
+    }
   }
   // The checkout does not have the deployed commit: ask GitHub to compare the two, once.
   if (repo && /^[\w.-]+\/[\w.-]+$/.test(repo) && /^[0-9a-f]{7,40}$/.test(mergeSha) && /^[0-9a-f]{7,40}$/.test(revision) && !comparing.has(key)) {
@@ -1554,6 +1574,7 @@ export function mergeLive(mergeSha: string, revision: string | undefined, cwd: s
   return ancestry.get(key);
 }
 const comparing = new Set<string>();
+const asking = new Set<string>(); // merge-base questions under way
 
 /** Each repository's worktrees and the branch each has out, read every 30 seconds when a session's branch is not the one in its folder. */
 export const worktreeState = new Map<string, { at: number; list?: { path: string; branch: string }[]; busy?: boolean }>();
