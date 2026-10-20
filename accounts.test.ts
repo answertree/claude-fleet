@@ -160,7 +160,7 @@ describe("renewing a login", () => {
       delete process.env.FLEET_RENEW_CMD;
       fs.rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 20_000); // real tmux, and waits of its own: slow beside the rest of the suite
 });
 
 describe("the accounts screen", () => {

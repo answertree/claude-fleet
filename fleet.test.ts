@@ -3109,6 +3109,42 @@ describe("the detail view", () => {
     }
   };
 
+  test("pull requests: the newest three, then the open ones where the column has room (never a row more), each with its title less its tag", () => {
+    expect([F.prTitle("[FIX] Second messages reach their session"), F.prTitle("[FEATURE]: [UI] Chat"), F.prTitle("Plain title")]).toEqual(["Second messages reach their session", "Chat", "Plain title"]);
+    const states: [number, string][] = [[420, "MERGED"], [419, "OPEN"], [418, "MERGED"], [417, "OPEN"], [416, "OPEN"], [415, "CLOSED"]];
+    for (const [n, st] of states) F.prState.set(`o/r#${n}`, { at: NOW, state: { state: st, draft: false, pass: 2, fail: 0, pending: 0, title: `Change number ${n}` } });
+    try {
+      quietly(() => {
+        const s = sided();
+        s.side!.bg = [];
+        s.side!.fails = [];
+        s.side!.edits = []; // the column then has one row to spare beside the conversation
+        s.side!.prs = states.map(([n], i) => ({ repo: "o/r", number: n, url: "", t: NOW - (i + 1) * MIN }));
+        expect(F.prsShown(s.side!.prs).map((p) => p.number)).toEqual([420, 419, 418, 417, 416]);
+        const g = F.grid(150);
+        const rows = draw([s], 150, 60);
+        const prRows = rows.map((r) => r.slice(g.lane - 1).trimEnd()).filter((r) => r.startsWith("⇡"));
+        // One spare row and two open ones past the newest three: the row says how many there are.
+        expect(prRows.map((r) => (r.match(/#\d+|\+ \d+ more open PRs?/) ?? [""])[0])).toEqual(["#420", "#419", "#418", "+ 2 more open PRs"]);
+        // With no row to spare, the third one's row counts them, ahead of its title.
+        const tight = sided();
+        tight.side!.bg = [];
+        tight.side!.fails = [];
+        tight.side!.prs = s.side!.prs;
+        const third = draw([tight], 150, 60).map((r) => r.slice(g.lane - 1).trimEnd()).filter((r) => r.startsWith("⇡"));
+        expect(third.length).toBe(3);
+        expect(third[2]).toMatch(/#418 ✓ merged · \+2 more open · Change/); // the title is what gets cut
+        expect(prRows[1]).toContain("Change number 419");
+        // The open ones past the newest three take spare rows only: what follows is where it would be without them.
+        const rosterAt = (r: string[]) => r.findIndex((x) => x.includes("main thread"));
+        for (const n of [417, 416]) F.prState.set(`o/r#${n}`, { at: NOW, state: { state: "MERGED", draft: false, pass: 2, fail: 0, pending: 0 } });
+        expect(rosterAt(rows)).toBe(rosterAt(draw([s], 150, 60)));
+      });
+    } finally {
+      for (const [n] of states) F.prState.delete(`o/r#${n}`);
+    }
+  });
+
   test("on a wide screen the side facts sit in the column beside the conversation, under the instruments, and cost no rows of their own", () => {
     quietly(() =>
       withSideState(() => {
