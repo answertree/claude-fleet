@@ -802,6 +802,30 @@ setTimeout(() => { throw new Error("boom in a scan"); }, 5);`;
     }
   });
 
+  test("the service's scan thread sees what a scan here sees: the same sessions, the same page", async () => {
+    const home = path.join(root, "threaded");
+    fs.rmSync(home, { recursive: true, force: true });
+    const sid = "thrd0000-0000-4000-8000-000000000001";
+    const file = path.join(home, "projects", "-p", `${sid}.jsonl`);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.mkdirSync(path.join(home, "sessions"), { recursive: true });
+    fs.writeFileSync(path.join(home, "sessions", "1.json"), JSON.stringify({ pid: process.pid, sessionId: sid, name: "threaded", kind: "bg", status: "busy", cwd: "/w", startedAt: NOW - 60 * MIN }));
+    fs.writeFileSync(file, [prompt(NOW - 3 * MIN, "first ask"), toolCall(NOW - 2 * MIN), reply(NOW - MIN, "First answer."), prompt(NOW - 30_000, "second ask")].map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const saved = process.env.FLEET_HOME;
+    process.env.FLEET_HOME = home;
+    try {
+      const here = F.scan(NOW).filter((x) => x.sid === sid);
+      const there = (await F.scanOnThread(NOW)).filter((x) => x.sid === sid);
+      expect(there.length).toBe(1);
+      expect([there[0].remote, there[0].name, there[0].mains.length]).toEqual([undefined, "threaded", 1]); // this machine's own: no remote stamp
+      const page = (list: F.Session[]) => JSON.stringify(F.webState(list, NOW).sessions);
+      expect(page(there)).toBe(page(here));
+    } finally {
+      F.stopScanThread();
+      process.env.FLEET_HOME = saved;
+    }
+  });
+
   test("a transcript replaced by a different file at the same path is read afresh", () => {
     const home = path.join(root, "replaced");
     fs.rmSync(home, { recursive: true, force: true });

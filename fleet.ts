@@ -8271,12 +8271,13 @@ export const manyMachines = () => [...peers.values()].some((p) => p.sessions.len
 export const machineOf = (s: Session): string | undefined => (manyMachines() ? (s.remote?.host ?? selfHost()) : undefined);
 
 /** This machine's sessions as another machine reads them: Maps written out, the reader's own state left behind, old timestamps trimmed. */
-export function encodeSessions(list: Session[], now: number): string {
+export function encodeSessions(list: Session[], now: number, stamp = true): string {
   const cut = now - PEER_KEEP_MS;
   // Agents that finished before the widest window can show anything of them are left behind.
   const live = (a: Agent) => !a.done || lastWriteOf(a.tail) >= cut;
-  const body = list.map((s) => ({ ...s, agents: s.agents.filter(live), workflows: s.workflows.map((w) => ({ ...w, agents: w.agents.filter(live) })), remote: { host: selfHost(), ip: "", addr: "", use: treeUsage(s.pid), git: gitOf(s) } }));
-  const TAIL_ONLY = new Set(["decoder", "carry", "path", "offset", "ino", "used"]); // how this machine reads its files, of no use elsewhere
+  const body = list.map((s) => ({ ...s, agents: s.agents.filter(live), workflows: s.workflows.map((w) => ({ ...w, agents: w.agents.filter(live) })), remote: stamp ? { host: selfHost(), ip: "", addr: "", use: treeUsage(s.pid), git: gitOf(s) } : undefined }));
+  // How this machine reads its files, of no use elsewhere; the path stays for this machine's own thread (events are keyed by it).
+  const TAIL_ONLY = new Set(["decoder", "carry", ...(stamp ? ["path"] : []), "offset", "ino", "used"]);
   return JSON.stringify(body, function (this: any, k, v) {
     if (TAIL_ONLY.has(k) && this && Array.isArray(this.tools)) return undefined;
     if (v instanceof Map) {
@@ -8957,6 +8958,7 @@ export async function serveSupervisor(): Promise<never> {
 /** --serve-worker: fleet with no screen. */
 export async function serveWorker(): Promise<never> {
   setScanBudget(300); // the page and the bot answer from the first moment, the sessions filling in as they are read
+  useScanThread(); // and the reading is done on a thread of its own
   isServiceWorker = true;
   opt.bell = false;
   svcLog(`fleet running with no screen (pid ${process.pid})`);
@@ -10192,6 +10194,58 @@ const askedAt = new Map<string, number>(); // …and when each one's question wa
 const stalledNow = new Map<string, number>();
 let retakeAt = 0;
 let tgWanted = false; // set at launch for real sessions: talk to the Telegram bot when this fleet holds it
+/**
+ * The background service scans on a thread of its own (scan.worker.ts): each refresh asks for a new scan when the last is
+ * in, and uses the newest sessions it has. This thread then never reads a transcript, so the page and the bot are never
+ * held by one. Elsewhere (the terminal, --once, tests) scan() runs here, as before.
+ */
+let scanThread: Worker | undefined;
+let threadSessions: Session[] = [];
+let threadBusy = false;
+let threadJustRead = new Set<string>();
+export function useScanThread(): boolean {
+  if (scanThread) return true;
+  try {
+    scanThread = new Worker(new URL("./scan.worker.ts", import.meta.url).href);
+  } catch {
+    return false;
+  }
+  scanThread.onmessage = (e: MessageEvent) => {
+    threadBusy = false;
+    for (const f of threadWaiters.splice(0)) setTimeout(f, 0);
+    threadSessions = decodeSessions(e.data.text);
+    scanPending = e.data.pending;
+    for (const sid of e.data.justRead as string[]) threadJustRead.add(sid);
+    scanSeq++; // what the pages are told is made afresh from these
+  };
+  scanThread.onerror = () => (threadBusy = false);
+  return true;
+}
+const threadWaiters: (() => void)[] = [];
+/** One scan on the thread, waited for (tests). */
+export function scanOnThread(now: number): Promise<Session[]> {
+  useScanThread();
+  return new Promise((done) => {
+    threadWaiters.push(() => done(threadSessions));
+    threadBusy = true;
+    scanThread!.postMessage({ now, budget: scanBudgetMs, options: { ...opt }, env: { ...process.env } }); // a worker sees the environment as it was at launch, not as it is
+  });
+}
+/** Stop the scan thread (tests). */
+export function stopScanThread() {
+  scanThread?.terminate();
+  scanThread = undefined;
+  threadBusy = false;
+}
+function fromScanThread(now: number): Session[] {
+  if (!threadBusy) {
+    threadBusy = true;
+    scanThread!.postMessage({ now, budget: scanBudgetMs, options: { ...opt }, env: { ...process.env } }); // a worker sees the environment as it was at launch, not as it is
+  }
+  for (const sid of threadJustRead) justRead.add(sid);
+  threadJustRead = new Set();
+  return threadSessions;
+}
 /** How long each step of the last refresh took, for the service log when one is slow. */
 export let refreshLaps: [string, number][] = [];
 let lapAt = 0;
@@ -10217,7 +10271,7 @@ async function refresh(yields = false) {
   lap("claims");
   if (yields) await breathe();
   const now = clock();
-  const local = scan(now);
+  const local = scanThread ? fromScanThread(now) : scan(now);
   lap("scan");
   if (yields) await breathe();
   prune(now);
