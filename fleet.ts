@@ -1378,15 +1378,19 @@ export interface PrState {
   mergeSha?: string; // the merge commit, once merged
   state: string; // OPEN, MERGED or CLOSED
   draft: boolean;
+  title?: string; // without a leading tag such as [FIX] or [FEATURE]
   pass: number;
   fail: number;
   pending: number;
 }
 const CHECK_PASS = ["SUCCESS", "NEUTRAL", "SKIPPED"];
 const CHECK_FAIL = ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"];
+/** A pull request's title as shown: its leading tags ("[FIX] ", "[FEATURE]: ") left off. */
+export const prTitle = (t: string): string => safeLine(t.replace(/^(\s*\[[^\]]{1,24}\]\s*:?)+\s*/, "")).trim();
 export function summarizePr(j: any): PrState | undefined {
   if (!j || typeof j.state !== "string") return undefined;
   const out: PrState = { state: j.state.toUpperCase(), draft: j.isDraft === true, pass: 0, fail: 0, pending: 0 };
+  if (typeof j.title === "string") out.title = prTitle(j.title);
   const sha = j.mergeCommit?.oid;
   if (typeof sha === "string" && /^[0-9a-f]{7,40}$/.test(sha)) out.mergeSha = sha;
   for (const c of Array.isArray(j.statusCheckRollup) ? j.statusCheckRollup : []) {
@@ -1404,6 +1408,9 @@ const GIT_EVERY_MS = 30_000;
 const PR_EVERY_MS = 120_000;
 const PR_DONE_EVERY_MS = 15 * 60_000; // merged or closed: it will not change much
 export const PR_SHOWN = 3;
+export const PR_READ = 12; // linked pull requests read, newest first, so the open ones among them are known
+/** The pull requests to show for a session: the newest three always, then every other one that is open. */
+export const prsShown = (prs: PrLink[]): PrLink[] => [...prs.slice(0, PR_SHOWN), ...prs.slice(PR_SHOWN, PR_READ).filter((p) => prState.get(`${p.repo}#${p.number}`)?.state?.state === "OPEN")];
  // pull requests on a session's row, newest linked first
 const fixture = (name: string): Record<string, unknown> | undefined => {
   const file = process.env[name];
@@ -1456,7 +1463,7 @@ export function pollPr(pr: PrLink, now: number, sync = false) {
   const fx = fixture("FLEET_PR_FIXTURE");
   if (fx) return void prState.set(key, { at: now, state: summarizePr(fx[key]) });
   prState.set(key, { at: e?.at ?? 0, state: e?.state, busy: true });
-  runFor("gh", ["pr", "view", String(pr.number), "--repo", pr.repo, "--json", "state,isDraft,statusCheckRollup,mergeCommit"], sync, (out) => {
+  runFor("gh", ["pr", "view", String(pr.number), "--repo", pr.repo, "--json", "state,isDraft,statusCheckRollup,mergeCommit,title"], sync, (out) => {
     let state: PrState | undefined;
     try {
       state = out === undefined ? undefined : summarizePr(JSON.parse(out));
@@ -1583,7 +1590,7 @@ export function pollSides(sessions: Session[], now: number, sync = false) {
     const dir = gitDirOf(s);
     if (dir !== base) pollWorktrees(base, now, sync);
     if (dir && dir !== base) pollGit(dir, now, sync);
-    if (opt.prs) for (const pr of s.side.prs.slice(0, PR_SHOWN)) pollPr(pr, now, sync);
+    if (opt.prs) for (const pr of s.side.prs.slice(0, PR_READ)) pollPr(pr, now, sync);
   }
   if (opt.prs) pollDeploys(now, sync);
 }
@@ -3912,7 +3919,7 @@ export function noteParties(sessions: Session[], now: number): string[] {
     started.push(`${sid} ${text}`);
   };
   for (const s of sessions) {
-    for (const pr of s.side?.prs.slice(0, PR_SHOWN) ?? []) {
+    for (const pr of prsShown(s.side?.prs ?? [])) {
       const key = `${pr.repo}#${pr.number}`;
       const mood = prMood(prState.get(key)?.state);
       const was = partyWas.pr.get(key);
@@ -3962,7 +3969,7 @@ export function bgSegs(bg: Side["bg"], now: number): Seg[] {
   return [[`${bg.length} running`, C.text], ...bg.flatMap((x): Seg[] => [sep(), [`${x.desc} `, C.dim], [ago(now - x.started), C.text]])];
 }
 /** "#1229 ✓ merged · #1231 ◐ CI 14/20 · #1232 ✗ 2 failing": each pull request with what GitHub says of it (with --prs), else its number. */
-export function prSegs(prs: PrLink[], cwd = ""): Seg[] {
+export function prSegs(prs: PrLink[], cwd = "", titled = false): Seg[] {
   return prs.flatMap((pr, i): Seg[] => {
     const st = prState.get(`${pr.repo}#${pr.number}`)?.state;
     const head: Seg[] = [...(i ? [sep()] : []), [`#${pr.number}`, C.text]];
@@ -3975,7 +3982,9 @@ export function prSegs(prs: PrLink[], cwd = ""): Seg[] {
       : st.pending ? [[` ${ICON.progress} CI ${st.pass}/${checks}`, C.white]]
       : checks ? [[` ${ICON.done} CI green`, C.green]]
       : [[" open", C.dim]];
-    return [...head, ...(st.draft && st.state === "OPEN" ? ([[" draft", C.dim]] as Seg[]) : []), ...tail];
+    // Its title last, so a row too narrow for it all loses the end of the title, never the state.
+    const title: Seg[] = titled && st.title ? [[` ${ICON.sep} `, C.faint], [st.title, C.dim]] : [];
+    return [...head, ...(st.draft && st.state === "OPEN" ? ([[" draft", C.dim]] as Seg[]) : []), ...tail, ...title];
   });
 }
 /** For a merged pull request whose repository has a deploy target: " · ✓ live on staging" or " · ◐ not on staging yet". */
@@ -4025,7 +4034,10 @@ function sideRows(b: Block, g: Grid, now: number): StackRow[] {
   const rows: StackRow[] = [];
   if (k.trouble && has.trouble) rows.push({ icon: [ICON.failed, C.red], segs: fit(troubleSegs(side.fails)), age: [ago(now - side.fails[side.fails.length - 1].t), C.dim] });
   if (k.bgRow && has.bgRow) rows.push({ icon: [ICON.background, C.cyan], segs: fit(bgSegs(side.bg, now)) });
-  if (k.prs && has.prs) rows.push({ icon: [ICON.pr, C.text], segs: fit(prSegs(side.prs.slice(0, PR_SHOWN), side.cwd ?? b.v.s.cwd)) });
+  if (k.prs && has.prs) {
+    const more = prsShown(side.prs).length - PR_SHOWN; // open ones past the newest three, counted
+    rows.push({ icon: [ICON.pr, C.text], segs: fit([...prSegs(side.prs.slice(0, PR_SHOWN), side.cwd ?? b.v.s.cwd), ...(more > 0 ? ([[`  ${ICON.sep}  +${more} more open`, C.dim]] as Seg[]) : [])]) });
+  }
   if (k.changes && has.changes) rows.push({ icon: [ICON.changes, C.dim], segs: fit(changeSegs(side.edits, gitOf(b.v.s))), age: side.edits.length ? [ago(now - side.edits[0].t), C.dim] : undefined });
   return rows;
 }
@@ -4126,7 +4138,7 @@ function sideItems(b: Block, now: number): SideItem[] {
     out.push({ side: "trouble", icon: [ICON.failed, C.red], segs: [[`${side.fails.length} failed`, C.red], [` ${ICON.sep} `, C.faint], [`${last.tool ? last.tool + ": " : ""}${last.text}`, C.dim]], age: [ago(now - last.t), C.dim] });
   }
   if (k.bgRow && has.bgRow) for (const x of side.bg) out.push({ side: "bgRow", icon: [ICON.background, C.cyan], segs: [[x.desc, C.dim]], age: [ago(now - x.started), C.text] });
-  if (k.prs && has.prs) for (const pr of side.prs.slice(0, PR_SHOWN)) out.push({ side: "prs", icon: [ICON.pr, C.text], segs: prSegs([pr], side.cwd ?? b.v.s.cwd) });
+  if (k.prs && has.prs) for (const pr of side.prs.slice(0, PR_SHOWN)) out.push({ side: "prs", icon: [ICON.pr, C.text], segs: prSegs([pr], side.cwd ?? b.v.s.cwd, true) });
   if (k.changes && has.changes) out.push({ side: "changes", icon: [ICON.changes, C.dim], segs: changeSegs(side.edits, gitOf(b.v.s), true), age: side.edits.length ? [ago(now - side.edits[0].t), C.dim] : undefined });
   return out;
 }
@@ -4195,8 +4207,30 @@ function partsOf(b: Block, g: Grid, now: number): Parts {
     const stack = stackOf(b, g, now);
     const base = instrumentsOf(b, g, stack.length);
     const mine = items.filter((x) => !b.sideLeft!.has(x.side));
-    if (mine.length <= stack.length - base.length || right === 0) return { head, vitals: b.body && !g.wide && b.keep.ctx, stack, inst: [...base, ...mine], ...rosterParts(b, stack, now) };
+    if (mine.length <= stack.length - base.length || right === 0) return { head, vitals: b.body && !g.wide && b.keep.ctx, stack, inst: withOpenPrs(b, [...base, ...mine], stack.length - base.length - mine.length), ...rosterParts(b, stack, now) };
   }
+}
+/** Open pull requests past the newest three, after them in the column beside the conversation, in rows it has to spare:
+ *  never a row more. Those that do not fit are counted: "+ 6 more open PRs" on the last spare row, or with no row to
+ *  spare "+6 more open" on the third one's row, before its title (which a cut takes first). */
+function withOpenPrs(b: Block, inst: Instrument[], room: number): Instrument[] {
+  const side = b.v.s.side;
+  const at = inst.reduce((n, x, i) => (typeof x === "object" && x.side === "prs" ? i : n), -1);
+  if (!side || at < 0) return inst;
+  const open = prsShown(side.prs).slice(PR_SHOWN);
+  if (!open.length) return inst;
+  const fits = open.length <= room ? open.length : Math.max(0, room - 1);
+  const rows: Instrument[] = open.slice(0, fits).map((pr): SideItem => ({ side: "prs", icon: [ICON.pr, C.text], segs: prSegs([pr], side.cwd ?? b.v.s.cwd, true) }));
+  const left = open.length - fits;
+  const out = [...inst];
+  if (left && room > 0) rows.push({ side: "prs", icon: [ICON.pr, C.dim], segs: [[`+ ${left} more open PR${left === 1 ? "" : "s"}`, C.dim]] });
+  else if (left) {
+    const last = out[at] as SideItem;
+    const t = last.segs.findIndex(([text]) => text === ` ${ICON.sep} `); // where its title starts, if it has one
+    const more: Seg = [` ${ICON.sep} +${left} more open`, C.dim];
+    out[at] = { ...last, segs: t < 0 ? [...last.segs, more] : [...last.segs.slice(0, t), more, ...last.segs.slice(t)] };
+  }
+  return [...out.slice(0, at + 1), ...rows, ...out.slice(at + 1)];
 }
 const rowsOfParts = (p: Parts) => p.head + (p.vitals ? 1 : 0) + Math.max(p.stack.length, p.inst.length) + (p.gap ? 1 : 0) + p.roster.length;
 /** The roster, and whether a blank row parts it from the stack above. */
@@ -6066,7 +6100,7 @@ export function webState(sessions: Session[], now: number) {
         tools: sum(spark),
         fails: s.side?.fails.length ? { n: s.side.fails.length, last: `${s.side.fails.at(-1)!.tool ? s.side.fails.at(-1)!.tool + ": " : ""}${s.side.fails.at(-1)!.text}`, ago: ago(now - s.side.fails.at(-1)!.t) } : undefined,
         bg: (s.side?.bg ?? []).map((b) => ({ desc: b.desc, ago: ago(now - b.started) })),
-        prs: (s.side?.prs ?? []).slice(0, PR_SHOWN).map((p) => segsJson(prSegs([p], s.side?.cwd ?? s.cwd))),
+        prs: prsShown(s.side?.prs ?? []).map((p) => segsJson(prSegs([p], s.side?.cwd ?? s.cwd, true))),
         changes: s.side && (s.side.edits.length || gitOf(s)) ? segsJson(changeSegs(s.side.edits, gitOf(s), true)) : undefined,
         tasks: s.tasks ? { done: s.tasks.done, total: s.tasks.total, open: s.tasks.items.filter((t) => t.status !== "completed").map((t) => ({ status: t.status, text: taskText(t), since: t.since ? ago(now - t.since) : undefined, blocked: t.blocked || undefined })) } : undefined,
         roster: rosterOfView(v, now, win),
@@ -6190,6 +6224,7 @@ details.tasks[open]>summary .sub,details.chat[open]>summary .sub{display:none}
 .log p.you{align-self:flex-end;background:#1f3d63;color:#e3eeff;border-bottom-right-radius:5px}.log p.claude{align-self:flex-start;background:#1d2530;color:var(--text);border-bottom-left-radius:5px}
 .log p .ago{color:#ffffff55;font-size:10.5px;margin-left:7px}.log .none{color:var(--dim);font-size:13px;text-align:center;padding:6px}
 .chat > .st{color:var(--dim);font-size:12.5px;margin:2px 2px 4px}
+.row.pr>span:last-child{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sent{font-size:12px;margin-top:4px;color:var(--dim)}.sent.ok{color:var(--green)}.sent.err{color:var(--red)}
 </style></head><body>
 <div id="splash"><div class="tilt"><div class="logo"><img src="__ICON__" alt=""><i class="d"></i><i class="s"></i><b><i class="d"></i><i class="s"></i></b></div></div><div class="title">Claude Fleet</div><div class="what" id="splash-what">Reaching your Mac…</div></div>
@@ -6490,7 +6525,7 @@ function card(s) {
   if (s.ctx && s.ctx.runway) c.append(row("◷", "#6b7380", s.ctx.runway));
   if (s.fails) c.append(row("✗", "#f0625c", s.fails.n + " failed · " + s.fails.last + " · " + s.fails.ago));
   for (const b of s.bg) c.append(row("↻", "#56cdd6", b.desc + " · " + b.ago));
-  for (const p of s.prs) c.append(row("⇡", "#c6cdd7", segs(p)));
+  for (const p of s.prs) { const r = row("⇡", "#c6cdd7", segs(p)); r.classList.add("pr"); c.append(r); } // one line each, the title cut
   if (s.changes) c.append(row("±", "#6b7380", segs(s.changes)));
   const R = s.roster;
   if (s.tasks && s.tasks.total) c.append(taskList(s.tasks));
@@ -7769,7 +7804,7 @@ export function tgEvents(sessions: Session[], asked: string[], stalled: string[]
   loadPrWas();
   let changed = false;
   for (const s of sessions)
-    for (const pr of s.side?.prs.slice(0, PR_SHOWN) ?? []) {
+    for (const pr of prsShown(s.side?.prs ?? [])) {
       const key = `${pr.repo}#${pr.number}`;
       const word = prWord(pr, s.side?.cwd ?? s.cwd);
       if (!word) continue; // not known yet: neither news nor a state to compare with
