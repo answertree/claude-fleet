@@ -1823,6 +1823,8 @@ export function scan(now: number): Session[] {
       const agents: Agent[] = [];
       const workflows: Workflow[] = [];
 
+      // A workflow's script copy lands under whichever project folder the session's cwd was in at launch, so look in all of them.
+      const scripts = loc.dirs.flatMap((d) => ls(path.join(d, "workflows", "scripts")));
       for (const dir of loc.dirs) {
         const sub = path.join(dir, "subagents");
         for (const name of ls(sub)) {
@@ -1830,7 +1832,6 @@ export function scan(now: number): Session[] {
           const a = loadAgent(path.join(sub, name));
           if (a) agents.push(a);
         }
-        const scripts = ls(path.join(dir, "workflows", "scripts"));
         for (const wfId of ls(path.join(sub, "workflows"))) {
           if (!wfId.startsWith("wf_")) continue;
           const wfDir = path.join(sub, "workflows", wfId);
