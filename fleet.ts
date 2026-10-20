@@ -6206,6 +6206,7 @@ export function webState(sessions: Session[], now: number) {
     now,
     counts,
     five: fiveHourLine(now), // the five-hour limit's forecast, always said
+    pairing: pairsPending(), // the glasses app asking to connect, waiting on you
     hidden: all.length - shown.length,
     machine: { cpu: Math.round(machine.cpu), mem: Math.round((machine.memUsed / machine.memTotal) * 100), memText: `${gb(machine.memUsed)} of ${gb(machine.memTotal)}`, load: Number(machine.load.toFixed(1)) },
     account: acct ? { limits: acct.limits.map((l) => ({ label: l.label, pct: Math.round(l.pct), resetsAt: l.resetsAt, resets: l.resetsAt ? (l.resetsAt - now < 24 * 3600_000 ? `resets in ${ago(l.resetsAt - now)}` : `resets ${new Date(l.resetsAt).toLocaleString("en-GB", { weekday: "short", hour: "2-digit", minute: "2-digit" })}`) : "" })), reason: acct.reason || undefined } : undefined,
@@ -6336,6 +6337,8 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--dim);font-size:12px;li
 @keyframes fall{to{transform:translateY(260px) rotate(540deg)}}
 .party{color:var(--amber);font-weight:700;margin-top:4px}
 .empty{color:var(--dim);text-align:center;margin:40px 0}
+#pair .ask{background:#14263d;border:1px solid #2c4f7a;border-radius:14px;padding:11px 14px;margin:0 0 14px;color:var(--white);font-size:14.5px}#pair .ask b{letter-spacing:.12em;color:var(--cyan)}
+#pair .ask div{display:flex;gap:8px;margin-top:9px}#pair button{flex:1;border:0;border-radius:10px;padding:9px;font:600 14px -apple-system,system-ui,sans-serif}#pair .yes{background:var(--cyan);color:#0d1117}#pair .no{background:#262d37;color:var(--text)}
 .card.done{touch-action:pan-y;user-select:none;-webkit-user-select:none}.swipe-hint{color:var(--dim);font-size:11.5px;margin-top:8px;text-align:right}
 .shelf{display:block;margin:6px auto 12px;background:transparent;color:var(--text);border:1px solid var(--line);border-radius:999px;padding:9px 16px;font:600 13.5px -apple-system,system-ui,sans-serif}
 .card.gone{opacity:.62}.putback{display:block;margin-left:auto !important;background:transparent;color:var(--cyan);border:1px solid #2f3946;border-radius:999px;padding:4px 11px;font:600 12.5px -apple-system,system-ui,sans-serif;margin:-2px 0 6px 8px}
@@ -6401,6 +6404,7 @@ details.tasks[open]>summary .sub,details.chat[open]>summary .sub{display:none}
 </script>
 <header><h1><img src="/icon-192.png" alt="">Claude Fleet</h1><span id="clock"></span></header>
 <div id="quip">Waking the fleet…</div>
+<div id="pair"></div>
 <div class="gauges" id="gauges"></div>
 <div class="five" id="five"></div>
 <main id="cards"></main>
@@ -6807,6 +6811,15 @@ function apply(text, force) {
   g.replaceChildren(gaugeTile("5 hours", five ? five.pct : undefined, five ? five.resets : "no figures", !!(d.five && d.five.urgent)), gaugeTile("week", week ? week.pct : undefined, week ? week.resets : ""), gaugeTile("cpu", d.machine.cpu, "load " + d.machine.load), gaugeTile("memory", d.machine.mem, d.machine.memText));
   // The five-hour forecast, always.
   fivePanel(d.five);
+  // The glasses app asking to connect: allow it if your glasses show the same code.
+  const pb = document.getElementById("pair");
+  pb.replaceChildren(...(d.pairing || []).map((r) => {
+    const box = el("div", "ask"); box.append("👓 Your glasses want to connect · code ", el("b", "", r.code));
+    const row = el("div"); const yes = el("button", "yes", "Allow"), no = el("button", "no", "Deny");
+    const decide = async (allow) => { yes.disabled = no.disabled = true; await fetch("api/pair/decide?t=" + encodeURIComponent(token), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: r.id, allow }) }).catch(() => {}); box.remove(); };
+    yes.addEventListener("click", () => decide(true)); no.addEventListener("click", () => decide(false));
+    row.append(yes, no); box.append(row); return box;
+  }));
   const cards = document.getElementById("cards");
   for (const det of cards.querySelectorAll("details")) open.set(det.closest(".card")?.dataset.sid + det.className, det.open);
   if (swiping || (!force && Date.now() < touchedUntil)) return void (lastText = ""); // nor under a card being swiped, or a finger scrolling
@@ -7218,11 +7231,89 @@ export function noteSlow(what: string, ms: number) {
 const timedRequest = (handle: (req: Request, srv: any) => Promise<Response>) => async (req: Request, srv: any): Promise<Response> => {
   const a = performance.now();
   try {
-    return await handle(req, srv);
+    // The installed glasses app: its origin is answered on the paths it uses, and asked first when it sends JSON.
+    const origin = req.headers.get("origin");
+    const at = new URL(req.url).pathname;
+    const forApp = !!origin && APP_PATHS.test(at) && appOrigin(origin);
+    if (req.method === "OPTIONS") {
+      if (!forApp) return new Response(null, { status: 403 });
+      return new Response(null, { status: 204, headers: { "access-control-allow-origin": origin!, "access-control-allow-methods": "GET, POST, OPTIONS", "access-control-allow-headers": "content-type", "access-control-max-age": "86400", vary: "origin" } });
+    }
+    const res = await handle(req, srv);
+    if (forApp && res) {
+      res.headers.set("access-control-allow-origin", origin!);
+      res.headers.set("vary", "origin");
+    }
+    return res;
   } finally {
     noteSlow(`a request for ${new URL(req.url).pathname}`, performance.now() - a);
   }
 };
+// ── the installed glasses app ──
+// Installed from Even Hub, the glasses app runs from its own package in the Even app on your phone: its requests come from
+// that package's origin, not fleet's, and it carries no secret (the package is uploaded to Even). It pairs instead: the
+// glasses show a code, you approve it on Telegram or the Fleet page, and the app keeps the secret in its own storage.
+
+/** Origins the installed app may call from: not a web site (an app's own scheme, file:, or "null", as an app's own pages
+ *  have), or one named in FLEET_APP_ORIGINS (comma-separated). Other sites stay refused, as before. */
+export function appOrigin(origin: string | null): boolean {
+  if (!origin) return false;
+  if (origin === "null" || !/^https?:\/\//i.test(origin)) return true;
+  return (process.env.FLEET_APP_ORIGINS ?? "").split(",").map((x) => x.trim()).filter(Boolean).includes(origin);
+}
+/** The paths the installed app uses: answered to its origin, and asked of first (a preflight) when it sends JSON. */
+const APP_PATHS = /^\/api\/(glasses|keys|send|choices|pair\/start|pair\/poll)$/;
+let refusedSaid = 0;
+const noteRefused = (origin: string, path: string) => {
+  if (Date.now() - refusedSaid < 60_000 || !isServiceWorker) return;
+  refusedSaid = Date.now();
+  svcLog(`refused a request for ${path} from ${origin.slice(0, 80)}: if that is your glasses app, set FLEET_APP_ORIGINS=${origin.slice(0, 80)}`);
+};
+export interface Pairing {
+  id: string;
+  code: string; // shown on the glasses and where you approve it, to compare
+  at: number;
+  status: "pending" | "approved" | "denied";
+  taken?: boolean; // the secret has been handed over (once)
+}
+const pairings = new Map<string, Pairing>();
+const PAIR_MS = 10 * 60_000;
+const PAIR_LETTERS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"; // nothing to misread: no 0/O, 1/I/L
+/** The glasses ask to pair: a code to show, and the request put to you (Telegram, the Fleet page). At most three at a time. */
+export function pairStart(now = Date.now()): Pairing | undefined {
+  for (const [id, p] of pairings) if (now - p.at > PAIR_MS) pairings.delete(id);
+  if ([...pairings.values()].filter((p) => p.status === "pending").length >= 3) return undefined;
+  const code = Array.from(crypto.getRandomValues(new Uint8Array(4)), (b) => PAIR_LETTERS[b % PAIR_LETTERS.length]).join("");
+  const p: Pairing = { id: crypto.randomUUID(), code, at: now, status: "pending" };
+  pairings.set(p.id, p);
+  void tgPairAsk(p);
+  return p;
+}
+/** Your answer to a pairing request. */
+export function pairDecide(id: string, allow: boolean, now = Date.now()): boolean {
+  const p = pairings.get(id);
+  if (!p || p.status !== "pending" || now - p.at > PAIR_MS) return false;
+  p.status = allow ? "approved" : "denied";
+  return true;
+}
+/** What the glasses learn when they ask: still waiting, refused, gone, or approved with the secret (handed over once). */
+export function pairPoll(id: string, token: string, now = Date.now()): { status: string; token?: string } {
+  const p = pairings.get(id);
+  if (!p || now - p.at > PAIR_MS) return { status: "expired" };
+  if (p.status === "approved" && !p.taken) {
+    p.taken = true;
+    return { status: "approved", token };
+  }
+  return { status: p.status === "approved" ? "expired" : p.status };
+}
+/** The requests waiting on you, for the Fleet page. */
+export const pairsPending = (now = Date.now()) => [...pairings.values()].filter((p) => p.status === "pending" && now - p.at <= PAIR_MS).map((p) => ({ id: p.id, code: p.code }));
+async function tgPairAsk(p: Pairing) {
+  const c = readTg();
+  if (!tg.on || !c.token || !c.chat) return;
+  await tgCall(c.token, "sendMessage", { chat_id: c.chat, text: `👓 Your glasses want to connect to Claude Fleet.\n\nCode: ${p.code}\n\nAllow it only if your glasses show this code.`, reply_markup: { inline_keyboard: [[{ text: `✅ Allow · ${p.code}`, callback_data: `pair:${p.id}:y` }, { text: "Deny", callback_data: `pair:${p.id}:n` }]] } });
+}
+
 /** The pages' data for this scan, made once and kept until the next. */
 let pageSessions: () => Session[] = () => [];
 let pageNow: () => number = clock;
@@ -7298,11 +7389,35 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
             }
             return new Response("not allowed", { status: 405, headers });
           }
+          // Pairing the installed glasses app. Asking needs no secret (that is what it is for); the answer is yours to give.
+          if (req.method === "POST" && (url.pathname === "/api/pair/start" || url.pathname === "/api/pair/poll")) {
+            const origin = req.headers.get("origin");
+            if (origin && !appOrigin(origin) && origin !== `${url.protocol}//${url.host}`) return noteRefused(origin, url.pathname), new Response("not from here", { status: 403, headers });
+            if (url.pathname === "/api/pair/start") {
+              const p = pairStart();
+              return p ? Response.json({ id: p.id, code: p.code }, { headers }) : Response.json({ error: "too many requests waiting" }, { status: 429, headers });
+            }
+            let body: { id?: unknown } = {};
+            try {
+              body = await req.json();
+            } catch {}
+            return Response.json(pairPoll(String(body.id ?? ""), token), { headers });
+          }
+          if (req.method === "POST" && url.pathname === "/api/pair/decide") {
+            const origin = req.headers.get("origin");
+            if (!sameToken(url.searchParams.get("t") ?? "", token) || (origin && origin !== `${url.protocol}//${url.host}`) || !req.headers.get("content-type")?.startsWith("application/json")) return new Response("not from here", { status: 403, headers });
+            let body: { id?: unknown; allow?: unknown } = {};
+            try {
+              body = await req.json();
+            } catch {}
+            return Response.json({ ok: pairDecide(String(body.id ?? ""), body.allow === true) }, { headers });
+          }
           if (req.method === "POST" && (url.pathname === "/api/send" || url.pathname === "/api/keys" || url.pathname === "/api/choices")) {
             if (!sameToken(url.searchParams.get("t") ?? "", token)) return new Response("not without the link fleet showed you", { status: 403, headers });
             // Only the page itself may send: another site's form or script carries its own origin, or the wrong type.
             const origin = req.headers.get("origin");
-            if ((origin && origin !== `${url.protocol}//${url.host}`) || !req.headers.get("content-type")?.startsWith("application/json")) return new Response("not from here", { status: 403, headers });
+            if (origin && origin !== `${url.protocol}//${url.host}` && !appOrigin(origin)) noteRefused(origin, url.pathname);
+            if ((origin && origin !== `${url.protocol}//${url.host}` && !appOrigin(origin)) || !req.headers.get("content-type")?.startsWith("application/json")) return new Response("not from here", { status: 403, headers });
             let body: { sid?: unknown; text?: unknown; key?: unknown };
             try {
               body = await req.json();
@@ -7890,6 +8005,13 @@ async function tgButton(c: TgConfig, q: any) {
   if (act === "n") {
     await tgCall(c.token!, "answerCallbackQuery", { callback_query_id: q.id });
     return tgNewPick(c, msgId, sid, extra);
+  }
+  if (act === "pair") {
+    // A pairing request from the glasses app: here sid is the request's id, and extra y or n.
+    const ok = pairDecide(sid, extra === "y");
+    await tgCall(c.token!, "answerCallbackQuery", { callback_query_id: q.id, text: ok ? (extra === "y" ? "✓ Glasses connected" : "Refused") : "That request has gone" });
+    if (typeof msgId === "number") await tgCall(c.token!, "editMessageText", { chat_id: c.chat, message_id: msgId, text: ok ? (extra === "y" ? "👓 Glasses connected to Claude Fleet." : "👓 Glasses refused.") : "👓 That pairing request had gone." });
+    return;
   }
   const session = sid ? tg.getSessions().find((x) => x.sid === sid) : undefined;
   const gone = !!sid && !session && act !== "L" && act !== "v";
@@ -9424,15 +9546,32 @@ export const GLASSES_PAGE = `<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>Claude Fleet</title>
-<style>body{margin:0;padding:24px;background:#000;color:#4be37a;font:16px/1.5 -apple-system,system-ui,sans-serif}h1{font-size:17px;margin:0 0 12px}p{margin:6px 0;color:#9adbb0}</style>
+<style>body{margin:0;padding:24px;background:#000;color:#4be37a;font:16px/1.5 -apple-system,system-ui,sans-serif}h1{font-size:17px;margin:0 0 12px}p{margin:6px 0;color:#9adbb0}
+#setup{margin-top:22px;padding:14px;border:1px solid #1f4d2e;border-radius:12px}#setup h2{font-size:15px;margin:0 0 10px;color:#4be37a}#setup label{display:block;font-size:13px;color:#9adbb0;margin-bottom:4px}
+#setup select{width:100%;font:15px -apple-system,system-ui,sans-serif;padding:8px;border-radius:8px;background:#0b1a10;color:#d8f5e1;border:1px solid #1f4d2e}#setup .row{display:flex;gap:8px;margin-top:12px}
+#setup button{flex:1;font:600 14px -apple-system,system-ui,sans-serif;padding:9px;border-radius:9px;border:0;background:#4be37a;color:#03140a}#setup button.quiet{background:#13301d;color:#9adbb0}#conn{font-size:13px}</style>
 </head><body>
 <h1>◆ Claude Fleet on your glasses</h1>
 <p id="s">Waiting for the Even app…</p>
 <p>The ring moves between sessions, a tap opens one, a double tap goes back.</p>
+<div id="setup" hidden>
+<h2>Setup</h2>
+<label for="base">Fleet on your Mac (its Tailscale address)</label>
+<select id="base"></select>
+<p id="conn"></p>
+<div class="row"><button id="save">Save and reconnect</button><button id="forget" class="quiet">Forget pairing</button></div>
+</div>
 <script type="module">
 import { waitForEvenAppBridge, TextContainerProperty, ListContainerProperty, ListItemContainerProperty, ImageContainerProperty, ImageRawDataUpdate, CreateStartUpPageContainer, RebuildPageContainer, TextContainerUpgrade, OsEventTypeList as E } from "/glasses/sdk.js";
-const token = new URLSearchParams(location.search).get("t") || "";
-const q = (path, extra) => path + "?t=" + encodeURIComponent(token) + (extra || "");
+// Opened from fleet (the QR code) the secret is in the address and fleet is where the page came from. Installed from
+// Even Hub, fleet's address is written in when it is packed, and the secret comes from pairing (below), never the package.
+// The addresses it may reach are fixed when it is packed (Even allows only those listed in app.json); the setup on
+// the phone picks one of them, kept in the app's own storage.
+const PACKED = !"__FLEET_BASE__".startsWith("__");
+const ORIGINS = PACKED ? JSON.parse('__FLEET_ORIGINS__') : [];
+let BASE = PACKED ? "__FLEET_BASE__" : "";
+let token = new URLSearchParams(location.search).get("t") || "";
+const q = (path, extra) => BASE + path + "?t=" + encodeURIComponent(token) + (extra || "");
 const say = (t) => (document.getElementById("s").textContent = t);
 const W = 576, H = 288;
 const QUICK = ["yes, go ahead", "continue", "looks good, carry on", "stop and tell me where you are"];
@@ -10006,6 +10145,60 @@ bridge.onEvenHubEvent(async (e) => {
     if (view === "answer") return pick(pickAt);
   }
 });
+// Installed: the secret kept from pairing, if it still opens fleet; else pair. The glasses show a code; you approve it on
+// Telegram or the Fleet page; the app keeps the secret in its own storage on the phone.
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+// Kept in the app's own storage (the SDK's, which the Even app keeps per app), and in the WebView's as well, in case.
+const keep = async (k, v) => { try { await bridge.setLocalStorage(k, v); } catch {} try { localStorage.setItem(k, v); } catch {} };
+const kept = async (k) => { let v = ""; try { v = (await bridge.getLocalStorage(k)) || ""; } catch {} if (!v) try { v = localStorage.getItem(k) || ""; } catch {} return v; };
+const notice = (lines) => show({ containerTotalNum: 1, textObject: [text0(1, "pair", 0, 0, W, H, lines, true)] });
+async function pair() {
+  for (;;) {
+    let start = null;
+    try { start = await (await fetch(BASE + "/api/pair/start", { method: "POST" })).json(); } catch {}
+    if (!start || !start.id) {
+      say("Can't reach fleet at " + BASE + ". Is your Mac awake, and your phone on Tailscale?");
+      conn("Can't reach fleet at " + BASE.replace("http://", "").replace("https://", "") + ". Is your Mac awake, and your phone on Tailscale? Or pick another address above.");
+      await notice("Claude Fleet\\n\\nCan't reach fleet at " + BASE.replace("http://", "").replace("https://", "") + ".\\nIs your Mac awake, and your phone on Tailscale?\\n\\nTrying again…");
+      await wait(5000);
+      continue;
+    }
+    say("Pair with Claude Fleet: code " + start.code + ". Approve it on Telegram or the Fleet page.");
+    conn("Waiting for you to approve code " + start.code + " (Telegram, or the Fleet page).");
+    await notice("Pair with Claude Fleet\\n\\nCode   " + start.code + "\\n\\nApprove it on Telegram or the Fleet page on your phone.");
+    for (let i = 0; i < 300; i++) {
+      await wait(2000);
+      let r = null;
+      try { r = await (await fetch(BASE + "/api/pair/poll", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: start.id }) })).json(); } catch {}
+      if (r && r.status === "approved" && r.token) {
+        await keep("fleet-token", r.token);
+        return r.token;
+      }
+      if (r && (r.status === "denied" || r.status === "expired")) break;
+    }
+  }
+}
+// The setup, on the phone: which of the packed addresses to use, whether it is paired, and a way to pair again.
+const conn = (t) => (document.getElementById("conn").textContent = t);
+if (PACKED) {
+  const chosen = await kept("fleet-base"); if (chosen && ORIGINS.includes(chosen)) BASE = chosen;
+  const pick = document.getElementById("base");
+  for (const o of ORIGINS) { const opt = document.createElement("option"); opt.value = o; opt.textContent = o.replace("http://", "").replace("https://", ""); pick.append(opt); }
+  pick.value = BASE;
+  document.getElementById("setup").hidden = false;
+  conn("Connecting to " + BASE.replace("http://", "").replace("https://", "") + "…");
+  document.getElementById("save").onclick = async () => { await keep("fleet-base", pick.value); location.reload(); };
+  document.getElementById("forget").onclick = async () => { await keep("fleet-token", ""); location.reload(); };
+}
+if (!token && PACKED) {
+  token = await kept("fleet-token");
+  if (token) {
+    const fine = await fetch(q("/api/glasses"), { cache: "no-store" }).then((r) => r.status !== 403, () => true);
+    if (!fine) token = ""; // fleet's secret has changed since: pair again
+  }
+  if (!token) token = await pair();
+}
+if (PACKED) conn("Paired · connected to " + BASE.replace("http://", "").replace("https://", ""));
 await refresh();
 await slide();
 setInterval(tick, 3000);

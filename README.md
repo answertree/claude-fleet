@@ -191,6 +191,30 @@ Fleet runs on [Even Realities G2](https://www.evenrealities.com) glasses too. Pr
 
 The page uses Even's SDK, which is included in `vendor/` (MIT, version 0.0.16). The glasses draw 576 by 288 in sixteen shades of green, in a font with no ✓ or spinner, so fleet uses ▲ ● ◐ ○ ■ instead.
 
+
+### Installing it for good
+
+Scanning the QR code opens fleet on your glasses for as long as the Even app keeps it open. To install it like any other
+app (not on the store: a private build on your own Even Hub account):
+
+1. `tools/pack-glasses` builds `build/claude-fleet.ehpk`. It lists your Mac's Tailscale address and name, on fleet's port,
+   as the addresses the app may reach (Even allows an installed app only those in its `app.json`); add others with
+   `--origin http://host:port`. Each run is a new version.
+2. Sign in at [hub.evenrealities.com](https://hub.evenrealities.com/login), open your project (`build/glasses-app/icon.png`
+   is its icon, if it asks), go to **Private builds** and upload the `.ehpk`.
+3. In the Even Realities app: **Even Hub** (Developer Mode) → **Me** → **Apps** → **Private builds** → **Install**. It then
+   launches from the glasses' home, like a released app.
+
+The package holds fleet's address, never its secret. The first time it runs, the glasses show a code, and fleet asks
+you on Telegram and on the Fleet page whether to let them in; allow it if the codes match. The app keeps the secret in
+its own storage on your phone; if fleet's secret changes, it asks again. On the phone, its page has a setup: which of
+the packed addresses to use, whether it is paired, and **Forget pairing**.
+
+It reaches fleet over plain `http://` on your tailnet. Even's docs describe `http://` as meant for local development,
+so if your phone's Even app refuses it, serve fleet over HTTPS with Tailscale's own certificates and pack with that
+address. Fleet answers the installed app's requests only from an app's own origin (not a web site's); if the service
+log says it refused yours, set `FLEET_APP_ORIGINS` to the origin it names.
+
 ## On Windows
 
 Fleet runs on Windows with Bun, best in Windows Terminal. A few things it gets from macOS or Linux tools are missing there:
@@ -375,6 +399,7 @@ These environment variables exist for tests and screenshots only:
 | `FLEET_WEB_HOST` | Serve the phone page on this address instead of the Tailscale one (or 127.0.0.1). Only for testing: anyone who can reach the address and has the link can read your sessions. |
 | `FLEET_WEB_TOKEN_FILE` | Where the phone page's secret is kept (default `~/.config/claude-fleet/web-token`). |
 | `FLEET_WEB_PORT` | The first port to try for the phone page (default 4777). |
+| `FLEET_APP_ORIGINS` | Origins, comma-separated, the installed glasses app may call fleet from, beyond those it allows already (an app's own scheme, `file:`, `null`). Only needed if the service log says it refused your glasses app. |
 | `FLEET_PARTY` | Start a celebration at launch, as `session id=what it finished`, so a single frame can show one (the demo's `--party`). |
 | `FLEET_FOCUS` | Start focused on the session with this id, so a single frame can show focus (the demo's `--focus`). |
 | `FLEET_GIT_FIXTURE` | Take each checkout's `git status --porcelain -b` output from this JSON file (folder to text) instead of running git. |
