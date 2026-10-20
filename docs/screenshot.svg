@@ -270,7 +270,7 @@
 <text x="904.4" y="261" fill="#5c6370" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">±</text>
 <text x="912.8" y="261" fill="#c6cdd7" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> 1 file changed</text>
 <text x="1038.8" y="261" fill="#3a404a" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> · </text>
-<text x="1064.0" y="261" fill="#5c6370" textLength="176.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">3 uncommitted · 2 ah…</text>
+<text x="1064.0" y="261" fill="#5c6370" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">totals.ts</text>
 <text x="1248.8" y="261" fill="#5c6370" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">6m</text>
 <text x="22.4" y="279" fill="#988047" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">▌</text>
 <text x="64.4" y="279" fill="#56cdd6" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">• </text>
@@ -547,16 +547,16 @@
 <text x="400.4" y="729" fill="#c6cdd7" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> + </text>
 <rect x="442.4" y="716" width="58.8" height="18" fill="#282d36"/>
 <text x="442.4" y="729" fill="#c6cdd7" textLength="58.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> a All </text>
-<rect x="509.6" y="716" width="159.6" height="18" fill="#282d36"/>
-<text x="509.6" y="729" fill="#c6cdd7" textLength="159.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> d Finished agents </text>
-<rect x="677.6" y="716" width="67.2" height="18" fill="#282d36"/>
-<text x="677.6" y="729" fill="#c6cdd7" textLength="67.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> b Bell </text>
-<rect x="753.2" y="716" width="100.8" height="18" fill="#282d36"/>
-<text x="753.2" y="729" fill="#c6cdd7" textLength="100.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> space Seen </text>
-<rect x="862.4" y="716" width="75.6" height="18" fill="#282d36"/>
-<text x="862.4" y="729" fill="#c6cdd7" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> r Reply </text>
-<rect x="946.4" y="716" width="84.0" height="18" fill="#282d36"/>
-<text x="946.4" y="729" fill="#c6cdd7" textLength="84.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> ? Legend </text>
-<rect x="1047.2" y="716" width="67.2" height="18" fill="#282d36"/>
-<text x="1047.2" y="729" fill="#c6cdd7" textLength="67.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> q Quit </text>
+<rect x="509.6" y="716" width="100.8" height="18" fill="#282d36"/>
+<text x="509.6" y="729" fill="#c6cdd7" textLength="100.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> space Seen </text>
+<rect x="618.8" y="716" width="75.6" height="18" fill="#282d36"/>
+<text x="618.8" y="729" fill="#c6cdd7" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> r Reply </text>
+<rect x="702.8" y="716" width="75.6" height="18" fill="#282d36"/>
+<text x="702.8" y="729" fill="#c6cdd7" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> u Usage </text>
+<rect x="786.8" y="716" width="67.2" height="18" fill="#282d36"/>
+<text x="786.8" y="729" fill="#c6cdd7" textLength="67.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> m Menu </text>
+<rect x="862.4" y="716" width="84.0" height="18" fill="#282d36"/>
+<text x="862.4" y="729" fill="#c6cdd7" textLength="84.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> ? Legend </text>
+<rect x="963.2" y="716" width="67.2" height="18" fill="#282d36"/>
+<text x="963.2" y="729" fill="#c6cdd7" textLength="67.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> q Quit </text>
 </svg>

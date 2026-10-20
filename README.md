@@ -12,15 +12,23 @@ Every live Claude Code session, on every one of your machines, on one screen: wh
 - **Your phone.** Fleet serves a page for your phone, over Tailscale, from the moment it starts: press `w` and scan the QR code. Add it to your home screen and it opens like an app, and you can answer a session from it. See [On your phone](#on-your-phone).
 - **In the background.** Press `i` and fleet keeps all of this running with every window closed, starting when you log in. See [In the background](#in-the-background).
 - **Telegram.** Pair your own bot with `t` and fleet messages you, on every device, when a session needs you, gets stuck, or a pull request changes. Tap ↩ Reply to answer, 📺 Screen to see the session's own terminal and tap a choice on it, or ask for anything the detail view shows: `/status`, `/menu`, `/tasks`, `/prs`, `/usage`, `/screen`, `/new` to start a session, a morning digest, quiet hours and a live pinned picture of the fleet that redraws itself. See [On Telegram](#on-telegram).
+- **Your glasses.** On [Even Realities G2](https://www.evenrealities.com) glasses, fleet is one slide of every session, a dashboard for each, and an answer from the ring when one asks you something. Scan a QR code from fleet, or install it for good from your own Even Hub account. See [On your glasses](#on-your-glasses).
 
 <p align="center">
-  <img src="docs/phone.png" width="300" alt="The phone page: a session waiting on you, with its question and an answer box">
+  <img src="docs/phone.png" width="300" alt="The phone page: the limits and the machine as rings, when the five-hour limit runs out, and a session waiting on you with its question and the chat">
   &nbsp;&nbsp;
   <img src="docs/telegram-screen.png" width="520" alt="What /screen sends on Telegram: one session, drawn by fleet">
 </p>
 <p align="center"><sub>The phone page, and a session as Telegram's <code>/screen</code> sends it (fleet draws the picture itself).</sub></p>
 
-It is one TypeScript file (and `accounts.ts` beside it, for [other accounts](#other-accounts)) with no dependencies beyond [Bun](https://bun.sh). It reads the files Claude Code already keeps under `~/.claude`, and writes only its own small files: usage figures (not at all with `--no-usage`, see [Account usage and your login](#account-usage-and-your-login)), and under `~/.config/claude-fleet` the phone page's secret and, once you pair it, the Telegram bot's. Every 30 seconds it asks `git` for the state of each session's checkout, and it asks GitHub, through your `gh` command, about each session's pull requests (`--no-prs` turns that off).
+<p align="center">
+  <img src="docs/glasses-slide.png" width="420" alt="On G2 glasses: every session on one slide">
+  &nbsp;
+  <img src="docs/glasses-dashboard.png" width="420" alt="On G2 glasses: one session's dashboard">
+</p>
+<p align="center"><sub>On Even Realities G2 glasses: every session on one slide, and a session's dashboard (Even's simulator).</sub></p>
+
+It is one TypeScript file (with `accounts.ts` beside it, for [other accounts](#other-accounts), and three small worker threads: the splash, the background service's scan, and the commands it runs) with no dependencies beyond [Bun](https://bun.sh). It reads the files Claude Code already keeps under `~/.claude`, and writes only its own small files: usage figures (not at all with `--no-usage`, see [Account usage and your login](#account-usage-and-your-login)), and under `~/.config/claude-fleet` the phone page's secret and, once you pair it, the Telegram bot's. Every 30 seconds it asks `git` for the state of each session's checkout, and it asks GitHub, through your `gh` command, about each session's pull requests (`--no-prs` turns that off).
 
 ## Try it
 
@@ -182,7 +190,17 @@ It is built to be safe to leave running:
 
 ## On your glasses
 
-Fleet runs on [Even Realities G2](https://www.evenrealities.com) glasses too. Press `w`, then `g`, and fleet shows a QR code; scan it with the Even app on your phone (its developer option to load an app from a QR code) and fleet opens on your glasses. Like the phone page, it is served by fleet over Tailscale with the same secret, so the phone needs Tailscale on.
+Fleet runs on [Even Realities G2](https://www.evenrealities.com) glasses too, two ways. To try it, press `w`, then `g`, and
+fleet shows a QR code; scan it with the Even app on your phone (in developer mode, Even Hub → Scan QR) and fleet opens on
+your glasses for as long as the Even app keeps it open. To keep it, install it from your own Even Hub account: see
+[Installing it for good](#installing-it-for-good) below.
+
+<p align="center">
+  <img src="docs/glasses-slide.png" width="420" alt="The slide: every session, the limits, the machine">
+  &nbsp;
+  <img src="docs/glasses-dashboard.png" width="420" alt="A session's dashboard: activity, context, tasks, its workflow, agents and pull requests">
+</p>
+<p align="center"><sub>The slide, and a session's dashboard after a tap (both from Even's simulator, with the demo's sessions).</sub></p>
 
 - **Home, one slide:** your phone draws it (in the Even app's web view, in Apple's system font, from the numbers fleet sends) and the glasses show it as a picture: the time, the counts, the five-hour limit always with its forecast (full at what time, or where it will be at the reset), the week, CPU and memory; then the sessions, those that need you first. One or two sessions get a card each with four lines: name, machine and state; its question or what it is doing, with an activity sparkline and a context ring; its workflow (phase and a progress bar) or task in hand, agents, pull requests and failures; and Claude's last words. Three or four get three lines; five or more get a row each, so all of them fit. The ring moves the outline from one to the next; tap opens it. Only the parts of the picture that changed are sent.
 - **A session's dashboard:** tap a session for its graphs: activity over the window (tool calls, tokens out), its context over the last quarter hour against the model's limit (with when it fills), its tasks as a row of boxes, each running workflow as a progress bar with its phase, its agents each with their own activity line, pull requests with their checks, failures, and what Claude said last. Scroll for the same in words, a page at a time.
@@ -204,6 +222,8 @@ app (not on the store: a private build on your own Even Hub account):
    is its icon, if it asks), go to **Private builds** and upload the `.ehpk`.
 3. In the Even Realities app: **Even Hub** (Developer Mode) → **Me** → **Apps** → **Private builds** → **Install**. It then
    launches from the glasses' home, like a released app.
+
+<p align="center"><img src="docs/glasses-pairing.png" width="420" alt="The installed app's first run: a code to approve"></p>
 
 The package holds fleet's address, never its secret. The first time it runs, the glasses show a code, and fleet asks
 you on Telegram and on the Fleet page whether to let them in; allow it if the codes match. The app keeps the secret in
