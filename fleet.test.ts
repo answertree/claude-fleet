@@ -5274,6 +5274,64 @@ describe("key w: the phone page", () => {
     }
   });
 
+  test("the installed glasses app: it pairs (a code, your yes, the secret handed over once), and only an app's origin may call", async () => {
+    // Pairing, in itself.
+    const a = F.pairStart(1000)!;
+    expect(a.code).toMatch(/^[A-HJ-NP-Z2-9]{4}$/);
+    expect(F.pairsPending(1000).map((p) => p.code)).toEqual([a.code]);
+    expect(F.pairPoll(a.id, "secret", 2000)).toEqual({ status: "pending" });
+    expect(F.pairDecide(a.id, true, 2500)).toBe(true);
+    expect(F.pairPoll(a.id, "secret", 3000)).toEqual({ status: "approved", token: "secret" });
+    expect(F.pairPoll(a.id, "secret", 4000)).toEqual({ status: "expired" }); // handed over once
+    const b = F.pairStart(5000)!;
+    F.pairDecide(b.id, false, 5500);
+    expect(F.pairPoll(b.id, "secret", 6000)).toEqual({ status: "denied" });
+    expect(F.pairPoll(F.pairStart(7000)!.id, "secret", 7000 + 11 * 60_000)).toEqual({ status: "expired" }); // ten minutes
+    // Which origins are an installed app's.
+    expect(["null", "evenhub://app", "file://", "capacitor://localhost"].map(F.appOrigin)).toEqual([true, true, true, true]);
+    expect(["https://evil.example", "http://127.0.0.1:9", null].map(F.appOrigin)).toEqual([false, false, false]);
+    // Over HTTP.
+    process.env.FLEET_WEB_HOST = "127.0.0.1";
+    process.env.FLEET_WEB_PORT = "4979";
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-app-"));
+    process.env.FLEET_WEB_TOKEN_FILE = path.join(dir, "web-token");
+    for (const k of ["server", "url", "error"] as const) delete (F.web as any)[k];
+    const pressed: string[] = [];
+    F.web.keys = async (_s, key) => (pressed.push(key), { ok: true, via: "test" });
+    const web = F.startWeb(() => [{ sid: "s1" } as any], () => Date.now());
+    try {
+      const token = new URL(web.url!).searchParams.get("t")!;
+      const base = "http://127.0.0.1:4979";
+      const pre = await fetch(`${base}/api/keys?t=${token}`, { method: "OPTIONS", headers: { origin: "evenhub://app", "access-control-request-method": "POST" } });
+      expect([pre.status, pre.headers.get("access-control-allow-origin"), pre.headers.get("access-control-allow-headers")]).toEqual([204, "evenhub://app", "content-type"]);
+      expect((await fetch(`${base}/api/keys?t=${token}`, { method: "OPTIONS", headers: { origin: "https://evil.example" } })).status).toBe(403);
+      const start = await fetch(`${base}/api/pair/start`, { method: "POST", headers: { origin: "evenhub://app" } });
+      expect([start.status, start.headers.get("access-control-allow-origin")]).toEqual([200, "evenhub://app"]);
+      expect((await start.json()).code).toMatch(/^[A-Z2-9]{4}$/);
+      expect((await fetch(`${base}/api/pair/start`, { method: "POST", headers: { origin: "https://evil.example" } })).status).toBe(403);
+      const send = (origin: string) => fetch(`${base}/api/keys?t=${token}`, { method: "POST", headers: { origin, "content-type": "application/json" }, body: JSON.stringify({ sid: "s1", key: "1" }) });
+      expect((await send("evenhub://app")).status).toBe(200);
+      expect((await send("https://evil.example")).status).toBe(403);
+      expect(pressed).toEqual(["1"]);
+      const decide = await fetch(`${base}/api/pair/decide?t=wrong`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+      expect(decide.status).toBe(403); // your answer needs the secret
+    } finally {
+      web.server?.stop(true);
+      delete F.web.keys;
+      delete process.env.FLEET_WEB_HOST;
+      delete process.env.FLEET_WEB_PORT;
+      delete process.env.FLEET_WEB_TOKEN_FILE;
+    }
+  });
+
+  test("the glasses page packs as an installed app: its SDK beside it, fleet's addresses written in, no secret", () => {
+    expect(F.GLASSES_PAGE).toContain('from "/glasses/sdk.js"');
+    expect(F.GLASSES_PAGE).toContain("__FLEET_BASE__");
+    expect(F.GLASSES_PAGE).toContain("__FLEET_ORIGINS__");
+    expect(F.GLASSES_PAGE).toContain('bridge.getLocalStorage(k)');
+    expect(F.GLASSES_PAGE).not.toMatch(/__TOKEN__/);
+  });
+
   test("the page builds no markup from data, so text from a session cannot become HTML", () => {
     expect(F.WEB_PAGE).not.toContain("innerHTML");
     expect(F.WEB_PAGE).not.toContain("insertAdjacentHTML");

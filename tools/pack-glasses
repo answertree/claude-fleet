@@ -1,0 +1,83 @@
+#!/usr/bin/env bun
+// Builds the glasses app to install for good on your G2 glasses: an .ehpk for Even Hub's private builds (your own
+// account, never the store). Upload it at https://hub.evenrealities.com/login → your project → Private builds, then in the
+// Even Realities app: Even Hub (Developer Mode) → Me → Apps → Private builds → Install.
+//
+// The app holds fleet's address but never its secret: the first time it runs, the glasses show a code and you approve
+// it on Telegram or the Fleet page; the app keeps the secret in its own storage on your phone. Even lets an installed
+// app reach only the addresses listed in its app.json, so this lists your Mac's Tailscale address and name (on fleet's
+// port), and any you add with --origin; the app's setup on your phone picks one of them.
+//
+//   tools/pack-glasses [--origin http://host:port]... [--version 1.2.3] [--out build/claude-fleet.ehpk]
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { spawnSync } from "node:child_process";
+import { GLASSES_PAGE, pngOf } from "../fleet.ts";
+
+const here = path.join(import.meta.dir, "..");
+const args = process.argv.slice(2);
+const flag = (name: string) => args.flatMap((a, i) => (a === name && args[i + 1] ? [args[i + 1]] : []));
+const port = Number(process.env.FLEET_WEB_PORT) || 4777;
+
+// Where fleet is: any given first (the first is the default), then your Mac's Tailscale address and name on fleet's port.
+const origins: string[] = [];
+for (const o of flag("--origin")) {
+  const u = new URL(o);
+  if (!origins.includes(u.origin)) origins.push(u.origin);
+}
+const ts = spawnSync("tailscale", ["status", "--json"], { encoding: "utf8", timeout: 10_000 });
+try {
+  const self = JSON.parse(ts.stdout).Self;
+  const ip = (self.TailscaleIPs as string[]).find((x) => /^100\./.test(x));
+  const name = String(self.DNSName ?? "").replace(/\.$/, "");
+  for (const o of [ip && `http://${ip}:${port}`, name && `http://${name}:${port}`]) if (o && !origins.includes(o)) origins.push(o);
+} catch {}
+if (!origins.length) {
+  console.error("No address for fleet: is Tailscale up? Or give one with --origin http://host:port");
+  process.exit(1);
+}
+
+const out = path.resolve(flag("--out")[0] ?? path.join(here, "build", "claude-fleet.ehpk"));
+const app = path.join(here, "build", "glasses-app");
+const dist = path.join(app, "dist");
+fs.rmSync(dist, { recursive: true, force: true });
+fs.mkdirSync(dist, { recursive: true });
+
+// The page fleet serves at /glasses, with its SDK beside it and fleet's addresses written in.
+const page = GLASSES_PAGE.replace('from "/glasses/sdk.js"', 'from "./sdk.js"').replaceAll("__FLEET_BASE__", origins[0]).replace("__FLEET_ORIGINS__", JSON.stringify(origins));
+fs.writeFileSync(path.join(dist, "index.html"), page);
+fs.copyFileSync(path.join(here, "vendor", "even_hub_sdk.js"), path.join(dist, "sdk.js"));
+
+// Each build a new version: the last one's, one higher, unless given.
+let last = "1.0.0";
+try {
+  last = JSON.parse(fs.readFileSync(path.join(app, "app.json"), "utf8")).version;
+} catch {}
+const version = flag("--version")[0] ?? last.replace(/(\d+)$/, (n) => String(Number(n) + 1));
+const manifest = {
+  package_id: "com.answertree.claudefleet",
+  edition: "202601",
+  name: "Claude Fleet",
+  version,
+  min_app_version: "2.2.10",
+  min_sdk_version: "0.0.16",
+  entrypoint: "index.html",
+  permissions: [{ name: "network", desc: "Reaches Claude Fleet on your own Mac, over Tailscale, for your sessions.", whitelist: origins }],
+  supported_languages: ["en"],
+};
+fs.writeFileSync(path.join(app, "app.json"), JSON.stringify(manifest, null, 2) + "\n");
+
+// The icon, as Even Hub wants it: 24 by 24, each pixel clear or #F4F4F4, lit in 2 by 2 blocks. An F.
+const F = ["............", ".##########.", ".##########.", ".##.........", ".##.........", ".########...", ".########...", ".##.........", ".##.........", ".##.........", ".##.........", "............"];
+const px = new Uint8Array(24 * 24 * 4);
+for (let y = 0; y < 24; y++) for (let x = 0; x < 24; x++) if (F[y >> 1][x >> 1] === "#") px.set([0xf4, 0xf4, 0xf4, 255], (y * 24 + x) * 4);
+fs.writeFileSync(path.join(app, "icon.png"), pngOf(24, 24, px, 4));
+
+fs.mkdirSync(path.dirname(out), { recursive: true });
+const pack = spawnSync("npx", ["--yes", "@evenrealities/evenhub-cli@latest", "pack", "app.json", "dist", "-o", out], { cwd: app, stdio: "inherit" });
+if (pack.status !== 0) process.exit(pack.status ?? 1);
+console.log(`\nClaude Fleet ${version} for your glasses: ${out}`);
+console.log(`It reaches fleet at ${origins.join(" or ")}.`);
+console.log(`Icon (for the project, if Even Hub asks): ${path.join(app, "icon.png")}`);
+console.log("Upload it at https://hub.evenrealities.com/login → your project → Private builds,");
+console.log("then in the Even Realities app: Even Hub → Me → Apps → Private builds → Install.");
