@@ -6062,6 +6062,23 @@ describe("a workflow's title", () => {
   });
 });
 
+describe("sessions on another machine", () => {
+  test("say how busy that machine is beside its name; this one's own sessions do not (its load is in the header)", () => {
+    const now = Date.now();
+    F.peers.set("1.2.3.4:4777", { host: "Tom's Mac Mini", ip: "1.2.3.4", addr: "1.2.3.4:4777", sessions: [], at: now, fresh: false, busy: false, machine: { cpu: 6.4, mem: 57 } });
+    try {
+      const there = { sid: "r1", name: "far", cwd: "/x", mains: [], agents: [], workflows: [], remote: { host: "Tom's Mac Mini", ip: "1.2.3.4", addr: "1.2.3.4:4777", use: { cpu: 0, rss: 0, known: true } } } as any;
+      const here = { sid: "l1", name: "near", cwd: "/x", mains: [], agents: [], workflows: [] } as any;
+      expect(F.machineLabel(there)).toBe("Tom's Mac Mini (cpu 6%)");
+      expect(F.machineLabel(here)).toBe(F.selfHost());
+      F.peers.get("1.2.3.4:4777")!.machine = undefined; // not measured yet: the name alone
+      expect(F.machineLabel(there)).toBe("Tom's Mac Mini");
+    } finally {
+      F.peers.clear();
+    }
+  });
+});
+
 describe("finding Tailscale", () => {
   test("the tailscale on the PATH, else the one inside the Mac app (which puts nothing on the PATH)", () => {
     expect(F.pickTailscale(true, "darwin", true)).toBe("tailscale");

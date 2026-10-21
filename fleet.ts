@@ -4696,7 +4696,7 @@ function headRows(b: Block, p: Paint): Row[] {
   const folders = foldersOf(s.cwd.replace(os.homedir(), "~"));
   const branch = s.mains.map((m) => m.branch).find(Boolean);
   const at = branch && branch !== "HEAD" ? ` ${ICON.at} ${branch}` : "";
-  const where = (machineOf(s) ? `${machineOf(s)} ${ICON.sep} ` : "") + folders.slice(-2).join("/") + at;
+  const where = (machineOf(s) ? `${machineLabel(s)} ${ICON.sep} ` : "") + folders.slice(-2).join("/") + at;
   const kind = `${s.kind || "cli"} ${s.sid.slice(0, 8)}`;
   // 'folder/folder @ branch · kind id' loses the kind and id first, then the parent folder, then goes. Under 100 columns it is not drawn.
   // The session's totals go first when room is short: all the tokens it has used, the agents it has run, how often its context was compacted.
@@ -5673,7 +5673,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
     const b = buckets(tailsHere.map((t) => t.tools), now, S);
     const branch = s.mains.map((m) => m.branch).find(Boolean);
     const home = os.homedir();
-    const where = (machineOf(s) ? `${machineOf(s)} ${ICON.sep} ` : "") + foldersOf(s.cwd.replace(home, "~")).slice(-2).join("/") + (branch && branch !== "HEAD" ? ` ${ICON.at} ${branch}` : "");
+    const where = (machineOf(s) ? `${machineLabel(s)} ${ICON.sep} ` : "") + foldersOf(s.cwd.replace(home, "~")).slice(-2).join("/") + (branch && branch !== "HEAD" ? ` ${ICON.at} ${branch}` : "");
     const stalled = v.state === "stalled";
     // The lead glyph is the state: ▲ needs you, ◐ stalled, ● working, ▸ your turn, ○ idle, ✓ finished.
     const state = STATE[v.state];
@@ -6248,7 +6248,7 @@ export function webState(sessions: Session[], now: number) {
       return {
         sid: s.sid,
         name: s.name,
-        place: [machineOf(s) ? `${machineOf(s)} ·` : "", foldersOf(s.cwd.replace(os.homedir(), "~")).slice(-2).join("/"), branch && branch !== "HEAD" ? `@ ${branch}` : ""].filter(Boolean).join(" "),
+        place: [machineOf(s) ? `${machineLabel(s)} ·` : "", foldersOf(s.cwd.replace(os.homedir(), "~")).slice(-2).join("/"), branch && branch !== "HEAD" ? `@ ${branch}` : ""].filter(Boolean).join(" "),
         state: v.state,
         word: STATE[v.state].word,
         color: hexOf(STATE[v.state].color),
@@ -9175,6 +9175,15 @@ export const selfHost = () => tailnet.host || os.hostname().split(".")[0];
 export const manyMachines = () => [...peers.values()].some((p) => p.sessions.length || p.at);
 /** The machine a session is on, when there is more than one to tell apart. */
 export const machineOf = (s: Session): string | undefined => (manyMachines() ? (s.remote?.host ?? selfHost()) : undefined);
+/**
+ * The machine a session is on, with how busy that machine is when it is another one ("Tom's Mac Mini (cpu 6%)"):
+ * this Mac's own load is in the header, another machine's only here, as its fleet last measured it.
+ */
+export function machineLabel(s: Session): string | undefined {
+  const m = machineOf(s);
+  const cpu = s.remote?.addr ? peers.get(s.remote.addr)?.machine?.cpu : undefined;
+  return m && typeof cpu === "number" ? `${m} (cpu ${Math.round(cpu)}%)` : m;
+}
 
 /** This machine's sessions as another machine reads them: Maps written out, the reader's own state left behind, old timestamps trimmed. */
 export function encodeSessions(list: Session[], now: number, stamp = true): string {
