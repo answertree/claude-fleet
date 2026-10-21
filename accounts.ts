@@ -21,9 +21,13 @@ import {
   accountView,
   accountViewOf,
   claudeEmail,
+  fiveHourForms,
+  fiveHourLine,
   loginEmail,
   machinesByAccount,
   selfHost,
+  viewFromPeerUsage,
+  type FiveHour,
   askAnthropic,
   clock,
   enterScreen,
@@ -389,6 +393,7 @@ export interface AccountLine {
   view: AccountView;
   machines: string[];
   unlisted?: boolean; // in use by a machine, but not in your list
+  forecast?: FiveHour; // for an account in use: how its five-hour limit goes at today's pace
 }
 /**
  * Your listed accounts, always in the list's order, each with the machines of the fleet signed in to it right now (by
@@ -411,6 +416,7 @@ export function accountLines(now: number): AccountLine[] {
       name: a.name,
       email,
       machines,
+      forecast: machines.length ? fiveHourLine(now, view) : undefined,
       view: machines.length
         ? view
         : {
@@ -423,15 +429,26 @@ export function accountLines(now: number): AccountLine[] {
   for (const [email, machines] of users) {
     if (listed.has(email)) continue;
     // This Mac's own login reads its own figures; another machine's are read there, so here they are only named.
+    // This Mac's own login is read here; another machine's figures come from that machine.
     const view: AccountView =
-      email === mine
-        ? accountView(now)
-        : { kind: "none", limits: [], asOf: 0, nextTry: 0, busy: false };
-    out.push({ name: "not in your list", email, machines, view, unlisted: true });
+      (email === mine ? accountView(now) : viewFromPeerUsage(email, now)) ??
+      { kind: "none", limits: [], asOf: 0, reason: "", remedy: "", nextTry: 0, busy: false };
+    out.push({ name: "not in your list", email, machines, view, unlisted: true, forecast: fiveHourLine(now, view) });
   }
   return out;
 }
 
+/**
+ * Where an account's block sits on a screen W wide: the gauge's width and column, where the figure ends, where the
+ * detail ("resets Mon 23:00", "full in ~5h") starts, and the block's right edge, which the account's header lines up with.
+ */
+export function usageBlock(W: number) {
+  const GW = W >= 110 ? 48 : W >= 90 ? 36 : W >= 70 ? 18 : 12;
+  const gaugeAt = 9; // after the limit's label ("5h", "7d") at column 4
+  const valueEnd = gaugeAt + GW + 4;
+  const detail = valueEnd + 3;
+  return { GW, gaugeAt, valueEnd, detail, end: Math.min(W - 1, detail + 17) };
+}
 /** A limit's row: label, gauge with its pace tick, the figure, then when it fills (in red, at this pace) or resets. `more` follows on the right where it fits. */
 function limitRow(
   W: number,
@@ -442,10 +459,8 @@ function limitRow(
   more: Seg[] = [],
 ): string {
   const r = new Row(W);
-  const GW = W >= 120 ? 32 : W >= 90 ? 24 : 12;
-  const gaugeAt = 6 + 7;
-  const valueEnd = gaugeAt + GW + 4;
-  r.put(6, label, C.dim);
+  const { GW, gaugeAt, valueEnd } = usageBlock(W);
+  r.put(4, label, C.dim);
   r.paste(gaugeAt, limitGauge(l?.pct, GW, l?.tick, stale), GW);
   if (!l) {
     r.putr(valueEnd, "--", C.dim);
@@ -498,21 +513,26 @@ export function accountsScreen(
 ): string[] {
   const out: string[] = [];
   const title = new Row(W);
-  title.segs(2, [
-    [`${ICON.claude} CLAUDE USAGE`, C.cyan, true],
-    ["   every account you use · read only", C.dim],
-  ]);
-  out.push(title.toString(), "");
   const { problems } = loadAccounts();
   const lines = accountLines(now);
-  for (const { name, email, view: a, machines, unlisted } of lines) {
+  const inUse = lines.filter((l) => l.machines.length).length;
+  title.segs(2, [
+    [`${ICON.claude} CLAUDE USAGE`, C.cyan, true],
+    [`   ${lines.length} account${lines.length === 1 ? "" : "s"}${lines.length ? ` ${ICON.sep} ${inUse} in use` : ""} ${ICON.sep} read only`, C.dim],
+  ]);
+  out.push(title.toString(), "");
+  // The account names line up, as do the emails after them.
+  const nameW = Math.min(18, Math.max(0, ...lines.map((l) => width(l.name))));
+  for (const { name, email, view: a, machines, unlisted, forecast } of lines) {
     const head = new Row(W);
-    let col = head.put(2, name, C.white, true);
+    // In use: bright, as a working session is on the main screen; nothing on it: receded.
+    const used = machines.length > 0;
+    let col = head.put(2, fitOrDrop(name, nameW), used ? C.white : C.text, used);
     if (email)
       col = head.put(
-        Math.max(col + 2, 14),
-        fitOrDrop(email, W - col - 4),
-        C.dim,
+        2 + nameW + 3,
+        fitOrDrop(email, W - nameW - 8),
+        used ? C.dim : C.faint,
       );
     const stale = a.kind === "stale";
     const why = a.reason ? reasonForms(a.reason) : [];
@@ -535,20 +555,28 @@ export function accountsScreen(
                 "cached figures",
               ]
             : [];
-    // Right after the email, so it reads with its account: the machines signed in to it now. How the reading stands
-    // goes on the right, where it fits.
-    const using = machines.length ? fitOrDrop(`● ${machines.join(" · ")}`, W - col - 4) : "";
-    if (using) col = head.put(col + 3, using, C.green, true);
-    const usingAt = W;
+    // The machines signed in to it now, flush with the block's right edge (where "resets Mon 23:00" ends); just after
+    // the email where the screen is too narrow for that. How the reading stands goes to their left, where it fits.
+    const edge = usageBlock(W).end;
+    let using = machines.length ? `● ${machines.join(" · ")}` : "";
+    let usingAt = edge + 1;
+    if (using && edge - width(using) + 1 >= col + 3) usingAt = head.putr(edge, using, C.green, true) + 1;
+    else if (using) {
+      using = fitOrDrop(using, W - col - 4);
+      if (using) col = head.put(col + 3, using, C.green, true);
+      usingAt = W;
+    }
     // Not in your list: how to add it comes with whatever the reading says, and alone where both do not fit.
     if (unlisted) {
       const now = machines.includes(selfHost()) ? [...status] : [`read on ${machines.join(" · ")}`];
       status.splice(0, status.length, ...now.map((f) => `${f} ${ICON.sep} a adds it here`), "a adds it here");
     }
-    const room = usingAt - col - 4;
-    const said = status.length && room > 4 ? firstFit(status, room) : "";
-    if (said)
-      head.putr(usingAt - 1, said, a.kind !== "current" && a.reason ? C.red : C.dim);
+    // How the reading stands: in the header where a wording fits whole, else on a line of its own under the gauges.
+    const room = usingAt - col - 5;
+    const said = status.find((f) => width(f) <= room) ?? "";
+    const tone = a.kind !== "current" && a.reason ? C.red : C.dim;
+    if (said) head.putr(usingAt - (using && usingAt <= edge ? 4 : 1), said, tone);
+    const note = !said && status.length ? firstFit(status, W - usageBlock(W).gaugeAt - 1) : "";
     out.push(head.toString());
     const lim = (k: string) => a.limits.find((l) => l.key === k);
     const opus = lim("seven_day_opus");
@@ -568,6 +596,20 @@ export function accountsScreen(
       );
     out.push(limitRow(W, "5h", lim("five_hour"), stale, now));
     out.push(limitRow(W, "7d", lim("seven_day"), stale, now, weekMore));
+    // In use: how the five-hour limit goes at this pace, under the gauges, as the main screen says it.
+    const forms = forecast && !stale ? fiveHourForms(forecast) : [];
+    const { gaugeAt } = usageBlock(W);
+    const fits = forms.find((segs) => segs.reduce((n, [t]) => n + width(t), 0) <= W - gaugeAt - 1);
+    if (fits) {
+      const r = new Row(W);
+      r.segs(gaugeAt, fits);
+      out.push(r.toString());
+    }
+    if (note) {
+      const r = new Row(W);
+      r.put(gaugeAt, note, tone);
+      out.push(r.toString());
+    }
     out.push("");
   }
   if (!opt.usage) {
