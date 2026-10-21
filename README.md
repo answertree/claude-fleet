@@ -130,7 +130,7 @@ Every control has a key, and all but `tab` and `esc` are also buttons on the bot
 | Key | Does |
 | --- | --- |
 | `1` `2` `3` | View mode: detail, compact, timeline |
-| `r` | Open the session that has waited on you longest (or the one in focus) to answer it, if it is on this machine |
+| `r` | Answer the session that has waited on you longest (or the one in focus): on this machine it opens with `claude attach`; on another, you type the reply here and that machine's fleet sends it |
 | `w` | The phone page's QR code and link (the page itself is always on) |
 | `t` | Telegram: pair your bot, `s` sends a test message, `x` unpairs |
 | `i` | Run fleet in the background: its status and log, and `y` to install or remove it |
@@ -170,7 +170,7 @@ Fleet shows the sessions on all your machines at once, with nothing to set up be
 
 - **No secrets to copy.** A fleet answers another machine only after `tailscale whois` confirms the request comes from a device signed in to your own Tailscale account.
 - **What travels:** each machine's own sessions (never what it got from others), trimmed to the last three and a half hours, compressed, and not sent at all when nothing changed since the last ask.
-- **Messages and replies** to a session on another machine (from the phone page or Telegram) are passed to that machine's fleet, which types them in there. The `r` key can only open a session on this machine.
+- **Messages and replies** to a session on another machine (from the phone page, Telegram or `r`) are passed to that machine's fleet, which types them in there. On a session elsewhere, `r` shows the end of its screen and its choices, then sends the line you type (a choice's number presses it).
 - **Telegram** is one bot for all of them. Pair it on any machine; the pairing (token and chat) reaches the others, newest change winning, and unpairing does too. Of the fleets that can, the one with the lowest Tailscale address talks to the bot and notifies you about every machine's sessions; when it goes, the next takes over. A machine coming into view does not set off notifications for what was already waiting on it.
 - Machines must run the same version of fleet to see each other.
 

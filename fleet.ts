@@ -15,6 +15,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { StringDecoder } from "node:string_decoder";
+import { createInterface } from "node:readline/promises";
 import { deflateSync, inflateSync } from "node:zlib";
 import { spawn, spawnSync } from "node:child_process";
 import { accountWizard, accountsKey, accountsMain, accountsScreen, retryAccounts, tickAccounts } from "./accounts.ts";
@@ -7648,6 +7649,47 @@ export function screenOptions(screen: string): { key: string; label: string }[] 
   }
   return out;
 }
+/**
+ * Answer a session on another machine from this one's terminal (key r): the end of its screen and its numbered choices,
+ * then a line typed here. A choice's number presses it, esc presses Esc, anything else is typed in as a message, by
+ * that machine's fleet; nothing, and nothing is sent. What happened, for the screen to say.
+ */
+export async function replyElsewhere(
+  s: Session,
+  io: { input: NodeJS.ReadableStream; output: NodeJS.WritableStream } = { input: process.stdin, output: process.stdout },
+  act = { peek: peekSession, send: sendToSession, keys: keysToSession },
+): Promise<string> {
+  const where = `${s.name} on ${s.remote?.host ?? selfHost()}`;
+  const say = (line = "") => io.output.write(line + "\n");
+  say();
+  say(bold(fg(C.white, `  Reply to ${where}`)));
+  const peek = await act.peek(s);
+  const screen = (peek.screen ?? "").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+  const tail = screen.split("\n").map((l) => l.trimEnd()).filter((l, i, all) => l || (i > 0 && all[i - 1])).slice(-14);
+  if (peek.ok && tail.length) {
+    say(fg(C.dim, "  Its screen now:"));
+    for (const l of tail) say(fg(C.dim, `  │ ${safeLine(l).slice(0, 140)}`));
+  } else say(fg(C.dim, `  (its screen could not be read${peek.error ? `: ${peek.error}` : ""})`));
+  const options = peek.screen ? screenOptions(peek.screen) : [];
+  if (options.length) say(fg(C.text, `  Choices: ${options.map((o) => `${o.key} ${o.label}`).join("   ")}   (type the number to press it)`));
+  say(fg(C.dim, "  Type your reply and press Enter; esc presses Esc; Enter alone sends nothing."));
+  const rl = createInterface({ input: io.input, output: io.output, terminal: false });
+  let text = "";
+  try {
+    io.output.write("  > ");
+    text = (await rl.question("")).trim();
+  } finally {
+    rl.close();
+  }
+  if (!text) return `nothing sent to ${where}`;
+  if (options.some((o) => o.key === text) || /^esc$/i.test(text)) {
+    const key = /^esc$/i.test(text) ? "X" : text;
+    const r = await act.keys(s, key);
+    return r.ok ? `pressed ${key === "X" ? "Esc" : key} in ${where}` : `not pressed in ${where}: ${r.error}`;
+  }
+  const r = await act.send(s, text);
+  return !r.ok ? `not sent to ${where}: ${r.error}` : r.queued ? `queued for ${where}: it goes in as soon as it can take it` : `sent to ${where}`;
+}
 /** Start a background Claude session in `cwd`, as `claude --bg` does; its id, when it started. */
 export async function startSession(cwd: string, prompt: string): Promise<Reach> {
   const text = cleanMessage(prompt);
@@ -11628,7 +11670,12 @@ if (import.meta.main) {
     const sid = replyTarget(sessions, focusSid);
     const s = sessions.find((x) => x.sid === sid);
     if (!s) return say("nothing is waiting on you: focus a session (tab or click) to open it");
-    if (s.remote) return say(`${s.name} is on ${s.remote.host}: answer it from the phone page or Telegram`);
+    // On another machine there is no claude attach from here: its fleet types the answer in, as for the phone page.
+    if (s.remote)
+      return stepOut(async () => {
+        const said = await replyElsewhere(s);
+        Object.assign(notice, { text: said, until: clock() + 6000 });
+      });
     if (!s.jobId) return say(`${s.name} is not a background session: switch to its own terminal to answer it`);
     restore();
     const r = spawnSync(process.env.FLEET_ATTACH_CMD || "claude", ["attach", s.jobId], { stdio: "inherit" });
