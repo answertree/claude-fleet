@@ -7142,6 +7142,20 @@ function animate() {
   };
   V.raf = requestAnimationFrame(step);
 }
+// One microphone for as long as the app is open: an iPhone asks again at every getUserMedia from a home-screen app, so
+// it is asked for once, switched off between calls (which stops the capture) and switched back on for the next. A
+// stream iOS has ended (the app was put away for long) is asked for again.
+let heldMic = null;
+async function microphone() {
+  if (heldMic && heldMic.getAudioTracks().some((t) => t.readyState === "live")) {
+    for (const t of heldMic.getAudioTracks()) t.enabled = true;
+    return heldMic;
+  }
+  // A permission sheet left unanswered never settles: say what's needed rather than spin.
+  heldMic = await Promise.race([navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }), new Promise((_, no) => setTimeout(() => no(new Error("allow the microphone for this page, then tap the mic again")), 15000))]);
+  return heldMic;
+}
+addEventListener("pagehide", (e) => { if (!e.persisted && heldMic) { for (const t of heldMic.getTracks()) t.stop(); heldMic = null; } });
 async function openVoice() {
   const box = $("voice"); box.classList.add("on"); box.setAttribute("aria-hidden", "false");
   vtool(""); V.err = 0; proposals.clear(); drawCards();
@@ -7155,8 +7169,7 @@ async function openVoice() {
   }
   vstate("Connecting…");
   try {
-    // A permission sheet left unanswered never settles: say what's needed rather than spin.
-    V.mic = await Promise.race([navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }), new Promise((_, no) => setTimeout(() => no(new Error("allow the microphone for this page, then tap the mic again")), 15000))]);
+    V.mic = await microphone();
     const pc = (V.pc = new RTCPeerConnection());
     const audio = new Audio(); audio.autoplay = true; audio.playsInline = true;
     pc.ontrack = (e) => { audio.srcObject = e.streams[0]; audio.play().catch(() => {}); };
@@ -7179,7 +7192,7 @@ function closeVoice(hide = true) {
   cancelAnimationFrame(V.raf);
   if (V.dc && V.dc.readyState === "open") vsend({ type: "session.close", event_id: "bye" });
   try { V.dc && V.dc.close(); } catch {} try { V.pc && V.pc.close(); } catch {}
-  if (V.mic) for (const t of V.mic.getTracks()) t.stop();
+  if (V.mic) for (const t of V.mic.getTracks()) t.enabled = false; // kept, switched off, for the next call
   clearInterval(V.poll);
   if (V.pc && V.startedAt) void fleetPost("api/voice/health", callHealth());
   Object.assign(V, { pc: null, dc: null, mic: null, energy: {}, lvAt: {}, health: {}, startedAt: 0, muted: false, busy: 0, deleg: false, heardAt: 0, err: 0 });
