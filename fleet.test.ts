@@ -5405,6 +5405,10 @@ describe("key w: the phone page", () => {
     expect(new TextDecoder().decode(wav.slice(0, 4)) + new TextDecoder().decode(wav.slice(8, 12))).toBe("RIFFWAVE");
     expect([wav.length, new DataView(wav.buffer).getUint32(24, true), new DataView(wav.buffer).getUint32(40, true)]).toEqual([48, 24_000, 4]);
     expect(F.WEB_PAGE).toContain('id="vpick"');
+    // One microphone for the app's life: an iPhone home-screen app asks at every getUserMedia, so it is asked for in one
+    // place, once, and a call's end switches it off rather than letting it go.
+    expect(F.WEB_PAGE.match(/getUserMedia\(/g)?.length).toBe(1);
+    expect(F.WEB_PAGE).toContain("t.enabled = false; // kept, switched off, for the next call");
     expect([F.voiceBlurb("stone"), F.voiceBlurb("juni"), F.voiceBlurb("bossa"), F.voiceBlurb("quartz")]).toEqual(["Irish English · male", "German · female", "Brazilian Portuguese · female", "Australian English · female"]);
     expect(F.voiceHello("juni")).toStartWith("Hallo PB");
     // Every voice comes with its preview, so the picker plays at once, with or without a key.
