@@ -6095,6 +6095,39 @@ describe("sessions on another machine", () => {
   });
 });
 
+describe("answering a session on another machine from the terminal", () => {
+  const far = { sid: "r9", name: "far", cwd: "/x", mains: [], agents: [], workflows: [], remote: { host: "mini", ip: "1.2.3.4", addr: "1.2.3.4:4777", use: { cpu: 0, rss: 0, known: false } } } as any;
+  const run = async (typed: string, screen = "Do you want to proceed?\n❯ 1. Yes\n  2. No\n") => {
+    const { PassThrough } = await import("node:stream");
+    const input = new PassThrough(), output = new PassThrough();
+    let shown = "";
+    output.on("data", (d) => (shown += d));
+    const did: string[] = [];
+    const act = {
+      peek: async () => ({ ok: true, screen }),
+      send: async (_s: any, t: string) => (did.push(`send ${t}`), { ok: true, via: "mini" }),
+      keys: async (_s: any, k: string) => (did.push(`key ${k}`), { ok: true, via: "mini" }),
+    };
+    const done = F.replyElsewhere(far, { input, output }, act as any);
+    setTimeout(() => input.write(typed + "\n"), 20);
+    return { said: await done, did, shown: shown.replace(/\x1b\[[0-9;]*m/g, "") };
+  };
+  test("shows its screen and choices, then types the reply in through that machine's fleet", async () => {
+    const r = await run("yes, go ahead");
+    expect(r.shown).toContain("Reply to far on mini");
+    expect(r.shown).toContain("│ Do you want to proceed?");
+    expect(r.shown).toContain("Choices: 1 Yes   2 No");
+    expect([r.did, r.said]).toEqual([["send yes, go ahead"], "sent to far on mini"]);
+  });
+  test("a choice's number presses it, esc presses Esc, and nothing sends nothing", async () => {
+    expect((await run("2")).did).toEqual(["key 2"]);
+    expect((await run("esc")).did).toEqual(["key X"]);
+    const none = await run("");
+    expect([none.did, none.said]).toEqual([[], "nothing sent to far on mini"]);
+    expect((await run("7", "no choices here")).did).toEqual(["send 7"]); // a number with no such choice is a message
+  });
+});
+
 describe("finding Tailscale", () => {
   test("the tailscale on the PATH, else the one inside the Mac app (which puts nothing on the PATH)", () => {
     expect(F.pickTailscale(true, "darwin", true)).toBe("tailscale");
