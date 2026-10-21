@@ -227,7 +227,7 @@ describe("the accounts screen", () => {
     try {
       const inUse = A.accountsScreen(100, 20, NOW).map(strip);
       const row = inUse.findIndex((l) => l.includes("client"));
-      expect(inUse[row]).toEndWith(`● ${F.selfHost()} · mini`);
+      expect(inUse[row]).toMatch(new RegExp(`me@work\\.example   ● ${F.selfHost()} · mini$`)); // right after the email
       expect(inUse[row + 1]).toContain("full in");
       // This Mac signed in to an account you have not listed: it follows the list, with its own figures, and how to add it.
       fs.writeFileSync(mine, JSON.stringify({ oauthAccount: { emailAddress: "elsewhere@x.example" } }));
@@ -237,7 +237,7 @@ describe("the accounts screen", () => {
       expect(extra).toBeGreaterThan(other.findIndex((l) => l.includes("client")));
       expect(other[extra]).toContain("elsewhere@x.example");
       expect(other[extra]).toContain("a adds it here");
-      expect(other[extra]).toEndWith(`● ${F.selfHost()}`);
+      expect(other[extra]).toContain(`elsewhere@x.example   ● ${F.selfHost()}`);
     } finally {
       F.peers.clear();
       fs.rmSync(mine);
