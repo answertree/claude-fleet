@@ -6062,6 +6062,15 @@ describe("a workflow's title", () => {
   });
 });
 
+describe("finding Tailscale", () => {
+  test("the tailscale on the PATH, else the one inside the Mac app (which puts nothing on the PATH)", () => {
+    expect(F.pickTailscale(true, "darwin", true)).toBe("tailscale");
+    expect(F.pickTailscale(false, "darwin", true)).toBe("/Applications/Tailscale.app/Contents/MacOS/Tailscale");
+    expect(F.pickTailscale(false, "darwin", false)).toBe("tailscale"); // nothing to find: tried by name, and fleet says it is on this Mac only
+    expect(F.pickTailscale(false, "linux", true)).toBe("tailscale");
+  });
+});
+
 describe("reaching a background session", () => {
   test("one that will not open is tried once more, a moment later, and the log says why", async () => {
     if (Bun.spawnSync(["tmux", "-V"]).exitCode !== 0) return; // needs tmux, as fleet does

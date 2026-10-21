@@ -7290,10 +7290,22 @@ tick(); live();
 export const web: { watchedAt: number; links: number; push?: () => void; secure?: { stop: (closeActive?: boolean) => void; publish: (topic: string, data: string) => void }; url?: string; host?: string; onTailnet?: boolean; server?: { stop: (closeActive?: boolean) => void }; error?: string; send?: typeof sendToSession; keys?: typeof keysToSession; peek?: typeof peekSession; start?: typeof startSession; shared?: boolean; retake?: () => void; yieldPort?: () => void; older?: boolean } = { watchedAt: 0, links: 0 };
 const sameToken = (a: string, b: string) => a.length === b.length && crypto.timingSafeEqual ? (() => { try { return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b)); } catch { return false; } })() : a === b;
 /** This Mac's Tailscale IPv4 address, when it has one. */
+/**
+ * The tailscale command: the one on the PATH (Homebrew, Linux, Windows), else the one inside the Mac app, which is how
+ * Tailscale's Mac app (App Store or standalone) ships it, with nothing on the PATH. Without it fleet cannot find its
+ * tailnet address, and would serve this Mac only.
+ */
+export const TAILSCALE_MAC_APP = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
+export const pickTailscale = (onPath: boolean, platform: string, macApp: boolean) => (!onPath && platform === "darwin" && macApp ? TAILSCALE_MAC_APP : "tailscale");
+let tailscaleFound: string | undefined;
+export function tailscaleCmd(): string {
+  tailscaleFound ??= pickTailscale(spawnSync(process.platform === "win32" ? "where" : "which", ["tailscale"], { timeout: 3000 }).status === 0, process.platform, fs.existsSync(TAILSCALE_MAC_APP));
+  return tailscaleFound;
+}
 function tailnetAddress(): string | undefined {
   if (process.env.FLEET_WEB_HOST) return process.env.FLEET_WEB_HOST;
   try {
-    const r = spawnSync("tailscale", ["ip", "-4"], { encoding: "utf8", timeout: 10_000 });
+    const r = spawnSync(tailscaleCmd(), ["ip", "-4"], { encoding: "utf8", timeout: 10_000 });
     const ip = r.stdout?.split("\n")[0]?.trim();
     return r.status === 0 && ip && /^100\.\d+\.\d+\.\d+$/.test(ip) ? ip : undefined;
   } catch {
@@ -7766,7 +7778,7 @@ let tsName = "";
 function tailnetName(): string {
   if (tsName || process.env.FLEET_HOME) return tsName;
   try {
-    tsName = String(JSON.parse(spawnSync("tailscale", ["status", "--json"], { encoding: "utf8", timeout: 5000 }).stdout).Self?.DNSName ?? "").replace(/\.$/, "");
+    tsName = String(JSON.parse(spawnSync(tailscaleCmd(), ["status", "--json"], { encoding: "utf8", timeout: 5000 }).stdout).Self?.DNSName ?? "").replace(/\.$/, "");
   } catch {}
   return tsName;
 }
@@ -7796,7 +7808,7 @@ function serveSecure(options: any, host: string, token: string) {
     try {
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     } catch {}
-    runInBackground("tailscale", ["cert", "--cert-file", cert, "--key-file", key, name], 60_000, (code) => {
+    runInBackground(tailscaleCmd(), ["cert", "--cert-file", cert, "--key-file", key, name], 60_000, (code) => {
       if (code === 0) start();
       else if (fs.existsSync(cert)) start(); // the one we have, while it lasts
       else if (isServiceWorker) svcLog("no HTTPS for the page: tailscale cert failed (is HTTPS on for your tailnet?)");
@@ -8068,6 +8080,7 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
   }
   const tail = tailnetAddress();
   const host = tail ?? "127.0.0.1";
+  if (!tail && isServiceWorker) svcLog(`no Tailscale address (${tailscaleCmd()} ip -4 gave none: is Tailscale running and signed in?), so the page is on this Mac only and your other machines cannot see this one`);
   const headers = { "cache-control": "no-store", "referrer-policy": "no-referrer", "x-frame-options": "DENY", "x-content-type-options": "nosniff", "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; media-src 'self' blob: mediastream:; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" };
   const base = Number(process.env.FLEET_WEB_PORT) || 4777;
   const serveOn = (port: number) => {
@@ -8325,7 +8338,7 @@ export function webScreen(cols: number, rows: number): string[] {
     out.push(
       ...(web.shared ? [fg(C.dim, "  Another fleet on this Mac is serving it (same link); this one takes over if that one quits.")] : []),
       fg(C.dim, svcState().running ? "  Fleet runs in the background here, so the page stays up with every window closed." : "  Press i to keep fleet running in the background, so the page stays up when you close this."),
-      fg(C.dim, web.onTailnet ? "  On your tailnet: any of your Tailscale devices can open it, nothing else can." : "  No Tailscale here, so it is open on this Mac only (127.0.0.1)."),
+      fg(C.dim, web.onTailnet ? "  On your tailnet: any of your Tailscale devices can open it, nothing else can." : "  No Tailscale here (is it running and signed in?), so it is open on this Mac only (127.0.0.1): your other machines and phone cannot reach it."),
       fg(C.dim, "  The link is the key and stays the same, so add it to your home screen. It can type messages into your"),
       fg(C.dim, "  sessions, so keep it to yourself. Delete ~/.config/claude-fleet/web-token to change it."),
     );
@@ -9127,7 +9140,7 @@ function run(cmd: string[], timeoutMs = 4000): Promise<string | undefined> {
 export const peerNet = {
   /** Your other machines that could be running fleet: online, yours, and not a phone or tablet. */
   async discover(): Promise<void> {
-    const text = await run(["tailscale", "status", "--json"]);
+    const text = await run([tailscaleCmd(), "status", "--json"]);
     if (!text) return;
     try {
       const j = JSON.parse(text);
@@ -9145,7 +9158,7 @@ export const peerNet = {
     const hit = whoisSeen.get(ip);
     if (hit && Date.now() - hit.at < 5 * 60_000) return hit.ok;
     if (!tailnet.user) await peerNet.discover();
-    const text = await run(["tailscale", "whois", "--json", ip]);
+    const text = await run([tailscaleCmd(), "whois", "--json", ip]);
     let ok = false;
     try {
       ok = !!text && !!tailnet.user && String(JSON.parse(text)?.UserProfile?.ID) === tailnet.user;
