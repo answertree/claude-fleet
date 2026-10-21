@@ -9142,6 +9142,7 @@ export interface Peer {
   sentTag?: string; // our state as that machine last confirmed having it, so ours goes again only when it changed
   pushedTag?: string; // its state as it last pushed it here
   noPush?: boolean; // an older fleet that only answers reads
+  readUsAt?: number; // when it last read this one's state: then it has it, and needs no push
   machine?: { cpu: number; mem: number }; // its CPU and memory, for Telegram's overview
   usage?: { label: string; pct: number; resets: string; resetsAt?: number }[]; // its Claude account's limits
 }
@@ -9242,9 +9243,10 @@ export function decodeSessions(text: string): Session[] {
   return list.filter((s) => s && typeof s.sid === "string" && PLAIN_ID.test(s.sid) && Array.isArray(s.mains));
 }
 /** What /peer/state answers: this machine's own sessions (never the ones it got from others), their pull requests, and the Telegram pairing. */
-let peerPayload = { at: 0, body: new Uint8Array(), tag: "" };
+let peerPayload = { at: 0, seq: -1, body: new Uint8Array(), tag: "" };
 export function peerState(local: Session[], now: number): { body: Uint8Array; tag: string } {
-  if (now - peerPayload.at < 1000) return peerPayload;
+  // Made once a scan (the sessions change no faster), and at most once a second: it can take seconds to put together.
+  if (peerPayload.seq === scanSeq || now - peerPayload.at < 1000) return peerPayload;
   const prs: Record<string, PrState> = {};
   for (const s of local) for (const pr of s.side?.prs ?? []) {
     const st = prState.get(`${pr.repo}#${pr.number}`)?.state;
@@ -9253,7 +9255,7 @@ export function peerState(local: Session[], now: number): { body: Uint8Array; ta
   const tgc = readTg();
   const ws = webState([], now);
   const text = `{"proto":${PEER_PROTO},"build":${JSON.stringify(FLEET_BUILD)},"host":${JSON.stringify(selfHost())},"machine":${JSON.stringify({ cpu: ws.machine.cpu, mem: ws.machine.mem })},"usage":${JSON.stringify(ws.account?.limits ?? null)},"tgReady":${!!tgc.token && tgWanted},"tg":${JSON.stringify(tgc.at ? tgc : null)},"prs":${JSON.stringify(prs)},"sessions":${encodeSessions(local, now)}}`;
-  peerPayload = { at: now, body: Bun.gzipSync(new TextEncoder().encode(text)), tag: `"${Bun.hash(text).toString(36)}"` };
+  peerPayload = { at: now, seq: scanSeq, body: Bun.gzipSync(new TextEncoder().encode(text)), tag: `"${Bun.hash(text).toString(36)}"` };
   return peerPayload;
 }
 
@@ -9307,11 +9309,14 @@ async function fetchPeer(p: Peer, local: Session[]) {
   peerTries.set(p.addr, now);
   p.busy = true;
   try {
-    const ours = peerState(local, now);
-    const send = !p.noPush && p.sentTag !== ours.tag;
+    // A machine that reads this one already has its state. Only one that does not (it cannot reach this one) is given
+    // it, so this one's state, which can take seconds to put together, is made for a push only when it is needed.
+    const theyRead = !!p.readUsAt && now - p.readUsAt < 10_000;
+    const ours = p.noPush || theyRead ? undefined : peerState(local, now);
+    const send = !!ours && p.sentTag !== ours.tag;
     const port = String(Number(process.env.FLEET_WEB_PORT) || 4777);
-    const head: Record<string, string> = { "x-fleet-tag": ours.tag, "x-fleet-port": port, ...(p.tag ? { "if-none-match": p.tag } : {}) };
-    let r = await fetch(`http://${p.addr}/peer/state`, send ? { method: "POST", headers: { ...head, "content-type": "application/json", "x-fleet-gzip": "1" }, body: ours.body, signal: AbortSignal.timeout(4000) } : { headers: head, signal: AbortSignal.timeout(4000) });
+    const head: Record<string, string> = { "x-fleet-port": port, ...(ours ? { "x-fleet-tag": ours.tag } : {}), ...(p.tag ? { "if-none-match": p.tag } : {}) };
+    let r = await fetch(`http://${p.addr}/peer/state`, send ? { method: "POST", headers: { ...head, "content-type": "application/json", "x-fleet-gzip": "1" }, body: ours!.body, signal: AbortSignal.timeout(4000) } : { headers: head, signal: AbortSignal.timeout(4000) });
     if (send && (r.status === 404 || r.status === 405)) {
       p.noPush = true; // an older fleet: read it the old way
       r = await fetch(`http://${p.addr}/peer/state`, { headers: p.tag ? { "if-none-match": p.tag } : {}, signal: AbortSignal.timeout(4000) });
@@ -9339,6 +9344,7 @@ export function takePushedPeer(ip: string, port: number, tag: string, j: any | u
   const known = tailnet.found.find((m) => m.ip === ip);
   const p = peers.get(addr) ?? { host: known?.host ?? (typeof j?.host === "string" ? safeLine(j.host).slice(0, 40) : ip), ip, addr, sessions: [], at: 0, fresh: false, busy: false };
   peers.set(addr, p);
+  p.readUsAt = now; // it has this one's state, as of now
   if (j) {
     try {
       absorbPeer(p, j);

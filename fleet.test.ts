@@ -5804,6 +5804,7 @@ describe("every machine", () => {
       got.at = 1;
       const again = await fetch("http://127.0.0.1:5077/peer/state", { headers: { "x-fleet-tag": '"t1"', "x-fleet-port": "4999" } });
       expect([again.headers.get("x-fleet-have"), got.at > 1]).toEqual(['"t1"', true]);
+      expect(Date.now() - got.readUsAt!).toBeLessThan(5000); // it reads this one, so this one never pushes to it
       expect((await fetch("http://127.0.0.1:5077/peer/state", { method: "POST", headers: { "x-fleet-gzip": "1" }, body: "not gzip" })).status).toBe(400);
       F.peers.delete("127.0.0.1:4999");
 
