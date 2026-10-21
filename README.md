@@ -434,6 +434,7 @@ These environment variables exist for tests and screenshots only:
 | `FLEET_DEPLOYS_FILE` | Read deploy targets from this file instead of `~/.config/claude-fleet/deploys.json`. |
 | `FLEET_DEPLOY_FIXTURE` | Take each deploy target's revision from this JSON file (URL to revision) instead of asking the URL. |
 | `FLEET_ATTACH_CMD` | Run this instead of `claude` when `r` opens a session (tests use `true`). |
+| `FLEET_SEND_RETRY_MS` | How long a message for a busy session waits before its first retry (default `10000`; later retries wait longer, for up to ten minutes). |
 | `FLEET_TELEGRAM_FILE` | Where the Telegram bot's token and paired chat are kept (default `~/.config/claude-fleet/telegram.json`). |
 | `FLEET_TELEGRAM_API` | Another address for Telegram's bot API. Only for testing. |
 | `FLEET_WEB` | `0` stops fleet from serving the phone page; it starts with fleet otherwise. |
