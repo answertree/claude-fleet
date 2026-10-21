@@ -9206,13 +9206,18 @@ export const peerNet = {
   /** Whether a request from `ip` comes from one of your own devices, by asking Tailscale who is there. */
   async trust(ip: string): Promise<boolean> {
     const hit = whoisSeen.get(ip);
-    if (hit && Date.now() - hit.at < 5 * 60_000) return hit.ok;
+    if (hit && Date.now() - hit.at < (hit.ok ? 5 * 60_000 : 30_000)) return hit.ok; // a no is asked again sooner: it may have been a hiccup
     if (!tailnet.user) await peerNet.discover();
     const text = await run([tailscaleCmd(), "whois", "--json", ip]);
     let ok = false;
     try {
       ok = !!text && !!tailnet.user && String(JSON.parse(text)?.UserProfile?.ID) === tailnet.user;
     } catch {}
+    // Where whois gives no yes (no answer, or one in a shape it did not expect), Tailscale's own list of this user's machines (online, signed in as you) decides.
+    if (!ok) {
+      await peerNet.discover();
+      ok = tailnet.found.some((m) => m.ip === ip);
+    }
     whoisSeen.set(ip, { ok, at: Date.now() });
     return ok;
   },
