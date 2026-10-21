@@ -8113,11 +8113,26 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
             const ip = (srv.requestIP(req)?.address ?? "").replace(/^::ffff:/, "");
             if (!ip || !(await peerNet.trust(ip))) return new Response("not one of your machines", { status: 403, headers });
             const local = getSessions().filter((x) => !x.remote);
-            if (url.pathname === "/peer/state" && req.method === "GET") {
+            if (url.pathname === "/peer/state") {
+              // What the asking machine pushed of its own (when it changed), or only that it is unchanged.
+              let pushed: any;
+              if (req.method === "POST") {
+                try {
+                  const raw = new Uint8Array(await req.arrayBuffer());
+                  if (raw.length > 8_000_000) return new Response("too big", { status: 413, headers });
+                  pushed = JSON.parse(new TextDecoder().decode(req.headers.get("x-fleet-gzip") ? Bun.gunzipSync(raw) : raw));
+                } catch {
+                  return new Response("not a fleet's state", { status: 400, headers });
+                }
+              }
+              const from = Number(req.headers.get("x-fleet-port")) || 4777;
+              const itself = (ip === tailnet.ip || /^127\./.test(ip)) && from === srv.port; // this fleet asking itself is no other machine
+              const have = itself ? undefined : takePushedPeer(ip, from, req.headers.get("x-fleet-tag") ?? "", pushed);
+              const ph = have ? { ...headers, "x-fleet-have": have } : headers; // this answer's own, never the shared headers
               const st = peerState(local, now());
               // Nothing changed since that machine last asked: say so in a few bytes.
-              if (req.headers.get("if-none-match") === st.tag) return new Response(null, { status: 304, headers: { ...headers, etag: st.tag } });
-              return new Response(st.body, { headers: { ...headers, "content-type": "application/json", "content-encoding": "gzip", etag: st.tag } });
+              if (req.headers.get("if-none-match") === st.tag) return new Response(null, { status: 304, headers: { ...ph, etag: st.tag } });
+              return new Response(st.body, { headers: { ...ph, "content-type": "application/json", "content-encoding": "gzip", etag: st.tag } });
             }
             if (req.method === "POST") {
               const body: any = await req.json().catch(() => ({}));
@@ -9124,6 +9139,9 @@ export interface Peer {
   tg?: TgConfig;
   tgReady?: boolean; // it can talk to the bot
   tag?: string; // what it last sent, so it can answer "unchanged"
+  sentTag?: string; // our state as that machine last confirmed having it, so ours goes again only when it changed
+  pushedTag?: string; // its state as it last pushed it here
+  noPush?: boolean; // an older fleet that only answers reads
   machine?: { cpu: number; mem: number }; // its CPU and memory, for Telegram's overview
   usage?: { label: string; pct: number; resets: string; resetsAt?: number }[]; // its Claude account's limits
 }
@@ -9240,7 +9258,7 @@ export function peerState(local: Session[], now: number): { body: Uint8Array; ta
 }
 
 /** Ask each machine's fleet for its sessions; called on every scan, it starts what is due and returns at once. */
-export function pollPeers(now: number) {
+export function pollPeers(now: number, local: Session[] = []) {
   if (!peersWanted) return;
   if (!tailnet.busy && now - tailnet.at >= DISCOVER_EVERY_MS) {
     tailnet.busy = true;
@@ -9256,39 +9274,56 @@ export function pollPeers(now: number) {
     const p = peers.get(addr) ?? { host: m.host, ip: m.ip, addr, sessions: [], at: 0, fresh: false, busy: false };
     p.host = m.host;
     peers.set(addr, p);
-    if (!p.busy && now - p.at >= PEER_EVERY_MS) void fetchPeer(p);
+    if (!p.busy && now - p.at >= PEER_EVERY_MS) void fetchPeer(p, local);
   }
   for (const [addr, p] of peers) if (!wanted.has(addr) && !p.busy) peers.delete(addr);
 }
 let peerTries = new Map<string, number>(); // when each machine was last asked, so one that is not running fleet is asked only now and then
-async function fetchPeer(p: Peer) {
+/** Take a machine's state, read from it or pushed by it, as its sessions and figures. */
+function absorbPeer(p: Peer, j: any) {
+  if (j?.proto !== PEER_PROTO) throw new Error("another version");
+  const sessions = decodeSessions(JSON.stringify(j.sessions ?? []));
+  for (const s of sessions) s.remote = { ...(s.remote as any), host: p.host, ip: p.ip, addr: p.addr }; // named as Tailscale names it, the same on every machine
+  p.fresh = !p.at;
+  p.at = Date.now();
+  p.sessions = sessions;
+  p.tg = j.tg && typeof j.tg === "object" ? j.tg : undefined;
+  p.tgReady = j.tgReady === true;
+  p.machine = j.machine && typeof j.machine.cpu === "number" ? { cpu: j.machine.cpu, mem: Number(j.machine.mem) || 0 } : undefined;
+  p.usage = Array.isArray(j.usage) ? j.usage.filter((l: any) => typeof l?.label === "string" && typeof l?.pct === "number").map((l: any) => ({ label: safeLine(l.label).slice(0, 20), pct: l.pct, resets: typeof l.resets === "string" ? safeLine(l.resets).slice(0, 40) : "", resetsAt: typeof l.resetsAt === "number" ? l.resetsAt : undefined })) : undefined;
+  // Their pull requests' states, for the rows; this machine's own reads win for a PR both have.
+  for (const [key, st] of Object.entries(j.prs ?? {})) if (!prState.get(key)?.state || prState.get(key)!.at < Date.now() - 60_000) prState.set(key, { at: Date.now() - 30_000, state: st as PrState });
+  // The newest Telegram pairing wins, so pairing (or unpairing) on any machine reaches all of them.
+  if (p.tg?.at && p.tg.at > (readTg().at ?? 0)) writeTg(p.tg, false);
+}
+/**
+ * Read a machine's state, and give it ours in the same request (only when it has changed since it last said it had
+ * it): a machine this one cannot reach, behind its firewall or serving only itself, still sees this one's sessions,
+ * and this one sees its, as long as either can reach the other.
+ */
+async function fetchPeer(p: Peer, local: Session[]) {
   const now = Date.now();
   if (!p.at && now - (peerTries.get(p.addr) ?? 0) < 10_000) return;
   peerTries.set(p.addr, now);
   p.busy = true;
   try {
-    const r = await fetch(`http://${p.addr}/peer/state`, { headers: p.tag ? { "if-none-match": p.tag } : {}, signal: AbortSignal.timeout(4000) });
+    const ours = peerState(local, now);
+    const send = !p.noPush && p.sentTag !== ours.tag;
+    const port = String(Number(process.env.FLEET_WEB_PORT) || 4777);
+    const head: Record<string, string> = { "x-fleet-tag": ours.tag, "x-fleet-port": port, ...(p.tag ? { "if-none-match": p.tag } : {}) };
+    let r = await fetch(`http://${p.addr}/peer/state`, send ? { method: "POST", headers: { ...head, "content-type": "application/json", "x-fleet-gzip": "1" }, body: ours.body, signal: AbortSignal.timeout(4000) } : { headers: head, signal: AbortSignal.timeout(4000) });
+    if (send && (r.status === 404 || r.status === 405)) {
+      p.noPush = true; // an older fleet: read it the old way
+      r = await fetch(`http://${p.addr}/peer/state`, { headers: p.tag ? { "if-none-match": p.tag } : {}, signal: AbortSignal.timeout(4000) });
+    }
+    if (r.headers.get("x-fleet-have")) p.sentTag = r.headers.get("x-fleet-have")!;
     if (r.status === 304) {
       p.at = Date.now();
       return;
     }
     if (!r.ok) throw new Error(String(r.status));
     p.tag = r.headers.get("etag") ?? undefined;
-    const j: any = await r.json();
-    if (j?.proto !== PEER_PROTO) throw new Error("another version");
-    const sessions = decodeSessions(JSON.stringify(j.sessions ?? []));
-    for (const s of sessions) s.remote = { ...(s.remote as any), host: p.host, ip: p.ip, addr: p.addr }; // named as Tailscale names it, the same on every machine
-    p.fresh = !p.at;
-    p.at = Date.now();
-    p.sessions = sessions;
-    p.tg = j.tg && typeof j.tg === "object" ? j.tg : undefined;
-    p.tgReady = j.tgReady === true;
-    p.machine = j.machine && typeof j.machine.cpu === "number" ? { cpu: j.machine.cpu, mem: Number(j.machine.mem) || 0 } : undefined;
-    p.usage = Array.isArray(j.usage) ? j.usage.filter((l: any) => typeof l?.label === "string" && typeof l?.pct === "number").map((l: any) => ({ label: safeLine(l.label).slice(0, 20), pct: l.pct, resets: typeof l.resets === "string" ? safeLine(l.resets).slice(0, 40) : "", resetsAt: typeof l.resetsAt === "number" ? l.resetsAt : undefined })) : undefined;
-    // Their pull requests' states, for the rows; this machine's own reads win for a PR both have.
-    for (const [key, st] of Object.entries(j.prs ?? {})) if (!prState.get(key)?.state || prState.get(key)!.at < Date.now() - 60_000) prState.set(key, { at: Date.now() - 30_000, state: st as PrState });
-    // The newest Telegram pairing wins, so pairing (or unpairing) on any machine reaches all of them.
-    if (p.tg?.at && p.tg.at > (readTg().at ?? 0)) writeTg(p.tg, false);
+    absorbPeer(p, await r.json());
   } catch {
     if (p.at && Date.now() - p.at > PEER_GONE_MS) {
       p.at = 0;
@@ -9297,6 +9332,22 @@ async function fetchPeer(p: Peer) {
   } finally {
     p.busy = false;
   }
+}
+/** A machine's state pushed with its read of ours: kept as if read from it. Its address is its tailnet address and fleet port. */
+export function takePushedPeer(ip: string, port: number, tag: string, j: any | undefined, now = Date.now()): string | undefined {
+  const addr = `${ip}:${port}`;
+  const known = tailnet.found.find((m) => m.ip === ip);
+  const p = peers.get(addr) ?? { host: known?.host ?? (typeof j?.host === "string" ? safeLine(j.host).slice(0, 40) : ip), ip, addr, sessions: [], at: 0, fresh: false, busy: false };
+  peers.set(addr, p);
+  if (j) {
+    try {
+      absorbPeer(p, j);
+      p.pushedTag = tag;
+    } catch {
+      return p.pushedTag;
+    }
+  } else if (tag && tag === p.pushedTag) p.at = now; // unchanged, and still there
+  return p.pushedTag;
 }
 /** Every other machine's sessions, as last read. */
 export function peerSessions(): Session[] {
@@ -11268,7 +11319,7 @@ async function refresh(yields = false) {
   lap(`git and PRs (git ${Math.round(sideCost.git)}, worktrees ${Math.round(sideCost.worktrees)}, prs ${Math.round(sideCost.prs)}, deploys ${Math.round(sideCost.deploys)} ms; ${sideCost.started} started)`);
   if (yields) await breathe();
   // Your other machines' sessions join this one's; their git and pull requests were read by their own fleets.
-  pollPeers(now);
+  pollPeers(now, local);
   sessions = [...local, ...peerSessions()];
   const fresh = takeFreshPeers();
   for (const sid of takeJustRead()) fresh.add(sid); // read at last: what it shows was already so, not news
