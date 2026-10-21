@@ -6922,7 +6922,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden && (!
 // between the phone and OpenAI. GPT-Live hands thinking and tools to a reasoning model, whose tool calls arrive here and
 // are answered from what fleet sends the page and through fleet's own actions. Nothing is typed or pressed in a session
 // until PB has seen the exact line on screen and said yes (or tapped Send).
-const V = { pc: null, dc: null, mic: null, ctx: null, inA: null, outA: null, raf: 0, muted: false, busy: 0, deleg: false, heardAt: 0, err: 0, calls: new Map(), n: 0, seen: new Set(), log: [] };
+const V = { pc: null, dc: null, mic: null, raf: 0, poll: 0, energy: {}, lv: { out: 0, mic: 0 }, lvAt: {}, ease: { out: 0, mic: 0 }, saidAt: 0, pbAt: 0, health: {}, startedAt: 0, muted: false, busy: 0, deleg: false, heardAt: 0, err: 0, calls: new Map(), n: 0, seen: new Set(), log: [] };
 const $ = (id) => document.getElementById(id);
 const vstate = (t) => ($("vstate").textContent = t);
 const vtool = (t) => ($("vtool").textContent = t || "");
@@ -7014,7 +7014,8 @@ async function onVoiceEvent(e) {
   else if (t === "session.delegation.created") { V.deleg = true; V.busy = Date.now(); vtool("Looking into it…"); }
   // Fleet talking with nothing handed off is not thinking (the start of a call, or between sentences). Its words are
   // not shown (only the cards are), but the last few are kept for a look from the console.
-  else if (t === "session.output_transcript.delta") { if (!V.deleg) V.busy = 0; V.log.push("Fleet: " + (m.delta || "")); V.log = V.log.slice(-400); }
+  else if (t === "session.input_transcript.delta") V.pbAt = Date.now();
+  else if (t === "session.output_transcript.delta") { V.saidAt = Date.now(); if (!V.deleg) V.busy = 0; V.log.push("Fleet: " + (m.delta || "")); V.log = V.log.slice(-400); }
   else if (t === "response.event" && m.event) {
     const ev = m.event;
     V.busy = Date.now();
@@ -7040,9 +7041,47 @@ async function onVoiceEvent(e) {
 // swelling with the voice; while Fleet thinks a pulse runs round them.
 const ORBS = ["#0075fc", "#25d8fc", "#01abfd", "#01e6b3", "#63fa9b", "#3147fc", "#6c28fa"];
 const orbView = { spin: 0, lv: 0, dir: 1, last: 0, w: 0 };
-function level(stream) { const a = V.ctx.createAnalyser(); a.fftSize = 512; a.smoothingTimeConstant = 0.6; V.ctx.createMediaStreamSource(stream).connect(a); return a; }
-const buf = new Uint8Array(512);
-function rms(a) { if (!a) return 0; a.getByteTimeDomainData(buf); let s = 0; for (const v of buf) s += ((v - 128) / 128) ** 2; return Math.sqrt(s / buf.length); }
+// The orbs' levels come from the call's own statistics (the energy each way over the last 50 ms), never an AudioContext:
+// on an iPhone, tapping the call's audio with Web Audio is heard as clicks. A phone that leaves a figure out still has
+// the timing of the words, from GPT-Live's transcripts.
+async function pollLevels() {
+  const pc = V.pc; if (!pc) return;
+  try {
+    const got = { out: -1, mic: -1 };
+    (await pc.getStats()).forEach((r) => {
+      if (r.type === "candidate-pair" && r.nominated) V.health.pair = r;
+      const k = r.type === "inbound-rtp" && r.kind === "audio" ? "out" : r.type === "media-source" && r.kind === "audio" ? "mic" : "";
+      if (!k) return;
+      if (r.totalAudioEnergy !== undefined && r.totalSamplesDuration) {
+        const was = V.energy[k]; V.energy[k] = [r.totalAudioEnergy, r.totalSamplesDuration];
+        if (was && r.totalSamplesDuration > was[1]) got[k] = Math.sqrt((r.totalAudioEnergy - was[0]) / (r.totalSamplesDuration - was[1]));
+      } else if (typeof r.audioLevel === "number") got[k] = r.audioLevel;
+      if (k === "out") V.health.inbound = r;
+    });
+    for (const k of ["out", "mic"]) if (got[k] >= 0) { V.lv[k] = got[k]; V.lvAt[k] = Date.now(); }
+  } catch {}
+}
+// From the words when the figures are missing: a lively flutter while words are arriving.
+const flutter = (at, now) => (now - at < 450 ? 0.07 + 0.05 * Math.abs(Math.sin(now / 83)) + 0.03 * Math.abs(Math.sin(now / 37)) : 0);
+function levelsNow() {
+  const now = Date.now(), fresh = (k) => now - (V.lvAt[k] || 0) < 1500;
+  const out = fresh("out") ? V.lv.out : flutter(V.saidAt, now);
+  const mic = V.muted ? 0 : fresh("mic") ? V.lv.mic : flutter(V.pbAt, now);
+  // Eased each frame between the 50 ms readings, so the orbs glide rather than step.
+  V.ease.out += (out - V.ease.out) * 0.35; V.ease.mic += (mic - V.ease.mic) * 0.35;
+  return { out: V.ease.out, mic: V.ease.mic, raw: out };
+}
+// How the call's audio held up, for the service log when it ends: lost packets and concealed audio mean the network,
+// none means the clicks were made on the phone.
+function callHealth() {
+  const i = V.health.inbound || {}, p = V.health.pair || {}, num = (x) => (typeof x === "number" && isFinite(x) ? x : undefined);
+  return { seconds: Math.round((Date.now() - V.startedAt) / 1000), received: num(i.packetsReceived), lost: num(i.packetsLost), jitterMs: num(i.jitter) !== undefined ? Math.round(i.jitter * 1000) : undefined,
+    samples: num(i.totalSamplesReceived), concealed: num(i.concealedSamples), silentConcealed: num(i.silentConcealedSamples), concealments: num(i.concealmentEvents),
+    stretched: num(i.insertedSamplesForDeceleration), squeezed: num(i.removedSamplesForAcceleration),
+    bufferMs: num(i.jitterBufferDelay) !== undefined && i.jitterBufferEmittedCount ? Math.round((i.jitterBufferDelay / i.jitterBufferEmittedCount) * 1000) : undefined,
+    rttMs: num(p.currentRoundTripTime) !== undefined ? Math.round(p.currentRoundTripTime * 1000) : undefined,
+    phone: /iPhone|iPad/.test(navigator.userAgent) ? "iPhone" : /Android/.test(navigator.userAgent) ? "Android" : "other" };
+}
 function drawOrbs(now, out, mic, mode) {
   const cv = $("orbs"), g = cv.getContext("2d");
   const w = cv.clientWidth, dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -7082,8 +7121,8 @@ function animate() {
   let shown = "";
   const step = (now) => {
     if (!V.pc) return;
-    const out = rms(V.outA), mic = V.muted ? 0 : rms(V.inA), at = Date.now();
-    if (out > 0.015) V.heardAt = at;
+    const { out, mic, raw } = levelsNow(), at = Date.now();
+    if (raw > 0.015) V.heardAt = at;
     if (V.busy && at - V.busy > 45000) V.busy = 0; // a backend that never came back
     const mode = at - V.heardAt < 600 ? "Speaking" : V.busy ? "Thinking" : V.muted ? "Muted" : "Listening";
     if (mode !== shown && !V.err) { shown = mode; vstate(mode); }
@@ -7105,13 +7144,11 @@ async function openVoice() {
   }
   vstate("Connecting…");
   try {
-    V.ctx = new (window.AudioContext || window.webkitAudioContext)(); // made in the tap, so the phone lets it run
     // A permission sheet left unanswered never settles: say what's needed rather than spin.
     V.mic = await Promise.race([navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }), new Promise((_, no) => setTimeout(() => no(new Error("allow the microphone for this page, then tap the mic again")), 15000))]);
-    V.inA = level(V.mic);
     const pc = (V.pc = new RTCPeerConnection());
     const audio = new Audio(); audio.autoplay = true; audio.playsInline = true;
-    pc.ontrack = (e) => { audio.srcObject = e.streams[0]; audio.play().catch(() => {}); V.outA = level(e.streams[0]); };
+    pc.ontrack = (e) => { audio.srcObject = e.streams[0]; audio.play().catch(() => {}); };
     pc.addTrack(V.mic.getTracks()[0], V.mic);
     V.dc = pc.createDataChannel("oai-events");
     V.dc.onmessage = onVoiceEvent;
@@ -7122,6 +7159,7 @@ async function openVoice() {
     if (!r.ok) throw new Error(r.error || "no answer");
     $("vmodel").textContent = r.model + " · " + r.voice;
     await pc.setRemoteDescription({ type: "answer", sdp: r.sdp });
+    V.startedAt = Date.now(); V.poll = setInterval(pollLevels, 50);
     V.busy = Date.now();
     animate();
   } catch (x) { closeVoice(false); V.err = 1; vstate("Couldn't start: " + (x && x.message || x)); }
@@ -7131,8 +7169,9 @@ function closeVoice(hide = true) {
   if (V.dc && V.dc.readyState === "open") vsend({ type: "session.close", event_id: "bye" });
   try { V.dc && V.dc.close(); } catch {} try { V.pc && V.pc.close(); } catch {}
   if (V.mic) for (const t of V.mic.getTracks()) t.stop();
-  try { V.ctx && V.ctx.close(); } catch {}
-  Object.assign(V, { pc: null, dc: null, mic: null, ctx: null, inA: null, outA: null, muted: false, busy: 0, deleg: false, heardAt: 0, err: 0 });
+  clearInterval(V.poll);
+  if (V.pc && V.startedAt) void fleetPost("api/voice/health", callHealth());
+  Object.assign(V, { pc: null, dc: null, mic: null, energy: {}, lvAt: {}, health: {}, startedAt: 0, muted: false, busy: 0, deleg: false, heardAt: 0, err: 0 });
   V.calls.clear();
   $("vmute").className = "";
   if (hide) { $("voice").classList.remove("on"); $("voice").setAttribute("aria-hidden", "true"); }
@@ -7746,6 +7785,20 @@ export function voiceSessionBody(sdp: string, stateBody: string) {
     transport: { type: "webrtc", sdp },
   };
 }
+/**
+ * How a voice call's audio held up, from the phone's WebRTC statistics, as one line for the service log: packets lost
+ * and audio concealed point at the network; stretching and squeezing at the jitter buffer; neither, at the phone itself.
+ */
+export function voiceHealthLine(b: Record<string, unknown>): string | undefined {
+  const n = (k: string) => (typeof b[k] === "number" && Number.isFinite(b[k]) && (b[k] as number) >= 0 ? Math.round(b[k] as number) : undefined);
+  const seconds = n("seconds");
+  if (seconds === undefined) return undefined;
+  const pct = (a?: number, of?: number) => (a !== undefined && of ? `${((100 * a) / of).toFixed(2)}%` : "?");
+  const received = n("received"), lost = n("lost"), samples = n("samples"), rate = samples && seconds ? samples / seconds : 48_000;
+  const ms = (k: string) => (n(k) !== undefined ? `${Math.round((1000 * n(k)!) / rate)} ms` : "?");
+  const phone = ["iPhone", "Android", "other"].includes(String(b.phone)) ? String(b.phone) : "other";
+  return `voice call, ${seconds}s on ${phone}: packets lost ${lost ?? "?"} of ${received ?? "?"} (${pct(lost, (received ?? 0) + (lost ?? 0))}), audio concealed ${pct(n("concealed"), samples)} in ${n("concealments") ?? "?"} events (${pct(n("silentConcealed"), samples)} silent), stretched ${ms("stretched")}, squeezed ${ms("squeezed")}, jitter ${n("jitterMs") ?? "?"} ms, buffer ${n("bufferMs") ?? "?"} ms, round trip ${n("rttMs") ?? "?"} ms`;
+}
 /** Start a GPT-Live conversation for the phone's WebRTC offer, with this Mac's key: the answer for the phone. */
 async function voiceSession(sdp: string, stateBody: string): Promise<{ ok: boolean; sdp?: string; id?: string; model?: string; voice?: string; error?: string }> {
   const key = openAIKey();
@@ -7856,6 +7909,17 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
               body = await req.json();
             } catch {}
             return Response.json(pairPoll(String(body.id ?? ""), token), { headers });
+          }
+          if (req.method === "POST" && url.pathname === "/api/voice/health") {
+            const origin = req.headers.get("origin");
+            if (!sameToken(url.searchParams.get("t") ?? "", token) || (origin && origin !== `${url.protocol}//${url.host}`) || !req.headers.get("content-type")?.startsWith("application/json")) return new Response("not from here", { status: 403, headers });
+            let body: Record<string, unknown> = {};
+            try {
+              body = await req.json();
+            } catch {}
+            const line = voiceHealthLine(body);
+            if (line) svcLog(line);
+            return Response.json({ ok: !!line }, { headers });
           }
           if (req.method === "POST" && url.pathname === "/api/voice/session") {
             const origin = req.headers.get("origin");

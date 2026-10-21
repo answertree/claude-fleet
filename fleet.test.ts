@@ -5382,6 +5382,14 @@ describe("key w: the phone page", () => {
     expect(d.responses.instructions).toContain("Never type into a session or press a key without PB's yes");
   });
 
+  test("voice: a call's audio health becomes one log line that says where clicks came from, numbers only", () => {
+    const line = F.voiceHealthLine({ seconds: 60, phone: "iPhone", received: 3000, lost: 6, samples: 2_880_000, concealed: 4800, silentConcealed: 0, concealments: 5, stretched: 9600, squeezed: 4800, jitterMs: 12, bufferMs: 80, rttMs: 41 });
+    expect(line).toBe("voice call, 60s on iPhone: packets lost 6 of 3000 (0.20%), audio concealed 0.17% in 5 events (0.00% silent), stretched 200 ms, squeezed 100 ms, jitter 12 ms, buffer 80 ms, round trip 41 ms");
+    expect(F.voiceHealthLine({ phone: "iPhone" })).toBeUndefined(); // no length, nothing to say
+    expect(F.voiceHealthLine({ seconds: 5, phone: "<script>", lost: "lots" as any })).toContain("5s on other: packets lost ? of ?");
+    for (const tap of ["createMediaStreamSource", "new (window.AudioContext", "new AudioContext"]) expect(F.WEB_PAGE).not.toContain(tap); // the call's audio is never tapped: iPhones click when it is
+  });
+
   test("pairing from one of your own devices (Tailscale says so) needs no code approved, and asks nothing on Telegram", () => {
     const p = F.pairStart(Date.now(), true)!;
     expect(p.status).toBe("approved");
