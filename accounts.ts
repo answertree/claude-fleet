@@ -535,10 +535,11 @@ export function accountsScreen(
                 "cached figures",
               ]
             : [];
-    // On the right: the machines signed in to it now; before them, how the reading stands, where it fits.
-    const using = machines.length ? `● ${machines.join(" · ")}` : "";
-    const usingAt = using ? W - width(using) : W;
-    if (using) head.put(usingAt, using, C.green, true);
+    // Right after the email, so it reads with its account: the machines signed in to it now. How the reading stands
+    // goes on the right, where it fits.
+    const using = machines.length ? fitOrDrop(`● ${machines.join(" · ")}`, W - col - 4) : "";
+    if (using) col = head.put(col + 3, using, C.green, true);
+    const usingAt = W;
     // Not in your list: how to add it comes with whatever the reading says, and alone where both do not fit.
     if (unlisted) {
       const now = machines.includes(selfHost()) ? [...status] : [`read on ${machines.join(" · ")}`];
@@ -547,7 +548,7 @@ export function accountsScreen(
     const room = usingAt - col - 4;
     const said = status.length && room > 4 ? firstFit(status, room) : "";
     if (said)
-      head.putr(usingAt - (using ? 3 : 1), said, a.kind !== "current" && a.reason ? C.red : C.dim);
+      head.putr(usingAt - 1, said, a.kind !== "current" && a.reason ? C.red : C.dim);
     out.push(head.toString());
     const lim = (k: string) => a.limits.find((l) => l.key === k);
     const opus = lim("seven_day_opus");
