@@ -7297,10 +7297,12 @@ const sameToken = (a: string, b: string) => a.length === b.length && crypto.timi
  */
 export const TAILSCALE_MAC_APP = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
 export const pickTailscale = (onPath: boolean, platform: string, macApp: boolean) => (!onPath && platform === "darwin" && macApp ? TAILSCALE_MAC_APP : "tailscale");
-let tailscaleFound: string | undefined;
+// Looked for again every minute: a tailscale command installed while fleet runs (a long-lived service, say) is used.
+let tailscaleFound: { cmd: string; at: number } | undefined;
 export function tailscaleCmd(): string {
-  tailscaleFound ??= pickTailscale(spawnSync(process.platform === "win32" ? "where" : "which", ["tailscale"], { timeout: 3000 }).status === 0, process.platform, fs.existsSync(TAILSCALE_MAC_APP));
-  return tailscaleFound;
+  if (!tailscaleFound || Date.now() - tailscaleFound.at > 60_000)
+    tailscaleFound = { cmd: pickTailscale(spawnSync(process.platform === "win32" ? "where" : "which", ["tailscale"], { timeout: 3000 }).status === 0, process.platform, fs.existsSync(TAILSCALE_MAC_APP)), at: Date.now() };
+  return tailscaleFound.cmd;
 }
 /** An address on Tailscale's own interface (utun… on macOS, tailscale0 on Linux, "Tailscale" on Windows) in its range, 100.64.0.0/10. */
 export function tailnetFromInterfaces(ifaces: Record<string, { address: string; family: string | number; internal: boolean }[] | undefined> = os.networkInterfaces() as any): string | undefined {
@@ -8142,7 +8144,7 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
           // Another of your machines: allowed when Tailscale says the request comes from your own Tailscale user.
           if (url.pathname.startsWith("/peer/")) {
             const ip = (srv.requestIP(req)?.address ?? "").replace(/^::ffff:/, "");
-            if (!ip || !(await peerNet.trust(ip))) return new Response("not one of your machines", { status: 403, headers });
+            if (!ip || !(await peerNet.trust(ip))) return new Response(`not one of your machines${refusedWhy(ip) ? `: ${refusedWhy(ip)}` : ""}`, { status: 403, headers });
             const local = getSessions().filter((x) => !x.remote);
             if (url.pathname === "/peer/state") {
               // What the asking machine pushed of its own (when it changed), or only that it is unchanged.
@@ -9218,11 +9220,19 @@ export const peerNet = {
       await peerNet.discover();
       ok = tailnet.found.some((m) => m.ip === ip);
     }
-    whoisSeen.set(ip, { ok, at: Date.now() });
+    const why = ok ? "" : `${text ? "whois named another Tailscale user" : `whois gave no answer (${tailscaleCmd()})`}; not among this machine's ${tailnet.found.length} listed machines of yours${tailnet.user ? "" : " (Tailscale's list could not be read)"}`;
+    whoisSeen.set(ip, { ok, at: Date.now(), why });
+    if (!ok && isServiceWorker && Date.now() - (refusedAt.get(ip) ?? 0) > 10 * 60_000) {
+      refusedAt.set(ip, Date.now());
+      svcLog(`refused ${ip} as not one of your machines: ${why}`);
+    }
     return ok;
   },
 };
-const whoisSeen = new Map<string, { ok: boolean; at: number }>();
+const whoisSeen = new Map<string, { ok: boolean; at: number; why?: string }>();
+const refusedAt = new Map<string, number>();
+/** Why a machine was last refused, for the refusal itself: so it can be put right from either end. */
+export const refusedWhy = (ip: string) => whoisSeen.get(ip)?.why ?? "";
 
 /** This machine's name, as the other machines know it. */
 export const selfHost = () => tailnet.host || os.hostname().split(".")[0];
