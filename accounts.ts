@@ -20,6 +20,10 @@ import {
   Row,
   accountView,
   accountViewOf,
+  claudeEmail,
+  loginEmail,
+  machinesByAccount,
+  selfHost,
   askAnthropic,
   clock,
   enterScreen,
@@ -375,49 +379,55 @@ export function tickAccounts(now: number) {
     if (now >= stateOf(a).nextTry) void fetchAccount(a, now);
 }
 
-/** The email Claude Code shows for a folder's login, from its .claude.json: that one key and no other. */
-function emailOf(file: string): string {
-  const e = readJson(file, 1 << 30)?.oauthAccount?.emailAddress;
-  return typeof e === "string" ? safeLine(e).slice(0, 60) : "";
-}
+/** The email Claude Code shows for a folder's login, from its .claude.json. */
+const emailOf = claudeEmail;
 
-/** One account as the screen shows it. */
+/** One account as the screen shows it, with the fleet's machines signed in to it now. */
 export interface AccountLine {
   name: string;
   email: string;
   view: AccountView;
+  machines: string[];
+  unlisted?: boolean; // in use by a machine, but not in your list
 }
 /**
- * This Mac's own login first (when the fleet reads usage at all), then each listed account. Only the account in use
- * (this Mac's login, and a listed one signed in as the same person) is spending at today's pace, so only it says
- * when it will be full; the others say when they reset.
+ * Your listed accounts, always in the list's order, each with the machines of the fleet signed in to it right now (by
+ * the email of each machine's Claude login). An account a machine uses that is not in the list follows, so its usage
+ * is never out of sight. Only an account in use is spending at today's pace, so only it says when it will be full; the
+ * others say when they reset.
  */
 export function accountLines(now: number): AccountLine[] {
+  if (!opt.usage) return []; // --no-usage: no login is read, this Mac's or any other
+  const users = machinesByAccount();
   const out: AccountLine[] = [];
-  const mine = emailOf(
-    path.join(
-      process.env.FLEET_HOME || process.env.AGENT_FLEET_HOME || home(),
-      ".claude.json",
-    ),
-  );
-  if (opt.usage)
-    out.push({ name: "this Mac", email: mine, view: accountView(now) });
-  if (!opt.usage) return out; // --no-usage: no login is read, this Mac's or any other
+  const listed = new Set<string>();
   for (const a of loadAccounts().accounts) {
     const st = stateOf(a);
     const email = emailOf(path.join(a.dir, ".claude.json"));
     const view = accountViewOf(usageStateOf(st, now), st, now);
-    const inUse = !!email && email === mine;
+    const machines = email ? (users.get(email.toLowerCase()) ?? []) : [];
+    if (email) listed.add(email.toLowerCase());
     out.push({
       name: a.name,
       email,
-      view: inUse
+      machines,
+      view: machines.length
         ? view
         : {
             ...view,
             limits: view.limits.map((l) => ({ ...l, fullIn: undefined })),
           },
     });
+  }
+  const mine = loginEmail().toLowerCase();
+  for (const [email, machines] of users) {
+    if (listed.has(email)) continue;
+    // This Mac's own login reads its own figures; another machine's are read there, so here they are only named.
+    const view: AccountView =
+      email === mine
+        ? accountView(now)
+        : { kind: "none", limits: [], asOf: 0, nextTry: 0, busy: false };
+    out.push({ name: "not in your list", email, machines, view, unlisted: true });
   }
   return out;
 }
@@ -495,7 +505,7 @@ export function accountsScreen(
   out.push(title.toString(), "");
   const { problems } = loadAccounts();
   const lines = accountLines(now);
-  for (const { name, email, view: a } of lines) {
+  for (const { name, email, view: a, machines, unlisted } of lines) {
     const head = new Row(W);
     let col = head.put(2, name, C.white, true);
     if (email)
@@ -525,10 +535,19 @@ export function accountsScreen(
                 "cached figures",
               ]
             : [];
-    const room = W - col - 3;
-    const said = status.length ? firstFit(status, room) : "";
+    // On the right: the machines signed in to it now; before them, how the reading stands, where it fits.
+    const using = machines.length ? `● ${machines.join(" · ")}` : "";
+    const usingAt = using ? W - width(using) : W;
+    if (using) head.put(usingAt, using, C.green, true);
+    // Not in your list: how to add it comes with whatever the reading says, and alone where both do not fit.
+    if (unlisted) {
+      const now = machines.includes(selfHost()) ? [...status] : [`read on ${machines.join(" · ")}`];
+      status.splice(0, status.length, ...now.map((f) => `${f} ${ICON.sep} a adds it here`), "a adds it here");
+    }
+    const room = usingAt - col - 4;
+    const said = status.length && room > 4 ? firstFit(status, room) : "";
     if (said)
-      head.putr(W - 1, said, a.kind !== "current" && a.reason ? C.red : C.dim);
+      head.putr(usingAt - (using ? 3 : 1), said, a.kind !== "current" && a.reason ? C.red : C.dim);
     out.push(head.toString());
     const lim = (k: string) => a.limits.find((l) => l.key === k);
     const opus = lim("seven_day_opus");
