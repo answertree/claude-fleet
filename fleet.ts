@@ -7302,8 +7302,21 @@ export function tailscaleCmd(): string {
   tailscaleFound ??= pickTailscale(spawnSync(process.platform === "win32" ? "where" : "which", ["tailscale"], { timeout: 3000 }).status === 0, process.platform, fs.existsSync(TAILSCALE_MAC_APP));
   return tailscaleFound;
 }
+/** An address on Tailscale's own interface (utun… on macOS, tailscale0 on Linux, "Tailscale" on Windows) in its range, 100.64.0.0/10. */
+export function tailnetFromInterfaces(ifaces: Record<string, { address: string; family: string | number; internal: boolean }[] | undefined> = os.networkInterfaces() as any): string | undefined {
+  for (const [name, list] of Object.entries(ifaces))
+    if (/^(utun|tailscale)/i.test(name))
+      for (const a of list ?? []) {
+        const m = /^100\.(\d+)\.\d+\.\d+$/.exec(a.address);
+        if ((a.family === "IPv4" || a.family === 4) && !a.internal && m && +m[1] >= 64 && +m[1] <= 127) return a.address;
+      }
+  return undefined;
+}
+/** This machine's Tailscale IPv4 address: from its network interfaces (instant, and needs no command), else from the tailscale command. */
 function tailnetAddress(): string | undefined {
   if (process.env.FLEET_WEB_HOST) return process.env.FLEET_WEB_HOST;
+  const seen = tailnetFromInterfaces();
+  if (seen) return seen;
   try {
     const r = spawnSync(tailscaleCmd(), ["ip", "-4"], { encoding: "utf8", timeout: 10_000 });
     const ip = r.stdout?.split("\n")[0]?.trim();
@@ -8067,8 +8080,26 @@ function pageState() {
   return stateCache;
 }
 /** Start serving the page (once). Every request must carry the secret; anything but the page and its data is a 404. */
+let tailnetWatch: ReturnType<typeof setInterval> | undefined;
+/**
+ * Started while Tailscale was down, updating or not found, the page (and what your other machines read) is on this
+ * machine only: move it onto the tailnet as soon as it is there, whether this fleet is the service or a window.
+ */
+function watchForTailnet(getSessions: () => Session[], now: () => number) {
+  if (tailnetWatch || process.env.FLEET_HOME) return;
+  tailnetWatch = setInterval(() => {
+    if (!web.server || web.shared || web.onTailnet || process.env.FLEET_WEB_HOST || !tailnetAddress()) return;
+    if (isServiceWorker) svcLog("Tailscale is up: moving the page onto it");
+    web.server.stop(true);
+    web.secure?.stop(true);
+    for (const k of ["server", "url", "host", "onTailnet", "error", "secure"] as const) delete web[k];
+    startWeb(getSessions, now);
+  }, 15_000);
+  tailnetWatch.unref?.();
+}
 export function startWeb(getSessions: () => Session[], now: () => number = clock): typeof web {
   if (web.server || web.error || web.shared) return web;
+  watchForTailnet(getSessions, now);
   pageSessions = getSessions;
   pageNow = now;
   let token: string;
@@ -10001,15 +10032,6 @@ export async function serveWorker(): Promise<never> {
   };
   setTimeout(report, 5000);
   setInterval(report, 30_000);
-  // Started while Tailscale was down or updating, the page is on this Mac only: move it onto the tailnet once it is back.
-  setInterval(() => {
-    if (!web.server || web.shared || web.onTailnet || process.env.FLEET_WEB_HOST || !tailnetAddress()) return;
-    svcLog("Tailscale is up: moving the page onto it");
-    web.server.stop(true);
-    for (const k of ["server", "url", "host", "onTailnet", "error"] as const) delete web[k];
-    startWeb(() => sessions);
-    report();
-  }, 30_000);
   for (const sig of ["SIGINT", "SIGTERM"] as const)
     try {
       process.on(sig, () => {
