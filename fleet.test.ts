@@ -2888,7 +2888,7 @@ describe("the detail view", () => {
               }
             }
     });
-  });
+  }, 20_000); // every size of screen: slow when the machine is busy
 
   test("110 columns: the instruments become one row under the head, the conversation runs the full width, a workflow shows its current phase", () => {
     quietly(() => {
@@ -3706,7 +3706,7 @@ describe("the detail view", () => {
               }
             }
     });
-  });
+  }, 20_000); // every size of screen: slow when the machine is busy
 });
 
 describe("reply, deploys and the timeline cards", () => {
@@ -5388,6 +5388,46 @@ describe("key w: the phone page", () => {
     expect(F.voiceHealthLine({ phone: "iPhone" })).toBeUndefined(); // no length, nothing to say
     expect(F.voiceHealthLine({ seconds: 5, phone: "<script>", lost: "lots" as any })).toContain("5s on other: packets lost ? of ?");
     for (const tap of ["createMediaStreamSource", "new (window.AudioContext", "new AudioContext"]) expect(F.WEB_PAGE).not.toContain(tap); // the call's audio is never tapped: iPhones click when it is
+  });
+
+  test("voice picker: GPT-Live's voices, the one PB picks for the call (anything else falls back), samples trimmed and wrapped as WAV", () => {
+    expect(F.LIVE_VOICES).toHaveLength(21);
+    expect(F.LIVE_VOICES).toContain("stone");
+    const voiceOf = (v?: string) => (F.voiceSessionBody("v=0", "{}", v) as any).session.audio.output.voice;
+    expect([voiceOf("juni"), voiceOf("not-a-voice"), voiceOf(undefined)]).toEqual(["juni", "stone", "stone"]);
+    // Quiet, half a second of tone, quiet: the tone is kept with a quarter second either side.
+    const rate = 24_000, pcm = new Uint8Array(rate * 2 * 3), v = new DataView(pcm.buffer);
+    for (let i = rate; i < rate * 1.5; i++) v.setInt16(i * 2, Math.round(8000 * Math.sin(i / 5)), true);
+    const kept = F.trimSilence(pcm);
+    expect(kept.length / 2 / rate).toBeCloseTo(1.0, 1);
+    expect(F.trimSilence(new Uint8Array(rate * 2)).length).toBe(0);
+    const wav = F.pcmToWav(new Uint8Array([1, 0, 2, 0]));
+    expect(new TextDecoder().decode(wav.slice(0, 4)) + new TextDecoder().decode(wav.slice(8, 12))).toBe("RIFFWAVE");
+    expect([wav.length, new DataView(wav.buffer).getUint32(24, true), new DataView(wav.buffer).getUint32(40, true)]).toEqual([48, 24_000, 4]);
+    expect(F.WEB_PAGE).toContain('id="vpick"');
+    expect(F.webState([], Date.now()).voices === undefined || F.webState([], Date.now()).voices.list.length === 21).toBe(true);
+  });
+
+  test("voice picker: samples only for real voices and only with the link", async () => {
+    const saved = [process.env.FLEET_WEB_HOST, process.env.FLEET_WEB_PORT, process.env.FLEET_WEB_TOKEN_FILE];
+    process.env.FLEET_WEB_HOST = "127.0.0.1";
+    process.env.FLEET_WEB_PORT = "4982";
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-vs-"));
+    process.env.FLEET_WEB_TOKEN_FILE = path.join(dir, "web-token");
+    for (const k of ["server", "url", "error"] as const) delete (F.web as any)[k];
+    const web = F.startWeb(() => [], () => Date.now());
+    try {
+      const token = new URL(web.url!).searchParams.get("t")!;
+      const get = (q: string) => fetch(`http://127.0.0.1:4982/api/voice/sample${q}`);
+      expect((await get("?v=stone&t=wrong")).status).toBe(403);
+      expect((await get(`?v=not-a-voice&t=${token}`)).status).toBe(404);
+      expect((await get(`?v=../../etc&t=${token}`)).status).toBe(404);
+    } finally {
+      web.server?.stop(true);
+      for (const [k, v] of [["FLEET_WEB_HOST", saved[0]], ["FLEET_WEB_PORT", saved[1]], ["FLEET_WEB_TOKEN_FILE", saved[2]]] as const) if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("pairing from one of your own devices (Tailscale says so) needs no code approved, and asks nothing on Telegram", () => {
