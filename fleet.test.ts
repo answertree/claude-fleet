@@ -5793,6 +5793,20 @@ describe("every machine", () => {
       // A new session only in a folder where one already runs on this machine, never anywhere a request names.
       expect((await fetch("http://127.0.0.1:5077/peer/new", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwd: "/etc", prompt: "x" }) })).status).toBe(404);
 
+      // A machine this one cannot reach pushes its own state with each read of this one's: kept as if read from it.
+      const theirs = new TextEncoder().encode(JSON.stringify({ proto: F.PEER_PROTO, host: "mini", machine: { cpu: 7, mem: 40 }, sessions: JSON.parse(F.encodeSessions([session("aaaaaaaa-0000-4000-8000-000000000009", "far away")], Date.now())) }));
+      const pushed = await fetch("http://127.0.0.1:5077/peer/state", { method: "POST", headers: { "content-type": "application/json", "x-fleet-gzip": "1", "x-fleet-tag": '"t1"', "x-fleet-port": "4999" }, body: Bun.gzipSync(theirs) });
+      expect([pushed.status, pushed.headers.get("x-fleet-have")]).toEqual([200, '"t1"']);
+      expect(((await pushed.json()) as any).sessions.map((x: any) => x.name)).toEqual(["shop"]); // and it gets this one's, as a read does
+      const got = F.peers.get("127.0.0.1:4999")!;
+      expect([got.host, got.sessions.map((x) => x.name), got.machine?.cpu]).toEqual(["mini", ["far away"], 7]);
+      // Unchanged since: a read that says so keeps it current, without sending it again.
+      got.at = 1;
+      const again = await fetch("http://127.0.0.1:5077/peer/state", { headers: { "x-fleet-tag": '"t1"', "x-fleet-port": "4999" } });
+      expect([again.headers.get("x-fleet-have"), got.at > 1]).toEqual(['"t1"', true]);
+      expect((await fetch("http://127.0.0.1:5077/peer/state", { method: "POST", headers: { "x-fleet-gzip": "1" }, body: "not gzip" })).status).toBe(400);
+      F.peers.delete("127.0.0.1:4999");
+
       // This fleet, seen from another: it finds the machine, reads its sessions, and says which machine each is on.
       F.tailnet.ip = "100.64.0.9";
       F.tailnet.at = 0;
