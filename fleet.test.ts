@@ -6101,6 +6101,14 @@ describe("finding Tailscale", () => {
     expect(F.pickTailscale(false, "darwin", false)).toBe("tailscale"); // nothing to find: tried by name, and fleet says it is on this Mac only
     expect(F.pickTailscale(false, "linux", true)).toBe("tailscale");
   });
+  test("this machine's tailnet address from its Tailscale interface, never another 100.x network or loopback", () => {
+    const v4 = (address: string, internal = false) => ({ address, family: "IPv4", internal });
+    expect(F.tailnetFromInterfaces({ lo0: [v4("127.0.0.1", true)], en0: [v4("192.168.1.20")], utun4: [{ address: "fe80::1", family: "IPv6", internal: false }, v4("100.90.36.10")] })).toBe("100.90.36.10");
+    expect(F.tailnetFromInterfaces({ tailscale0: [v4("100.101.2.3")] })).toBe("100.101.2.3"); // Linux
+    expect(F.tailnetFromInterfaces({ en0: [v4("100.70.1.1")] })).toBeUndefined(); // a carrier's 100.x on Wi-Fi is not the tailnet
+    expect(F.tailnetFromInterfaces({ utun2: [v4("100.20.1.1")] })).toBeUndefined(); // outside Tailscale's 100.64.0.0/10
+    expect(F.tailnetFromInterfaces({})).toBeUndefined();
+  });
 });
 
 describe("reaching a background session", () => {
