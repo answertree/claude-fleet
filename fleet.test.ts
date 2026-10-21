@@ -6108,6 +6108,8 @@ describe("finding Tailscale", () => {
       F.peerNet.discover = async () => void ((F.tailnet.user = "42"), (F.tailnet.found = [{ host: "mini", ip: "10.255.0.7" }]));
       expect(await F.peerNet.trust("10.255.0.7")).toBe(true); // not a tailnet address, so whois has no yes: the list decides
       expect(await F.peerNet.trust("10.255.0.8")).toBe(false);
+      expect(F.refusedWhy("10.255.0.8")).toMatch(/^whois (gave no answer|named another Tailscale user).*not among this machine's 1 listed machines of yours$/); // said back, so it can be put right
+      expect(F.refusedWhy("10.255.0.7")).toBe("");
     } finally {
       F.peerNet.discover = discover;
       F.tailnet.user = saved.user;
