@@ -6304,23 +6304,25 @@ h1{display:flex;align-items:center;gap:9px;font-size:21px;font-weight:700;margin
 #mic{width:42px;height:42px;border-radius:50%;border:0;padding:0;display:grid;place-items:center;cursor:pointer;color:#fff;background:radial-gradient(circle at 30% 28%,#7ee8f0 0,#4aa3ff 38%,#8a5cff 78%);box-shadow:0 0 0 1px #ffffff22,0 4px 18px #4aa3ff66,0 0 28px #8a5cff44;animation:micglow 3.2s ease-in-out infinite}
 #mic svg{width:20px;height:20px}#mic[hidden]{display:none}
 @keyframes micglow{50%{box-shadow:0 0 0 1px #ffffff33,0 4px 24px #4aa3ff99,0 0 40px #8a5cff77}}
-/* Voice: a full screen with an orb, as in ChatGPT's voice mode, in fleet's colours. */
-#voice{position:fixed;inset:0;z-index:40;display:flex;flex-direction:column;align-items:center;justify-content:space-between;background:radial-gradient(120% 90% at 50% 40%,#101a2a 0%,#06080d 70%);padding:calc(env(safe-area-inset-top) + 18px) 20px calc(env(safe-area-inset-bottom) + 26px);opacity:0;pointer-events:none;transition:opacity .25s ease}
+/* Voice: a full screen with the fleet (seven orbs in the logo's colours), in the manner of ChatGPT's voice mode. Every
+   part keeps its own room, so a card never slides under the buttons. */
+#voice{position:fixed;inset:0;z-index:40;display:flex;flex-direction:column;align-items:center;gap:14px;background:radial-gradient(120% 90% at 50% 40%,#0f1830 0%,#05070c 70%);padding:calc(env(safe-area-inset-top) + 18px) 20px calc(env(safe-area-inset-bottom) + 26px);opacity:0;pointer-events:none;transition:opacity .25s ease}
 #voice.on{opacity:1;pointer-events:auto}
-#voice .vtop{width:100%;display:flex;align-items:center;justify-content:space-between;color:#8a95a5;font-size:13px}#voice .vtop b{color:#e8eef6;font-weight:650;font-size:15px;display:flex;align-items:center;gap:8px}#voice .vtop img{width:22px;height:22px;border-radius:6px}
-#voice .stage{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:26px;width:100%}
-.orb{--lvl:0;position:relative;width:min(62vw,250px);aspect-ratio:1;border-radius:50%;transform:scale(calc(1 + var(--lvl) * .22));transition:transform .12s ease-out;will-change:transform}
-.orb i{position:absolute;inset:0;border-radius:50%;will-change:transform}
-.orb i:nth-child(1){background:radial-gradient(circle at 35% 30%,#bdf6ff 0,#56cdd6 30%,#2f6bff 62%,#5b2bd6 100%);animation:orbspin 9s linear infinite}
-.orb i:nth-child(2){background:radial-gradient(circle at 70% 70%,#be94ffcc 0,#be94ff00 55%);animation:orbspin 6s linear infinite reverse}
-.orb i:nth-child(3){background:radial-gradient(circle at 30% 75%,#50c87899 0,#50c87800 50%);animation:orbspin 11s linear infinite}
-.orb i:nth-child(4){inset:-14%;background:radial-gradient(circle,#4aa3ff40 0,#4aa3ff00 65%);filter:blur(10px)}
-.orb.idle{animation:breathe 4s ease-in-out infinite}.orb.think i:nth-child(1){animation-duration:2.4s}
-@keyframes orbspin{to{transform:rotate(360deg)}}@keyframes breathe{50%{transform:scale(1.04)}}
+#voice .vtop{width:100%;display:flex;align-items:center;justify-content:space-between;color:#8a95a5;font-size:13px;flex:none}#voice .vtop b{color:#e8eef6;font-weight:650;font-size:15px;display:flex;align-items:center;gap:8px}#voice .vtop img{width:22px;height:22px;border-radius:6px}
+#voice .stage{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;width:100%}
+#voice .orbs{width:min(82vw,40vh,340px);aspect-ratio:1;flex:none}
 #voice .vstate{color:#e8eef6;font-size:17px;font-weight:600;min-height:1.4em;text-align:center}
 #voice .vtool{color:#56cdd6;font-size:13px;min-height:1.3em;text-align:center}
-#voice .caps{width:100%;max-width:560px;min-height:3.6em;text-align:center;font-size:16px;line-height:1.45;color:#c6cdd7}#voice .caps .you{color:#8fb8ff}
-#voice .controls{display:flex;gap:28px;align-items:center}
+#voice .secure{text-align:center;color:#c6cdd7;max-width:320px}#voice .secure a{color:#61aaff}
+#voice .vcards{flex:0 1 auto;width:100%;max-width:560px;max-height:34vh;overflow-y:auto;display:flex;flex-direction:column;gap:10px}
+.vcard{background:#111a2a;border:1px solid #22314d;border-radius:16px;padding:12px 14px;box-shadow:0 6px 24px #0008}
+.vcard .to{font-size:12px;color:#8a95a5;letter-spacing:.02em;margin-bottom:4px}
+.vcard .msg{color:#eef3f9;font-size:15px;line-height:1.4;white-space:pre-wrap;max-height:7.2em;overflow-y:auto}
+.vcard .acts{display:flex;gap:10px;margin-top:10px}.vcard .acts button{flex:1;height:40px;border:0;border-radius:12px;font:inherit;font-weight:650;cursor:pointer}
+.vcard .go{color:#fff;background:linear-gradient(135deg,#25d8fc,#0075fc 55%,#6c28fa)}.vcard .no{color:#c6cdd7;background:#1c2431}
+.vcard .note{margin-top:8px;font-size:13px;color:#8a95a5}.vcard.done .note{color:#50c878}.vcard.queued .note{color:#e5b544}.vcard.failed .note{color:#f0625c}
+.vcard.cancelled{opacity:.55}.vcard.cancelled .msg{text-decoration:line-through}
+#voice .controls{display:flex;gap:28px;align-items:center;flex:none}
 #voice .controls button{width:66px;height:66px;border-radius:50%;border:0;display:grid;place-items:center;cursor:pointer;color:#fff;background:#1c2431}
 #voice .controls button svg{width:26px;height:26px}#voice .controls .end{background:#3a1c1f;color:#ff8f8a}#voice .controls .muted{background:#e8eef6;color:#0d1117}
 #voice .secure{max-width:420px;text-align:center;color:#c6cdd7;font-size:15px}#voice .secure a{display:inline-block;margin-top:14px;padding:12px 18px;border-radius:12px;background:#56cdd6;color:#0d1117;font-weight:700;text-decoration:none}
@@ -6430,8 +6432,8 @@ details.tasks[open]>summary .sub,details.chat[open]>summary .sub{display:none}
 </script>
 <header><h1><img src="/icon-192.png" alt="">Claude Fleet</h1><span class="top-right"><button id="mic" hidden aria-label="Talk to Fleet"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3.5"/></svg></button><span id="clock"></span></span></header>
 <div id="voice" aria-hidden="true"><div class="vtop"><b><img src="/icon-192.png" alt="">Fleet</b><span id="vmodel"></span></div>
-<div class="stage"><div class="orb idle" id="orb"><i></i><i></i><i></i><i></i></div><div class="vstate" id="vstate"></div><div class="vtool" id="vtool"></div></div>
-<div class="caps" id="caps"></div>
+<div class="stage"><canvas class="orbs" id="orbs" aria-hidden="true"></canvas><div class="vstate" id="vstate"></div><div class="vtool" id="vtool"></div></div>
+<div class="vcards" id="vcards"></div>
 <div class="controls"><button id="vmute" aria-label="Mute"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3.5"/></svg></button><button id="vend" class="end" aria-label="End"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div></div>
 <div id="quip">Waking the fleet…</div>
 <div id="pair"></div>
@@ -6916,25 +6918,21 @@ function again() {
 // Back from the background (a phone locks its screen): straight back on the link.
 document.addEventListener("visibilitychange", () => { if (!document.hidden && (!ws || ws.readyState > 1)) { tries = 0; live(); } });
 // ── voice: talk to Fleet about your sessions ──
-// The phone talks to OpenAI's realtime model directly (WebRTC), with a key fleet makes for this one conversation. What
-// the model asks of the fleet (its tools) is answered here, from what fleet sends the page and through fleet's own
-// actions. Sending a message or pressing a choice is only ever done after Fleet has said it back and heard yes.
-const V = { pc: null, dc: null, mic: null, energy: {}, raf: 0, muted: false, said: "", heard: "", busy: 0, heardAt: 0, err: 0 };
+// The phone sends its WebRTC offer to fleet, which starts a GPT-Live conversation with its own key; the audio then flows
+// between the phone and OpenAI. GPT-Live hands thinking and tools to a reasoning model, whose tool calls arrive here and
+// are answered from what fleet sends the page and through fleet's own actions. Nothing is typed or pressed in a session
+// until PB has seen the exact line on screen and said yes (or tapped Send).
+const V = { pc: null, dc: null, mic: null, ctx: null, inA: null, outA: null, raf: 0, muted: false, busy: 0, deleg: false, heardAt: 0, err: 0, calls: new Map(), n: 0, seen: new Set(), log: [] };
 const $ = (id) => document.getElementById(id);
 const vstate = (t) => ($("vstate").textContent = t);
 const vtool = (t) => ($("vtool").textContent = t || "");
-function caption(who, text) {
-  const c = $("caps"); c.replaceChildren();
-  if (V.heard && who === "fleet") c.append(el("div", "you", V.heard));
-  c.append(el("div", who === "you" ? "you" : "", text));
-}
 const fleetData = () => { try { return JSON.parse(latestText || lastText); } catch { return { sessions: [] }; } };
 const segText = (list) => (list || []).map((x) => x.t).join("");
-// A session by what you called it: the closest name.
+// A session by what PB called it: the closest name.
 function sessionNamed(name) {
   const list = fleetData().sessions || [], n = String(name || "").toLowerCase().trim();
   if (!n) return undefined;
-  const words = n.split(/\s+/);
+  const words = n.split(/\\s+/);
   let best, score = 0;
   for (const s of list) {
     const m = s.name.toLowerCase();
@@ -6951,94 +6949,153 @@ const brief = (s) => ({
   agents: s.roster ? s.roster.agents.length + (s.roster.workflows || []).reduce((n, w) => n + (w.agents || []).length, 0) : 0,
   pullRequests: (s.prs || []).map(segText), failures: s.fails ? s.fails.n + " failed, last: " + s.fails.last : undefined,
 });
-const TOOLS = [
-  { type: "function", name: "fleet_overview", description: "Every Claude Code session right now: name, state (needs you, working, stalled, finished…), what it is doing, its question if it is waiting, context use, tasks, workflows, agents, pull requests, failures. Call this before answering anything about the sessions.", parameters: { type: "object", properties: {} } },
-  { type: "function", name: "session_detail", description: "One session in full: its recent conversation (your prompts and Claude's replies), open tasks, workflows and what each agent is doing, pull requests, failures, changes.", parameters: { type: "object", properties: { name: { type: "string", description: "The session's name, or words from it" } }, required: ["name"] } },
-  { type: "function", name: "usage", description: "The Claude usage limits: five-hour and weekly percentages, when they reset, when the five-hour limit runs out at this pace; and this Mac's CPU and memory.", parameters: { type: "object", properties: {} } },
-  { type: "function", name: "think", description: "Hand a harder question to a slower reasoning model that reads all the fleet's data: comparisons, what to look at first, summing up a long piece of work, spotting trouble. Say a word or two first ('let me think'); it takes a few seconds.", parameters: { type: "object", properties: { question: { type: "string" } }, required: ["question"] } },
-  { type: "function", name: "read_choices", description: "The numbered choices on a waiting session's own screen (its question's options).", parameters: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } },
-  { type: "function", name: "send_message", description: "Type a message into a session, as if typed at its terminal. ONLY after you have said back exactly what you will send, and to which session, and the user has clearly said yes.", parameters: { type: "object", properties: { name: { type: "string" }, text: { type: "string" } }, required: ["name", "text"] } },
-  { type: "function", name: "press_choice", description: "Press a numbered choice (1-9), Enter (E) or Esc (X) in a session. ONLY after saying which choice it is, by its words, and hearing yes.", parameters: { type: "object", properties: { name: { type: "string" }, key: { type: "string", enum: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "E", "X"] } }, required: ["name", "key"] } },
-];
 const fleetPost = async (path, body) => { try { const r = await fetch(path + "?t=" + encodeURIComponent(token), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }); return await r.json(); } catch { return { ok: false, error: "can't reach fleet" }; } };
+function vsend(o) { if (V.dc && V.dc.readyState === "open") V.dc.send(JSON.stringify(o)); }
+// Tell Fleet something PB did on screen, for it to acknowledge in a word or two.
+const vtell = (content) => vsend({ type: "session.commentary.append", event_id: "tell_" + (++V.n), delegation_id: null, content });
+
+// What Fleet means to type or press: a card on screen until PB says yes, taps Send, or it is withdrawn. The only text
+// shown in a call is these, so PB reads exactly what would go into a session.
+const proposals = new Map();
+const hhmm = () => new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+function drawCards() {
+  const box = $("vcards"); box.replaceChildren();
+  for (const p of [...proposals.values()].slice(-3)) {
+    const c = el("div", "vcard " + p.state);
+    c.append(el("div", "to", p.kind === "send" ? "To " + p.s.name : "Press " + (p.key === "E" ? "Enter" : p.key === "X" ? "Esc" : p.key) + " in " + p.s.name));
+    c.append(el("div", "msg", p.kind === "send" ? p.text : p.meaning || ""));
+    if (p.state === "pending") {
+      const acts = el("div", "acts"), go = el("button", "go", p.kind === "send" ? "Send" : "Press"), no = el("button", "no", "Cancel");
+      go.addEventListener("click", async () => { const r = await carryOut(p); vtell("PB tapped " + go.textContent + ": " + (r.ok ? (r.queued ? "it is queued for " : "it is done in ") + p.s.name : "it failed: " + r.error) + ". Acknowledge in two or three words."); });
+      no.addEventListener("click", () => { p.state = "cancelled"; p.note = "Cancelled"; drawCards(); vtell("PB cancelled the proposal for " + p.s.name + ". Acknowledge in two or three words."); });
+      acts.append(go, no); c.append(acts);
+    } else c.append(el("div", "note", p.note || ""));
+    box.append(c);
+  }
+}
+async function carryOut(p) {
+  if (p.state !== "pending") return { ok: false, error: "already " + p.state };
+  p.state = "working"; p.note = p.kind === "send" ? "Sending…" : "Pressing…"; drawCards();
+  const r = p.kind === "send" ? await fleetPost("api/send", { sid: p.s.sid, text: p.text }) : await fleetPost("api/keys", { sid: p.s.sid, key: p.key });
+  p.state = r.ok ? (r.queued ? "queued" : "done") : "failed";
+  p.note = r.ok ? (r.queued ? "Queued: " + p.s.name + " is busy, it goes in as soon as it can" : (p.kind === "send" ? "Sent ✓ " : "Pressed ✓ ") + hhmm()) : "Not done: " + (r.error || "unknown");
+  drawCards();
+  return r;
+}
 async function runTool(name, args) {
   const d = fleetData();
   if (name === "fleet_overview") return { time: new Date(d.now).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), counts: d.counts, hiddenIdleOrFinished: d.hidden, sessions: (d.sessions || []).map(brief) };
   if (name === "usage") return { fiveHour: d.five && d.five.text, limits: d.account && d.account.limits, cpu: d.machine && d.machine.cpu + "%", memory: d.machine && d.machine.memText };
-  if (name === "think") { vtool("Thinking it through…"); const r = await fleetPost("api/voice/think", { question: args.question || "" }); return r.ok ? { answer: r.answer } : { error: r.error }; }
+  if (name === "confirm" || name === "cancel") {
+    const p = proposals.get(String(args.proposal || ""));
+    if (!p) return { error: "no such proposal" };
+    if (name === "cancel") { if (p.state === "pending") { p.state = "cancelled"; p.note = "Cancelled"; drawCards(); } return { cancelled: p.id }; }
+    const r = await carryOut(p);
+    return r.ok ? (r.queued ? { queued: true, to: p.s.name, note: "the session is busy; it goes in as soon as the session can take it" } : { done: true, in: p.s.name }) : { error: r.error };
+  }
   const s = sessionNamed(args.name);
   if (!s) return { error: "No session called that. Sessions: " + (d.sessions || []).map((x) => x.name).join(", ") };
-  vtool((name === "session_detail" ? "Looking at " : name === "read_choices" ? "Reading " : "") + s.name + (name === "send_message" ? ": sending" : name === "press_choice" ? ": pressing " + args.key : "…"));
-  if (name === "session_detail") return { ...brief(s), conversation: (s.talk || []).map((m) => ({ who: m.who === "you" ? "user" : "Claude", text: m.text, ago: m.ago })), openTasks: s.tasks ? s.tasks.open : [], threads: s.roster ? [...(s.roster.main ? [s.roster.main] : []), ...(s.roster.workflows || []).flatMap((w) => w.agents || []), ...(s.roster.agents || [])].map((a) => ({ name: a.label, doing: (a.tool ? a.tool + " " : "") + (a.doing || ""), ago: a.ago })) : [], changes: segText(s.changes) };
+  if (name === "propose_message" || name === "propose_press") {
+    const p = { id: "p" + (++V.n), kind: name === "propose_message" ? "send" : "press", s, text: String(args.text || "").trim(), key: String(args.key || ""), meaning: String(args.meaning || ""), state: "pending" };
+    if (p.kind === "send" && !p.text) return { error: "nothing to send" };
+    proposals.set(p.id, p); drawCards();
+    return { proposal: p.id, showing: "on PB's screen with " + (p.kind === "send" ? "Send" : "Press") + " and Cancel", next: "read the gist back in a few words and ask; confirm only after a clear yes" };
+  }
+  vtool((name === "session_detail" ? "Looking at " : "Reading ") + s.name + "…");
+  if (name === "session_detail") return { ...brief(s), conversation: (s.talk || []).map((m) => ({ who: m.who === "you" ? "PB" : "Claude", text: m.text, ago: m.ago })), openTasks: s.tasks ? s.tasks.open : [], threads: s.roster ? [...(s.roster.main ? [s.roster.main] : []), ...(s.roster.workflows || []).flatMap((w) => w.agents || []), ...(s.roster.agents || [])].map((a) => ({ name: a.label, doing: (a.tool ? a.tool + " " : "") + (a.doing || ""), ago: a.ago })) : [], changes: segText(s.changes) };
   if (name === "read_choices") { const r = await fleetPost("api/choices", { sid: s.sid }); return r.ok ? { options: r.options } : { error: r.error }; }
-  if (name === "send_message") { const r = await fleetPost("api/send", { sid: s.sid, text: String(args.text || "") }); return r.ok ? { sent: true, to: s.name } : { error: r.error }; }
-  if (name === "press_choice") { const r = await fleetPost("api/keys", { sid: s.sid, key: String(args.key || "") }); return r.ok ? { pressed: args.key, in: s.name } : { error: r.error }; }
   return { error: "no such tool" };
 }
-function instructions() {
-  const d = fleetData();
-  return "You are Fleet: a voice for the person who runs this fleet of Claude Code sessions on their Macs. You are male, and you call yourself Fleet. Speak British English: warm, quick, a little dry, never gushing. Keep answers short: one to three sentences unless asked for more, and stop when you have answered. "
-    + "The sessions change every second, so use your tools for anything about them, never memory or guesses: fleet_overview first, session_detail for one session, usage for limits, and think for anything that needs weighing up. Say session names naturally; never read ids, hashes or file paths unless asked. If something is waiting on the person, say that first. "
-    + "You may type into a session (send_message) or press a choice (press_choice) only after saying back exactly what you will send or press and to which session, and hearing a clear yes. "
-    + "Right now: " + JSON.stringify({ counts: d.counts, sessions: (d.sessions || []).map((s) => ({ name: s.name, state: s.word, now: s.sub && s.sub.text })) });
-}
-function vsend(o) { if (V.dc && V.dc.readyState === "open") V.dc.send(JSON.stringify(o)); }
-const pending = new Set();
 async function onVoiceEvent(e) {
   let m; try { m = JSON.parse(e.data); } catch { return; }
   const t = m.type || "";
-  // Speaking / Thinking / Listening is read from the sound itself in animate(): these only mark a reply in flight.
-  if (t === "input_audio_buffer.speech_stopped") { V.busy = Date.now(); V.said = ""; }
-  else if (t === "response.created") { V.busy = Date.now(); if (V.said && !/\s$/.test(V.said)) V.said += " "; }
-  else if (t === "response.done") { V.busy = 0; vtool(""); }
-  else if (t === "response.output_audio_transcript.delta" || t === "response.audio_transcript.delta") { V.said += m.delta || ""; caption("fleet", V.said); }
-  else if (t === "conversation.item.input_audio_transcription.completed") { V.heard = (m.transcript || "").trim(); V.said = ""; caption("you", V.heard); }
-  else if (t === "response.function_call_arguments.done") {
-    if (pending.has(m.call_id)) return;
-    pending.add(m.call_id);
-    let args = {}; try { args = JSON.parse(m.arguments || "{}"); } catch {}
-    const out = await runTool(m.name, args).catch((x) => ({ error: String(x) }));
-    vsend({ type: "conversation.item.create", item: { type: "function_call_output", call_id: m.call_id, output: JSON.stringify(out).slice(0, 60000) } });
-    vsend({ type: "response.create" });
+  V.seen.add(t === "response.event" && m.event ? "response.event/" + m.event.type : t);
+  if (t === "session.started") vtell("Greet PB as Fleet in a few words, then the one-line headline from what you know: what, if anything, is waiting on PB, and how many sessions are working. Then stop and listen.");
+  else if (t === "session.delegation.created") { V.deleg = true; V.busy = Date.now(); vtool("Looking into it…"); }
+  // Fleet talking with nothing handed off is not thinking (the start of a call, or between sentences). Its words are
+  // not shown (only the cards are), but the last few are kept for a look from the console.
+  else if (t === "session.output_transcript.delta") { if (!V.deleg) V.busy = 0; V.log.push("Fleet: " + (m.delta || "")); V.log = V.log.slice(-400); }
+  else if (t === "response.event" && m.event) {
+    const ev = m.event;
+    V.busy = Date.now();
+    if (ev.type === "response.output_item.done" && ev.item && ev.item.type === "function_call") {
+      const it = ev.item;
+      if (V.calls.has(it.call_id)) return;
+      let args = {}; try { args = JSON.parse(it.arguments || "{}"); } catch {}
+      V.log.push("tool: " + it.name + " " + (it.arguments || ""));
+      V.calls.set(it.call_id, runTool(it.name, args).catch((x) => ({ error: String(x) })));
+    } else if (/^response\\.(completed|done|failed|incomplete)$/.test(ev.type)) {
+      // Every call this turn answered, then the backend carries on with the results.
+      if (!V.calls.size) { V.deleg = false; V.busy = 0; vtool(""); return; }
+      const calls = [...V.calls]; V.calls.clear();
+      for (const [id, p] of calls) vsend({ type: "response.item.create", event_id: "out_" + id, item: { type: "function_call_output", call_id: id, output: JSON.stringify(await p).slice(0, 60000) } });
+      vsend({ type: "response.create", event_id: "go_" + (++V.n) });
+    }
   }
-  else if (t === "error") { vtool(""); V.busy = 0; V.err = 1; vstate((m.error && m.error.message) || "Something went wrong"); setTimeout(() => (V.err = 0), 4000); }
+  else if (t === "session.closed") { const why = m.reason && m.reason !== "close_requested" ? " (" + String(m.reason).replace(/_/g, " ") + ")" : ""; closeVoice(false); V.err = 1; vstate("Call ended" + why); }
+  else if (t === "error") { vtool(""); V.err = 1; vstate((m.error && m.error.message) || "Something went wrong"); setTimeout(() => (V.err = 0), 5000); }
 }
-// The orb moves with whoever is speaking: Fleet's voice when it talks, yours when you do. The levels come from the call's
-// own statistics, never a Web Audio graph: tapping the voice with an AudioContext makes phones click and crackle.
-async function levels() {
-  const pc = V.pc; if (!pc) return { out: 0, mic: 0 };
-  // Loudness over the last interval from the energy counters: the incoming voice as played, and the microphone.
-  const got = { out: 0, mic: 0 };
-  try {
-    (await pc.getStats()).forEach((r) => {
-      const k = r.type === "inbound-rtp" && r.kind === "audio" ? "out" : r.type === "media-source" && r.kind === "audio" ? "mic" : "";
-      if (!k || r.totalAudioEnergy === undefined) return;
-      const was = V.energy[k]; V.energy[k] = [r.totalAudioEnergy, r.totalSamplesDuration];
-      if (was && r.totalSamplesDuration > was[1]) got[k] = Math.sqrt((r.totalAudioEnergy - was[0]) / (r.totalSamplesDuration - was[1]));
-    });
-  } catch {}
-  if (V.muted) got.mic = 0;
-  return got;
+
+// The fleet: seven orbs in the logo's colours, joined, turning with whoever speaks (Fleet one way, PB the other) and
+// swelling with the voice; while Fleet thinks a pulse runs round them.
+const ORBS = ["#0075fc", "#25d8fc", "#01abfd", "#01e6b3", "#63fa9b", "#3147fc", "#6c28fa"];
+const orbView = { spin: 0, lv: 0, dir: 1, last: 0, w: 0 };
+function level(stream) { const a = V.ctx.createAnalyser(); a.fftSize = 512; a.smoothingTimeConstant = 0.6; V.ctx.createMediaStreamSource(stream).connect(a); return a; }
+const buf = new Uint8Array(512);
+function rms(a) { if (!a) return 0; a.getByteTimeDomainData(buf); let s = 0; for (const v of buf) s += ((v - 128) / 128) ** 2; return Math.sqrt(s / buf.length); }
+function drawOrbs(now, out, mic, mode) {
+  const cv = $("orbs"), g = cv.getContext("2d");
+  const w = cv.clientWidth, dpr = Math.min(2, window.devicePixelRatio || 1);
+  if (orbView.w !== w) { orbView.w = w; cv.width = cv.height = Math.round(w * dpr); }
+  const dt = Math.min(0.05, (now - (orbView.last || now)) / 1000); orbView.last = now;
+  const voice = Math.min(1, Math.max(out, mic) * 3);
+  if (out > 0.015 || mic > 0.03) orbView.dir = out >= mic ? 1 : -1;
+  orbView.lv += (voice - orbView.lv) * 0.25;
+  orbView.spin += dt * orbView.dir * (0.12 + 2.4 * orbView.lv) + (mode === "Thinking" ? dt * 0.8 : 0);
+  const t = now / 1000, c = w / 2, R = w * 0.31;
+  g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, w);
+  const pts = ORBS.map((col, i) => {
+    if (!i) return { x: c, y: c, r: w * (0.085 + 0.03 * orbView.lv), col };
+    const a = orbView.spin + ((i - 1) / (ORBS.length - 1)) * Math.PI * 2;
+    const wave = 0.5 + 0.5 * Math.sin(t * 7 - i * 1.1);
+    const chase = mode === "Thinking" ? Math.max(0, Math.cos(a - t * 4)) ** 6 : 0;
+    const rr = R * (1 + 0.05 * Math.sin(t * 0.8 + i * 1.7) + 0.1 * orbView.lv * wave);
+    return { x: c + Math.cos(a) * rr, y: c + Math.sin(a) * rr, r: w * (0.052 + 0.045 * orbView.lv * wave + 0.025 * chase + (mode === "Speaking" || mode === "Listening" ? 0 : 0.004 * Math.sin(t * 2 + i))), col };
+  });
+  // The links: each orb to its neighbours and to the one at the heart.
+  g.lineWidth = 1.2;
+  for (let i = 1; i < pts.length; i++) for (const j of [0, i === pts.length - 1 ? 1 : i + 1]) {
+    const p = pts[i], q = pts[j], lg = g.createLinearGradient(p.x, p.y, q.x, q.y);
+    lg.addColorStop(0, p.col + "66"); lg.addColorStop(1, q.col + "66");
+    g.strokeStyle = lg; g.beginPath(); g.moveTo(p.x, p.y); g.lineTo(q.x, q.y); g.stroke();
+  }
+  for (const p of pts) {
+    const glow = g.createRadialGradient(p.x, p.y, p.r * 0.4, p.x, p.y, p.r * 2.6);
+    glow.addColorStop(0, p.col + "55"); glow.addColorStop(1, p.col + "00");
+    g.fillStyle = glow; g.beginPath(); g.arc(p.x, p.y, p.r * 2.6, 0, Math.PI * 2); g.fill();
+    const body = g.createRadialGradient(p.x - p.r * 0.35, p.y - p.r * 0.4, p.r * 0.1, p.x, p.y, p.r);
+    body.addColorStop(0, "#ffffffee"); body.addColorStop(0.35, p.col); body.addColorStop(1, p.col + "cc");
+    g.fillStyle = body; g.beginPath(); g.arc(p.x, p.y, p.r, 0, Math.PI * 2); g.fill();
+  }
 }
 function animate() {
-  let shown = "", lvl = -1;
-  const step = async () => {
-    const { out, mic } = await levels(), now = Date.now();
+  let shown = "";
+  const step = (now) => {
     if (!V.pc) return;
-    if (out > 0.01) V.heardAt = now;
-    if (V.busy && now - V.busy > 20000) V.busy = 0; // a reply that never came
-    const mode = now - (V.heardAt || 0) < 700 ? "Speaking" : V.busy ? "Thinking" : V.muted ? "Muted" : "Listening";
-    if (mode !== shown && !V.err) { shown = mode; vstate(mode); $("orb").className = mode === "Thinking" ? "orb think" : mode === "Speaking" ? "orb" : "orb idle"; }
-    const l = Math.round(Math.min(1, Math.max(out, mic * 0.8) * 2.5) * 20) / 20; // twenty steps: the orb repaints only when it visibly moves
-    if (l !== lvl) { lvl = l; $("orb").style.setProperty("--lvl", String(l)); }
-    V.raf = setTimeout(step, 60);
+    const out = rms(V.outA), mic = V.muted ? 0 : rms(V.inA), at = Date.now();
+    if (out > 0.015) V.heardAt = at;
+    if (V.busy && at - V.busy > 45000) V.busy = 0; // a backend that never came back
+    const mode = at - V.heardAt < 600 ? "Speaking" : V.busy ? "Thinking" : V.muted ? "Muted" : "Listening";
+    if (mode !== shown && !V.err) { shown = mode; vstate(mode); }
+    drawOrbs(now, out, mic, mode);
+    V.raf = requestAnimationFrame(step);
   };
-  step();
+  V.raf = requestAnimationFrame(step);
 }
 async function openVoice() {
   const box = $("voice"); box.classList.add("on"); box.setAttribute("aria-hidden", "false");
-  $("caps").replaceChildren(); vtool(""); V.said = V.heard = "";
-  const st = $("orb").parentElement;
+  vtool(""); V.err = 0; proposals.clear(); drawCards();
+  const st = $("orbs").parentElement;
   st.querySelector(".secure")?.remove();
   if (!window.isSecureContext || !navigator.mediaDevices) {
     // The microphone needs HTTPS: offer the page's secure link, with the same secret.
@@ -7048,35 +7105,35 @@ async function openVoice() {
   }
   vstate("Connecting…");
   try {
-    const key = await fleetPost("api/voice/session", {});
-    if (!key.ok) throw new Error(key.error || "no voice key");
-    $("vmodel").textContent = key.model + " · " + key.voice;
+    V.ctx = new (window.AudioContext || window.webkitAudioContext)(); // made in the tap, so the phone lets it run
     // A permission sheet left unanswered never settles: say what's needed rather than spin.
     V.mic = await Promise.race([navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }), new Promise((_, no) => setTimeout(() => no(new Error("allow the microphone for this page, then tap the mic again")), 15000))]);
+    V.inA = level(V.mic);
     const pc = (V.pc = new RTCPeerConnection());
     const audio = new Audio(); audio.autoplay = true; audio.playsInline = true;
-    pc.ontrack = (e) => { audio.srcObject = e.streams[0]; audio.play().catch(() => {}); };
+    pc.ontrack = (e) => { audio.srcObject = e.streams[0]; audio.play().catch(() => {}); V.outA = level(e.streams[0]); };
     pc.addTrack(V.mic.getTracks()[0], V.mic);
     V.dc = pc.createDataChannel("oai-events");
     V.dc.onmessage = onVoiceEvent;
-    V.dc.onopen = () => {
-      vsend({ type: "session.update", session: { type: "realtime", instructions: instructions(), tools: TOOLS, tool_choice: "auto" } });
-      vsend({ type: "response.create", response: { instructions: "Say hello as Fleet in a few words, then give the one-line headline: what, if anything, is waiting on the person, and how many sessions are working. Use fleet_overview first." } });
-      V.busy = Date.now();
-    };
-    const offer = await pc.createOffer(); await pc.setLocalDescription(offer);
-    const r = await fetch("https://api.openai.com/v1/realtime/calls", { method: "POST", body: offer.sdp, headers: { authorization: "Bearer " + key.value, "content-type": "application/sdp" } });
-    if (!r.ok) { const why = await r.json().catch(() => ({})); throw new Error("OpenAI said " + ((why.error && why.error.message) || r.status)); }
-    await pc.setRemoteDescription({ type: "answer", sdp: await r.text() });
+    await pc.setLocalDescription(await pc.createOffer());
+    // The whole offer, candidates and all, goes in the one request.
+    await new Promise((ok) => { if (pc.iceGatheringState === "complete") return ok(); const done = () => pc.iceGatheringState === "complete" && ok(); pc.addEventListener("icegatheringstatechange", done); setTimeout(ok, 2500); });
+    const r = await fleetPost("api/voice/session", { sdp: pc.localDescription.sdp });
+    if (!r.ok) throw new Error(r.error || "no answer");
+    $("vmodel").textContent = r.model + " · " + r.voice;
+    await pc.setRemoteDescription({ type: "answer", sdp: r.sdp });
+    V.busy = Date.now();
     animate();
-  } catch (x) { vstate("Couldn't start: " + (x && x.message || x)); closeVoice(false); }
+  } catch (x) { closeVoice(false); V.err = 1; vstate("Couldn't start: " + (x && x.message || x)); }
 }
 function closeVoice(hide = true) {
-  clearTimeout(V.raf);
+  cancelAnimationFrame(V.raf);
+  if (V.dc && V.dc.readyState === "open") vsend({ type: "session.close", event_id: "bye" });
   try { V.dc && V.dc.close(); } catch {} try { V.pc && V.pc.close(); } catch {}
   if (V.mic) for (const t of V.mic.getTracks()) t.stop();
-  Object.assign(V, { pc: null, dc: null, mic: null, energy: {}, muted: false, busy: 0, heardAt: 0, err: 0 });
-  pending.clear();
+  try { V.ctx && V.ctx.close(); } catch {}
+  Object.assign(V, { pc: null, dc: null, mic: null, ctx: null, inA: null, outA: null, muted: false, busy: 0, deleg: false, heardAt: 0, err: 0 });
+  V.calls.clear();
   $("vmute").className = "";
   if (hide) { $("voice").classList.remove("on"); $("voice").setAttribute("aria-hidden", "true"); }
   if (latestText) apply(latestText, true);
@@ -7086,6 +7143,7 @@ $("vend").addEventListener("click", () => closeVoice());
 $("vmute").addEventListener("click", () => {
   V.muted = !V.muted;
   if (V.mic) for (const t of V.mic.getAudioTracks()) t.enabled = !V.muted;
+  vsend({ type: V.muted ? "session.input_audio.mute" : "session.input_audio.unmute", event_id: "mute_" + (++V.n) });
   $("vmute").className = V.muted ? "muted" : "";
 });
 
@@ -7618,9 +7676,10 @@ function serveSecure(options: any, host: string, token: string) {
 
 // ── voice ──
 // With an OpenAI key (OPENAI_API_KEY, in the environment or a .env beside fleet.ts), the phone page can talk: you speak
-// with Fleet about your sessions. The phone talks to OpenAI's realtime model directly, with a key made for that one
-// conversation (minutes long) by /api/voice/session, never this one; harder questions go to a reasoning model through
-// /api/voice/think, with the whole fleet's data. The key itself is never sent, logged or shown.
+// with Fleet about your sessions, on OpenAI's GPT-Live. The phone's WebRTC offer comes to /api/voice/session and fleet
+// starts the session with its own key, so the key never leaves this Mac; the audio then flows between phone and OpenAI.
+// GPT-Live hands thinking and tools to a reasoning model (Responses delegation); the page answers its tool calls from the
+// fleet's data and through fleet's own actions. The key is never sent, logged or shown.
 let openAIKeyCache: { at: number; key: string } | undefined;
 export function openAIKey(): string {
   if (process.env.OPENAI_API_KEY) return process.env.OPENAI_API_KEY.trim();
@@ -7633,52 +7692,77 @@ export function openAIKey(): string {
   return key;
 }
 export const VOICE = {
-  model: () => process.env.FLEET_VOICE_MODEL || "gpt-realtime-2.1",
-  voice: () => process.env.FLEET_VOICE || "cedar",
-  transcribe: () => process.env.FLEET_VOICE_TRANSCRIBE || "gpt-live-transcribe",
+  model: () => process.env.FLEET_VOICE_MODEL || "gpt-live-1",
+  voice: () => process.env.FLEET_VOICE || "stone",
   think: () => process.env.FLEET_THINK_MODEL || "gpt-6-luna",
   effort: () => process.env.FLEET_THINK_EFFORT || "medium",
 };
-/** A key for one conversation with the realtime model, made with this Mac's key. */
-async function voiceSession(): Promise<{ ok: boolean; value?: string; expiresAt?: number; model?: string; voice?: string; error?: string }> {
-  const key = openAIKey();
-  if (!key) return { ok: false, error: "no OpenAI key: put OPENAI_API_KEY in fleet's .env" };
+const fn = (name: string, description: string, properties: Record<string, unknown> = {}, required: string[] = Object.keys(properties)) => ({ type: "function", name, description, parameters: { type: "object", properties, required, additionalProperties: false } });
+const named = { name: { type: "string", description: "The session's name, or words from it" } };
+/** What the reasoning model behind Fleet can do; the page carries each one out. Typing and pressing go through a proposal PB sees first. */
+export const VOICE_TOOLS = [
+  fn("fleet_overview", "Every Claude Code session right now: name, state (needs you, working, stalled, finished…), what it is doing, its question if it is waiting, context use, tasks, workflows, agents, pull requests, failures. Use before answering anything about the sessions."),
+  fn("session_detail", "One session in full: its recent conversation (PB's prompts and Claude's replies), open tasks, workflows and what each agent is doing, pull requests, failures, changes.", named),
+  fn("usage", "The Claude usage limits (five-hour and weekly, when they reset, when the five-hour limit runs out at this pace) and this Mac's CPU and memory."),
+  fn("read_choices", "The numbered choices on a waiting session's own screen (its question's options).", named),
+  fn("propose_message", "Put a message for a session on PB's screen, exactly as it would be typed into that session's terminal, with Send and Cancel. Nothing is sent yet. Write it as PB would: short and direct.", { ...named, text: { type: "string" } }),
+  fn("propose_press", "Put a key press for a waiting session on PB's screen: a numbered choice (1-9), Enter (E) or Esc (X, which stops what it is doing), with its meaning. Nothing is pressed yet.", { ...named, key: { type: "string", enum: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "E", "X"] }, meaning: { type: "string", description: "What pressing it does, in a few words, e.g. 'Yes, proceed'" } }),
+  fn("confirm", "Carry out a proposal (send its message or press its key) ONLY after PB has clearly said yes to that proposal.", { proposal: { type: "string" } }),
+  fn("cancel", "Withdraw a proposal PB said no to, or changed.", { proposal: { type: "string" } }),
+];
+/** A few words on each session for the voice to open with: what it is called, its state, what it is on. */
+function voiceSnapshot(stateBody: string) {
   try {
-    const r = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
-      method: "POST",
-      headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-      body: JSON.stringify({ expires_after: { anchor: "created_at", seconds: 600 }, session: { type: "realtime", model: VOICE.model(), audio: { input: { transcription: { model: VOICE.transcribe() }, turn_detection: { type: "semantic_vad" }, noise_reduction: { type: "near_field" } }, output: { voice: VOICE.voice() } } } }),
-      signal: AbortSignal.timeout(15_000),
-    });
-    const j: any = await r.json().catch(() => ({}));
-    if (!r.ok || typeof j.value !== "string") return { ok: false, error: `OpenAI said ${r.status}${j?.error?.message ? `: ${safeLine(String(j.error.message)).slice(0, 160)}` : ""}` };
-    return { ok: true, value: j.value, expiresAt: j.expires_at, model: VOICE.model(), voice: VOICE.voice() };
+    const d = JSON.parse(stateBody);
+    return JSON.stringify({ counts: d.counts, sessions: (d.sessions ?? []).map((s: any) => ({ name: s.name, state: s.word, now: s.sub?.text })) }).slice(0, 12_000);
   } catch {
-    return { ok: false, error: "could not reach OpenAI" };
+    return "{}";
   }
 }
-/** A harder question about the fleet, answered by the reasoning model with all of the fleet's data, for Fleet to say. */
-async function voiceThink(question: string, state: string): Promise<{ ok: boolean; answer?: string; error?: string }> {
+export function voiceSessionBody(sdp: string, stateBody: string) {
+  return {
+    session: {
+      model: VOICE.model(),
+      instructions:
+        "You are Fleet: the voice of PB's fleet of Claude Code sessions, running on PB's Macs. Call yourself Fleet, and call the person PB. Speak British English: warm, quick, a little dry, never gushing. "
+        + "Keep it short: one to three sentences, then stop and listen. Say session names naturally; never read out ids, hashes or file paths. If something is waiting on PB, say that first. "
+        + "Anything about the sessions as they are now, or any action, goes to your backend, which has the tools. To type into a session or press a choice, the backend first puts it on PB's screen; read the gist back in a few words and ask, and only on a clear yes have it confirmed. "
+        + "When the conversation starts, PB's sessions were: " + voiceSnapshot(stateBody),
+      audio: { output: { voice: VOICE.voice() } },
+      delegation: {
+        type: "responses",
+        responses: {
+          model: VOICE.think(),
+          reasoning: { effort: VOICE.effort() },
+          instructions:
+            "You are the mind behind Fleet, a voice assistant for PB's fleet of Claude Code sessions. Use the tools for anything about the sessions: they change every second. Answers are spoken aloud: plain sentences, no markdown, no lists over four things, no ids or paths, under 80 words unless asked for more. "
+            + "Never type into a session or press a key without PB's yes: propose_message or propose_press first (PB sees it on screen), then confirm only after PB has clearly said yes to that proposal; cancel it if PB says no. Messages are typed into Claude Code as if PB typed them, so write them as PB would.",
+          tools: VOICE_TOOLS,
+          tool_choice: "auto",
+          parallel_tool_calls: true,
+        },
+      },
+    },
+    transport: { type: "webrtc", sdp },
+  };
+}
+/** Start a GPT-Live conversation for the phone's WebRTC offer, with this Mac's key: the answer for the phone. */
+async function voiceSession(sdp: string, stateBody: string): Promise<{ ok: boolean; sdp?: string; id?: string; model?: string; voice?: string; error?: string }> {
   const key = openAIKey();
-  if (!key) return { ok: false, error: "no OpenAI key" };
+  if (!key) return { ok: false, error: "no OpenAI key: put OPENAI_API_KEY in fleet's .env" };
+  if (!sdp.startsWith("v=0") || sdp.length > 30_000) return { ok: false, error: "no WebRTC offer" };
   try {
-    const r = await fetch("https://api.openai.com/v1/responses", {
+    const r = await fetch("https://api.openai.com/v1/live/sessions", {
       method: "POST",
       headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-      body: JSON.stringify({
-        model: VOICE.think(),
-        reasoning: { effort: VOICE.effort() },
-        instructions: "You are the analyst behind Fleet, a voice assistant for one person's fleet of Claude Code sessions. Answer the question from the fleet data given (JSON from the dashboard: sessions, their state, conversation, tasks, workflows, agents, pull requests, failures, usage limits). Your answer will be spoken aloud: plain sentences, no markdown, no lists of more than four things, no ids or file paths unless asked, under 120 words unless the question needs more. If the data does not say, say so.",
-        input: `Question: ${question.slice(0, 2000)}\n\nFleet data:\n${state.slice(0, 200_000)}`,
-      }),
-      signal: AbortSignal.timeout(120_000),
+      body: JSON.stringify(voiceSessionBody(sdp, stateBody)),
+      signal: AbortSignal.timeout(20_000),
     });
     const j: any = await r.json().catch(() => ({}));
-    if (!r.ok) return { ok: false, error: `OpenAI said ${r.status}${j?.error?.message ? `: ${safeLine(String(j.error.message)).slice(0, 160)}` : ""}` };
-    const answer = typeof j.output_text === "string" ? j.output_text : (j.output ?? []).flatMap((o: any) => o?.content ?? []).map((c: any) => c?.text ?? "").join("");
-    return { ok: true, answer: answer.slice(0, 4000) };
+    if (!r.ok || typeof j?.transport?.sdp !== "string") return { ok: false, error: `OpenAI said ${r.status}${j?.error?.message ? `: ${safeLine(String(j.error.message)).slice(0, 200)}` : ""}` };
+    return { ok: true, sdp: j.transport.sdp, id: j.session?.id, model: VOICE.model(), voice: VOICE.voice() };
   } catch {
-    return { ok: false, error: "the reasoning model did not answer in time" };
+    return { ok: false, error: "could not reach OpenAI" };
   }
 }
 
@@ -7703,7 +7787,7 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
   }
   const tail = tailnetAddress();
   const host = tail ?? "127.0.0.1";
-  const headers = { "cache-control": "no-store", "referrer-policy": "no-referrer", "x-frame-options": "DENY", "x-content-type-options": "nosniff", "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self' https://api.openai.com; img-src 'self' data:; media-src 'self' blob: mediastream:; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" };
+  const headers = { "cache-control": "no-store", "referrer-policy": "no-referrer", "x-frame-options": "DENY", "x-content-type-options": "nosniff", "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; media-src 'self' blob: mediastream:; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" };
   const base = Number(process.env.FLEET_WEB_PORT) || 4777;
   const serveOn = (port: number) => {
     try {
@@ -7773,15 +7857,14 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
             } catch {}
             return Response.json(pairPoll(String(body.id ?? ""), token), { headers });
           }
-          if (req.method === "POST" && (url.pathname === "/api/voice/session" || url.pathname === "/api/voice/think")) {
+          if (req.method === "POST" && url.pathname === "/api/voice/session") {
             const origin = req.headers.get("origin");
             if (!sameToken(url.searchParams.get("t") ?? "", token) || (origin && origin !== `${url.protocol}//${url.host}`) || !req.headers.get("content-type")?.startsWith("application/json")) return new Response("not from here", { status: 403, headers });
-            if (url.pathname === "/api/voice/session") return Response.json(await voiceSession(), { headers });
-            let body: { question?: unknown } = {};
+            let body: { sdp?: unknown } = {};
             try {
               body = await req.json();
             } catch {}
-            return Response.json(await voiceThink(String(body.question ?? ""), pageState().body), { headers });
+            return Response.json(await voiceSession(String(body.sdp ?? ""), pageState().body), { headers });
           }
           if (req.method === "POST" && url.pathname === "/api/pair/decide") {
             const origin = req.headers.get("origin");
