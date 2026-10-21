@@ -6208,7 +6208,7 @@ export function webState(sessions: Session[], now: number) {
     five: fiveHourLine(now), // the five-hour limit's forecast, always said
     pairing: pairsPending(), // the glasses app asking to connect, waiting on you
     voice: !!openAIKey(), // an OpenAI key is set: the page offers voice
-    voices: openAIKey() ? { list: LIVE_VOICES, default: VOICE.voice(), model: VOICE.model() } : undefined,
+    voices: openAIKey() ? { list: LIVE_VOICES.map((id) => ({ id, about: voiceBlurb(id) })), default: VOICE.voice(), model: VOICE.model() } : undefined,
     secure: secureLink("")?.replace(/\/\?t=$/, "") ?? null, // the page over HTTPS (the microphone needs it), without the secret
     hidden: all.length - shown.length,
     machine: { cpu: Math.round(machine.cpu), mem: Math.round((machine.memUsed / machine.memTotal) * 100), memText: `${gb(machine.memUsed)} of ${gb(machine.memTotal)}`, load: Number(machine.load.toFixed(1)) },
@@ -6312,11 +6312,11 @@ h1{display:flex;align-items:center;gap:9px;font-size:21px;font-weight:700;margin
 #voice .vtop{width:100%;display:flex;align-items:center;justify-content:space-between;color:#8a95a5;font-size:13px;flex:none}#voice .vtop b{color:#e8eef6;font-weight:650;font-size:15px;display:flex;align-items:center;gap:8px}#voice .vtop img{width:22px;height:22px;border-radius:6px}
 /* The voice picker, top right: each voice with a button to hear it. */
 #voice .vpick{position:relative}
-#vpick{display:flex;align-items:center;gap:6px;height:34px;padding:0 10px 0 14px;border-radius:17px;border:1px solid #2a3a58;background:#111a2acc;color:#e8eef6;font:inherit;font-size:14px;font-weight:600;cursor:pointer}#vpick svg{width:16px;height:16px;color:#8a95a5}
-.vlist{position:absolute;right:0;top:calc(100% + 8px);z-index:5;width:230px;max-height:min(62vh,520px);overflow-y:auto;background:#0f1726f2;border:1px solid #22314d;border-radius:16px;padding:6px;box-shadow:0 18px 50px #000c;-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px)}
+#vpick{width:40px;height:40px;display:grid;place-items:center;padding:0;border-radius:50%;border:1px solid #2a3a58;background:#111a2acc;color:#c9d6ea;cursor:pointer}#vpick svg{width:20px;height:20px}#vpick[aria-expanded="true"]{color:#fff;background:linear-gradient(135deg,#25d8fc55,#0075fc55 55%,#6c28fa55);border-color:#3f63a8}
+.vlist{position:absolute;right:0;top:calc(100% + 8px);z-index:5;width:262px;max-height:min(62vh,520px);overflow-y:auto;background:#0f1726f2;border:1px solid #22314d;border-radius:16px;padding:6px;box-shadow:0 18px 50px #000c;-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px)}
 .vlist[hidden]{display:none}.vlist .vhead{padding:6px 10px 8px;color:#6b7380;font-size:12px}
 .vrow{display:flex;align-items:center;gap:8px;border-radius:11px;padding:2px 4px 2px 10px}.vrow:hover{background:#18233a}.vrow[aria-selected="true"]{background:linear-gradient(90deg,#0075fc33,#6c28fa22)}
-.vrow .vn{flex:1;text-align:left;border:0;background:none;color:#e8eef6;font:inherit;font-size:15px;padding:9px 0;cursor:pointer}.vrow[aria-selected="true"] .vn{font-weight:650}.vrow[aria-selected="true"] .vn::after{content:" ✓";color:#25d8fc}
+.vrow .vn{flex:1;display:flex;flex-direction:column;align-items:flex-start;gap:1px;text-align:left;border:0;background:none;color:#e8eef6;font:inherit;font-size:15px;padding:7px 0;cursor:pointer}.vrow .vn small{font-size:12px;color:#8a95a5;font-weight:400}.vrow[aria-selected="true"] .vn b{font-weight:650}.vrow[aria-selected="true"] .vn b::after{content:" ✓";color:#25d8fc}.vrow .vn b{font-weight:500}
 .vrow .vp{width:34px;height:34px;flex:none;border-radius:50%;border:0;display:grid;place-items:center;cursor:pointer;color:#fff;background:#1c2a44}.vrow .vp svg{width:14px;height:14px}.vrow .vp.on{background:linear-gradient(135deg,#25d8fc,#0075fc 55%,#6c28fa)}.vrow .vp.wait{opacity:.6;animation:vwait 1s ease-in-out infinite}
 @keyframes vwait{50%{opacity:.25}}
 #voice .stage{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;width:100%}
@@ -6441,7 +6441,7 @@ details.tasks[open]>summary .sub,details.chat[open]>summary .sub{display:none}
 })();
 </script>
 <header><h1><img src="/icon-192.png" alt="">Claude Fleet</h1><span class="top-right"><button id="mic" hidden aria-label="Talk to Fleet"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3.5"/></svg></button><span id="clock"></span></span></header>
-<div id="voice" aria-hidden="true"><div class="vtop"><b><img src="/icon-192.png" alt="">Fleet</b><div class="vpick"><button id="vpick" aria-haspopup="listbox" aria-expanded="false"><span id="vname"></span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg></button><div class="vlist" id="vlist" role="listbox" hidden></div></div></div>
+<div id="voice" aria-hidden="true"><div class="vtop"><b><img src="/icon-192.png" alt="">Fleet</b><div class="vpick"><button id="vpick" aria-haspopup="listbox" aria-expanded="false" aria-label="Choose Fleet's voice"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6.5h16M4 12h16M4 17.5h16"/><g fill="currentColor" stroke="none"><circle cx="9" cy="6.5" r="2.4"/><circle cx="15.5" cy="12" r="2.4"/><circle cx="7" cy="17.5" r="2.4"/></g></svg></button><div class="vlist" id="vlist" role="listbox" hidden></div></div></div>
 <template id="vicons"><svg class="play" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l13-7.5z"/></svg><svg class="stop" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></template>
 <div class="stage"><canvas class="orbs" id="orbs" aria-hidden="true"></canvas><div class="vstate" id="vstate"></div><div class="vtool" id="vtool"></div></div>
 <div class="vcards" id="vcards"></div>
@@ -7144,7 +7144,7 @@ function animate() {
 }
 async function openVoice() {
   const box = $("voice"); box.classList.add("on"); box.setAttribute("aria-hidden", "false");
-  vtool(""); V.err = 0; proposals.clear(); drawCards(); $("vname").textContent = cap(chosenVoice());
+  vtool(""); V.err = 0; proposals.clear(); drawCards();
   const st = $("orbs").parentElement;
   st.querySelector(".secure")?.remove();
   if (!window.isSecureContext || !navigator.mediaDevices) {
@@ -7168,7 +7168,7 @@ async function openVoice() {
     await new Promise((ok) => { if (pc.iceGatheringState === "complete") return ok(); const done = () => pc.iceGatheringState === "complete" && ok(); pc.addEventListener("icegatheringstatechange", done); setTimeout(ok, 2500); });
     const r = await fleetPost("api/voice/session", { sdp: pc.localDescription.sdp, voice: chosenVoice() });
     if (!r.ok) throw new Error(r.error || "no answer");
-    $("vname").textContent = cap(r.voice);
+    $("vpick").setAttribute("aria-label", "Fleet's voice: " + cap(r.voice) + ". Choose another");
     await pc.setRemoteDescription({ type: "answer", sdp: r.sdp });
     V.startedAt = Date.now(); V.poll = setInterval(pollLevels, 50);
     V.busy = Date.now();
@@ -7192,26 +7192,35 @@ function closeVoice(hide = true) {
 // so choosing another mid-call starts a fresh call in it.
 const cap = (v) => (v ? v[0].toUpperCase() + v.slice(1) : "");
 const voices = () => fleetData().voices || { list: [], default: "stone", model: "" };
-function chosenVoice() { let v = ""; try { v = localStorage.getItem("fleet-voice") || ""; } catch {} return voices().list.includes(v) ? v : voices().default; }
+const hasVoice = (v) => voices().list.some((x) => x.id === v);
+function chosenVoice() { let v = ""; try { v = localStorage.getItem("fleet-voice") || ""; } catch {} return hasVoice(v) ? v : voices().default; }
 const icon = (name) => $("vicons").content.querySelector("." + name).cloneNode(true); // from the page's own markup
+const sampleUrl = (v) => "api/voice/sample?v=" + encodeURIComponent(v) + "&t=" + encodeURIComponent(token);
+// One player for every preview: starting one replaces whatever was playing, so two never sound at once.
+const player = new Audio(); player.preload = "auto";
 let sample = null;
-function stopSample() { if (sample) { sample.audio.pause(); sample.btn.className = "vp"; sample.btn.replaceChildren(icon("play")); sample = null; } }
+function stopSample() { player.pause(); if (sample) { sample.btn.className = "vp"; sample.btn.replaceChildren(icon("play")); sample.btn.setAttribute("aria-label", "Hear " + cap(sample.v)); sample = null; } }
 function playSample(v, btn) {
   const same = sample && sample.v === v; stopSample(); if (same) return;
-  const audio = new Audio("api/voice/sample?v=" + encodeURIComponent(v) + "&t=" + encodeURIComponent(token));
-  sample = { v, btn, audio };
+  sample = { v, btn };
   btn.className = "vp wait"; btn.replaceChildren(icon("stop")); btn.setAttribute("aria-label", "Stop " + cap(v));
-  audio.addEventListener("playing", () => { if (sample && sample.audio === audio) btn.className = "vp on"; });
-  audio.addEventListener("ended", () => sample && sample.audio === audio && stopSample());
-  audio.addEventListener("error", () => { if (sample && sample.audio === audio) { stopSample(); vtool("Couldn't play " + cap(v)); } });
-  audio.play().catch(() => {});
+  player.src = sampleUrl(v); player.currentTime = 0;
+  player.play().catch(() => {});
 }
+player.addEventListener("playing", () => sample && (sample.btn.className = "vp on"));
+player.addEventListener("ended", stopSample);
+player.addEventListener("error", () => { if (sample && player.src) { const v = sample.v; stopSample(); vtool("Couldn't play " + cap(v)); } });
+// The previews are small: fetched once when the menu first opens, so each plays the moment it is tapped.
+let warmed = false;
+const warmSamples = () => { if (warmed) return; warmed = true; for (const x of voices().list) fetch(sampleUrl(x.id), { priority: "low" }).catch(() => {}); };
 function drawVoices() {
   const box = $("vlist"), d = voices(), now = chosenVoice();
   box.replaceChildren(el("div", "vhead", d.model + " · " + d.list.length + " voices"));
-  for (const v of d.list) {
-    const row = el("div", "vrow"); row.setAttribute("role", "option"); row.setAttribute("aria-selected", String(v === now));
-    const pick = el("button", "vn", cap(v)), play = el("button", "vp"); play.append(icon("play")); play.setAttribute("aria-label", "Hear " + cap(v));
+  for (const x of d.list) {
+    const v = x.id, row = el("div", "vrow"); row.setAttribute("role", "option"); row.setAttribute("aria-selected", String(v === now));
+    const pick = el("button", "vn"); pick.append(el("b", "", cap(v)), el("small", "", x.about || ""));
+    const play = el("button", "vp"); play.append(icon("play")); play.setAttribute("aria-label", "Hear " + cap(v));
+    if (sample && sample.v === v) { sample.btn = play; play.className = player.paused ? "vp wait" : "vp on"; play.replaceChildren(icon("stop")); }
     pick.addEventListener("click", () => chooseVoice(v));
     play.addEventListener("click", (e) => { e.stopPropagation(); playSample(v, play); });
     row.append(pick, play); box.append(row);
@@ -7219,12 +7228,12 @@ function drawVoices() {
 }
 function showVoices(open) {
   $("vlist").hidden = !open; $("vpick").setAttribute("aria-expanded", String(open));
-  if (open) { drawVoices(); const on = $("vlist").querySelector('[aria-selected="true"]'); if (on) on.scrollIntoView({ block: "nearest" }); } else stopSample();
+  if (open) { warmSamples(); drawVoices(); const on = $("vlist").querySelector('[aria-selected="true"]'); if (on) on.scrollIntoView({ block: "nearest" }); } else stopSample();
 }
 function chooseVoice(v) {
   const was = chosenVoice();
   try { localStorage.setItem("fleet-voice", v); } catch {}
-  $("vname").textContent = cap(v); showVoices(false);
+  showVoices(false);
   if (v !== was && V.pc) { vtool("Switching to " + cap(v) + "…"); closeVoice(false); openVoice(); }
 }
 $("vpick").addEventListener("click", (e) => { e.stopPropagation(); showVoices($("vlist").hidden); });
@@ -7838,8 +7847,51 @@ export function voiceSessionBody(sdp: string, stateBody: string, voice?: string)
     transport: { type: "webrtc", sdp },
   };
 }
-/** GPT-Live's voices (it has no call that lists them). */
-export const LIVE_VOICES = ["quartz", "ripple", "vesper", "willow", "stone", "gleam", "meridian", "bossa", "tempo", "beacon", "delta", "cinder", "nuri", "juni", "flitz", "brise", "sillage", "nira", "harema", "shida", "noeul"];
+/** GPT-Live's voices, as its guide describes them (it has no call that lists them): language, accent, presentation, and
+ * whether the voice is a recorded one ("natural") or made. */
+export const VOICE_INFO: Record<string, { lang: string; accent?: string; gender: "male" | "female"; natural: boolean }> = {
+  quartz: { lang: "English", accent: "Australian", gender: "female", natural: false },
+  ripple: { lang: "English", accent: "Australian", gender: "male", natural: true },
+  vesper: { lang: "English", accent: "British", gender: "male", natural: true },
+  willow: { lang: "English", accent: "Irish", gender: "female", natural: true },
+  stone: { lang: "English", accent: "Irish", gender: "male", natural: true },
+  gleam: { lang: "English", accent: "North American", gender: "female", natural: true },
+  meridian: { lang: "English", accent: "North American", gender: "male", natural: true },
+  bossa: { lang: "Portuguese", accent: "Brazilian", gender: "female", natural: true },
+  tempo: { lang: "Portuguese", accent: "Brazilian", gender: "male", natural: true },
+  beacon: { lang: "English", accent: "Filipino", gender: "male", natural: false },
+  delta: { lang: "English", accent: "Southern US", gender: "female", natural: false },
+  cinder: { lang: "English", accent: "Southern US", gender: "male", natural: false },
+  nuri: { lang: "German", gender: "female", natural: true },
+  juni: { lang: "German", gender: "female", natural: true },
+  flitz: { lang: "German", gender: "male", natural: true },
+  brise: { lang: "French", gender: "female", natural: true },
+  sillage: { lang: "French", gender: "male", natural: true },
+  nira: { lang: "Hindi", gender: "female", natural: true },
+  harema: { lang: "Japanese", gender: "female", natural: true },
+  shida: { lang: "Japanese", gender: "male", natural: true },
+  noeul: { lang: "Korean", gender: "female", natural: true },
+};
+export const LIVE_VOICES = Object.keys(VOICE_INFO);
+/** What the picker shows under a voice's name: "Irish English · male", "German · female". */
+export const voiceBlurb = (v: string) => {
+  const i = VOICE_INFO[v];
+  return i ? `${i.accent ? `${i.accent} ${i.lang === "English" ? "English" : i.lang}` : i.lang} · ${i.gender}` : "";
+};
+/** The hello each voice's preview says, in its own language. */
+export function voiceHello(v: string): string {
+  const name = v[0].toUpperCase() + v.slice(1);
+  const lines: Record<string, string> = {
+    English: `Hi PB, I'm Fleet, in the ${name} voice. Shall we see what the fleet's up to?`,
+    Portuguese: `Olá PB, eu sou o Fleet, com a voz ${name}. Vamos ver o que a frota anda fazendo?`,
+    German: `Hallo PB, ich bin Fleet, mit der Stimme ${name}. Sollen wir schauen, was die Flotte macht?`,
+    French: `Bonjour PB, je suis Fleet, avec la voix ${name}. On regarde ce que fait la flotte ?`,
+    Hindi: `नमस्ते PB, मैं Fleet हूँ, ${name} आवाज़ में। चलिए देखते हैं, फ़्लीट क्या कर रहा है?`,
+    Japanese: `こんにちは、PBさん。${name}の声のFleetです。フリートの様子を見てみましょうか？`,
+    Korean: `안녕하세요, PB님. ${name} 목소리의 Fleet입니다. 플릿이 뭘 하고 있는지 볼까요?`,
+  };
+  return lines[VOICE_INFO[v]?.lang ?? "English"] ?? lines.English;
+}
 const pickVoice = (v: unknown) => (typeof v === "string" && LIVE_VOICES.includes(v) ? v : VOICE.voice());
 /** Raw 24 kHz mono PCM16 as a WAV file. */
 export function pcmToWav(pcm: Uint8Array, rate = 24_000): Uint8Array {
@@ -7861,57 +7913,70 @@ export function trimSilence(pcm: Uint8Array, rate = 24_000): Uint8Array {
   const pad = rate / 4;
   return pcm.slice(Math.max(0, a - pad) * 2, Math.min(n, b + pad) * 2);
 }
-const sampleMaking = new Map<string, Promise<Uint8Array | undefined>>();
 /**
- * A few seconds of a voice saying hello, for the page's voice picker: made once with a short GPT-Live session (over its
- * WebSocket, with quiet sent as the microphone, since it speaks only in a live conversation), then kept on disk.
+ * A voice saying `text`, as trimmed 24 kHz PCM16: a short GPT-Live session over its WebSocket, with quiet sent as the
+ * microphone, since it speaks only in a live conversation. Used to make the previews (tools/make-voice-previews.ts),
+ * and for a voice that has none yet.
  */
-export function voiceSample(voice: string): Promise<Uint8Array | undefined> {
-  if (!LIVE_VOICES.includes(voice)) return Promise.resolve(undefined);
-  const file = path.join(svcDir(), "voices", `${voice}.wav`);
-  try {
-    return Promise.resolve(new Uint8Array(fs.readFileSync(file)));
-  } catch {}
-  const key = openAIKey();
-  if (!key) return Promise.resolve(undefined);
-  const making = sampleMaking.get(voice);
-  if (making) return making;
-  const name = voice[0].toUpperCase() + voice.slice(1);
-  const made = new Promise<Uint8Array | undefined>((done) => {
+export function recordVoice(voice: string, text: string, key = openAIKey(), heard?: (said: string) => void): Promise<Uint8Array | undefined> {
+  return new Promise<Uint8Array | undefined>((done) => {
+    if (!key || !LIVE_VOICES.includes(voice)) return done(undefined);
     const parts: Uint8Array[] = [];
-    let saidAt = 0, quiet: ReturnType<typeof setInterval> | undefined;
+    let saidAt = 0, said = "", quiet: ReturnType<typeof setInterval> | undefined;
     const ws = new WebSocket("wss://api.openai.com/v1/live/sessions", { headers: { authorization: `Bearer ${key}` } } as any);
     const finish = () => {
       clearInterval(quiet); clearInterval(watch); clearTimeout(cap);
       try { ws.send(JSON.stringify({ type: "session.close" })); ws.close(); } catch {}
       const speech = trimSilence(Buffer.concat(parts));
-      if (!speech.length) return done(undefined);
-      const wav = pcmToWav(speech);
-      try {
-        fs.mkdirSync(path.dirname(file), { recursive: true });
-        fs.writeFileSync(file, wav);
-      } catch {}
-      done(wav);
+      heard?.(said.trim());
+      done(speech.length ? speech : undefined);
     };
     // Done once the words have stopped for a second and a half; never more than twenty seconds.
     const watch = setInterval(() => saidAt && Date.now() - saidAt > 1500 && finish(), 250);
     const cap = setTimeout(finish, 20_000);
-    ws.onopen = () => ws.send(JSON.stringify({ type: "session.start", session: { model: VOICE.model(), instructions: "You are Fleet. When told what to say, say exactly that, warmly, and nothing else.", audio: { output: { voice } } } }));
+    ws.onopen = () => ws.send(JSON.stringify({ type: "session.start", session: { model: VOICE.model(), instructions: "You are Fleet. When told what to say, say exactly that, warmly and naturally, in its language, and nothing else.", audio: { output: { voice } } } }));
     ws.onmessage = (m) => {
       let e: any;
       try { e = JSON.parse(String(m.data)); } catch { return; }
       if (e.type === "session.started") {
         const silence = Buffer.alloc(4800).toString("base64"); // a tenth of a second of quiet, as a microphone would send
         quiet = setInterval(() => ws.readyState === 1 && ws.send(JSON.stringify({ type: "session.input_audio.append", audio: silence })), 100);
-        ws.send(JSON.stringify({ type: "session.commentary.append", event_id: "sample", delegation_id: null, content: `Say exactly: Hi PB, I'm Fleet, in the ${name} voice. Shall we see what the fleet's up to?` }));
+        ws.send(JSON.stringify({ type: "session.commentary.append", event_id: "sample", delegation_id: null, content: `Say exactly this, and nothing else: ${text}` }));
       } else if (e.type === "session.output_audio.delta" && typeof e.delta === "string") parts.push(Buffer.from(e.delta, "base64"));
-      else if (e.type === "session.output_transcript.delta") saidAt = Date.now();
+      else if (e.type === "session.output_transcript.delta") { saidAt = Date.now(); said += e.delta ?? ""; }
       else if (e.type === "error" && !parts.length) finish();
     };
     ws.onerror = () => finish();
-  }).finally(() => sampleMaking.delete(voice));
-  sampleMaking.set(voice, made);
-  return made;
+  });
+}
+/** Where the previews that come with fleet live (made once by tools/make-voice-previews.ts, AAC in .m4a). */
+export const voicePreviewFile = (v: string) => path.join(import.meta.dir, "voices", `${v}.m4a`);
+const sampleMaking = new Map<string, Promise<Uint8Array | undefined>>();
+/** A voice's preview, for the picker: the one that comes with fleet; else one made now (once) and kept in the cache. */
+export function voiceSample(voice: string): Promise<{ bytes: Uint8Array; type: string } | undefined> {
+  if (!LIVE_VOICES.includes(voice)) return Promise.resolve(undefined);
+  try {
+    return Promise.resolve({ bytes: new Uint8Array(fs.readFileSync(voicePreviewFile(voice))), type: "audio/mp4" });
+  } catch {}
+  const file = path.join(svcDir(), "voices", `${voice}.wav`);
+  try {
+    return Promise.resolve({ bytes: new Uint8Array(fs.readFileSync(file)), type: "audio/wav" });
+  } catch {}
+  if (!openAIKey()) return Promise.resolve(undefined);
+  let making = sampleMaking.get(voice);
+  if (!making) {
+    making = recordVoice(voice, voiceHello(voice)).then((pcm) => {
+      if (!pcm) return undefined;
+      const wav = pcmToWav(pcm);
+      try {
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, wav);
+      } catch {}
+      return wav;
+    }).finally(() => sampleMaking.delete(voice));
+    sampleMaking.set(voice, making);
+  }
+  return making.then((wav) => (wav ? { bytes: wav, type: "audio/wav" } : undefined));
 }
 /**
  * How a voice call's audio held up, from the phone's WebRTC statistics, as one line for the service log: packets lost
@@ -8115,13 +8180,12 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
           if (!sameToken(url.searchParams.get("t") ?? "", token)) return new Response("not without the link fleet showed you", { status: 403, headers });
           if (url.pathname === "/manifest.webmanifest") return Response.json(webManifest(token), { headers: { ...headers, "content-type": "application/manifest+json" } });
           if (url.pathname === "/") return new Response(WEB_PAGE.replace("__TOKEN__", token).replace("__ICON__", splashIcon()).replaceAll("__LOGO_MASK__", logoMask()).replace("__STARTUP__", STARTUP_LINKS), { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
-          // A voice saying hello, for the picker: made on first asking (a few seconds), then from disk.
+          // A voice saying hello, for the picker: the preview that comes with fleet, kept by the phone for a week.
           if (url.pathname === "/api/voice/sample") {
             const v = url.searchParams.get("v") ?? "";
             if (!LIVE_VOICES.includes(v)) return new Response("no such voice", { status: 404, headers });
-            if (!openAIKey()) return new Response("no OpenAI key", { status: 503, headers });
-            const wav = await voiceSample(v);
-            return wav ? new Response(wav, { headers: { ...headers, "content-type": "audio/wav", "cache-control": "private, max-age=86400" } }) : new Response("could not make a sample", { status: 502, headers });
+            const got = await voiceSample(v);
+            return got ? new Response(got.bytes, { headers: { ...headers, "content-type": got.type, "cache-control": "private, max-age=604800" } }) : new Response(openAIKey() ? "could not make a sample" : "no OpenAI key", { status: openAIKey() ? 502 : 503, headers });
           }
           if (url.pathname === "/api/state") {
             web.watchedAt = Date.now();
