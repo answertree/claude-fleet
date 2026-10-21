@@ -9177,6 +9177,7 @@ export interface Peer {
   noPush?: boolean; // an older fleet that only answers reads
   readUsAt?: number; // when it last read this one's state: then it has it, and needs no push
   machine?: { cpu: number; mem: number }; // its CPU and memory, for Telegram's overview
+  email?: string; // the Claude account it is signed in to, for the usage screen
   usage?: { label: string; pct: number; resets: string; resetsAt?: number }[]; // its Claude account's limits
 }
 export const peers = new Map<string, Peer>(); // by address
@@ -9236,6 +9237,31 @@ export const refusedWhy = (ip: string) => whoisSeen.get(ip)?.why ?? "";
 
 /** This machine's name, as the other machines know it. */
 export const selfHost = () => tailnet.host || os.hostname().split(".")[0];
+/** The email a Claude Code config folder is signed in as (its .claude.json's oauthAccount): that one key and no other. */
+export function claudeEmail(file: string): string {
+  const e = readJson(file, 1 << 30)?.oauthAccount?.emailAddress;
+  return typeof e === "string" ? safeLine(e).slice(0, 80) : "";
+}
+/** The Claude account this machine's own login is, by email: read again only when .claude.json changes (it can be large). */
+let loginSeen: { file: string; mtime: number; email: string } | undefined;
+export function loginEmail(): string {
+  const file = path.join(process.env.FLEET_HOME || process.env.AGENT_FLEET_HOME || os.homedir(), ".claude.json");
+  const mtime = fs.statSync(file, { throwIfNoEntry: false })?.mtimeMs ?? 0;
+  if (!loginSeen || loginSeen.file !== file || loginSeen.mtime !== mtime) loginSeen = { file, mtime, email: mtime ? claudeEmail(file) : "" };
+  return loginSeen.email;
+}
+/** Which machines of the fleet are signed in to which Claude account right now: email (lower case) to machine names, this one first. */
+export function machinesByAccount(): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  const add = (email: string | undefined, host: string) => {
+    if (!email) return;
+    const k = email.toLowerCase();
+    out.set(k, [...(out.get(k) ?? []), host]);
+  };
+  add(loginEmail(), selfHost());
+  for (const p of peers.values()) if (p.at) add(p.email, p.host);
+  return out;
+}
 /** Whether any other machine's fleet is on the screen: only then does each session say which machine it is on. */
 export const manyMachines = () => [...peers.values()].some((p) => p.sessions.length || p.at);
 /** The machine a session is on, when there is more than one to tell apart. */
@@ -9300,7 +9326,7 @@ export function peerState(local: Session[], now: number): { body: Uint8Array; ta
   }
   const tgc = readTg();
   const ws = webState([], now);
-  const text = `{"proto":${PEER_PROTO},"build":${JSON.stringify(FLEET_BUILD)},"host":${JSON.stringify(selfHost())},"machine":${JSON.stringify({ cpu: ws.machine.cpu, mem: ws.machine.mem })},"usage":${JSON.stringify(ws.account?.limits ?? null)},"tgReady":${!!tgc.token && tgWanted},"tg":${JSON.stringify(tgc.at ? tgc : null)},"prs":${JSON.stringify(prs)},"sessions":${encodeSessions(local, now)}}`;
+  const text = `{"proto":${PEER_PROTO},"build":${JSON.stringify(FLEET_BUILD)},"host":${JSON.stringify(selfHost())},"email":${JSON.stringify(loginEmail())},"machine":${JSON.stringify({ cpu: ws.machine.cpu, mem: ws.machine.mem })},"usage":${JSON.stringify(ws.account?.limits ?? null)},"tgReady":${!!tgc.token && tgWanted},"tg":${JSON.stringify(tgc.at ? tgc : null)},"prs":${JSON.stringify(prs)},"sessions":${encodeSessions(local, now)}}`;
   peerPayload = { at: now, seq: scanSeq, body: Bun.gzipSync(new TextEncoder().encode(text)), tag: `"${Bun.hash(text).toString(36)}"` };
   return peerPayload;
 }
@@ -9338,6 +9364,7 @@ function absorbPeer(p: Peer, j: any) {
   p.tg = j.tg && typeof j.tg === "object" ? j.tg : undefined;
   p.tgReady = j.tgReady === true;
   p.machine = j.machine && typeof j.machine.cpu === "number" ? { cpu: j.machine.cpu, mem: Number(j.machine.mem) || 0 } : undefined;
+  p.email = typeof j.email === "string" && j.email ? safeLine(j.email).slice(0, 80) : undefined;
   p.usage = Array.isArray(j.usage) ? j.usage.filter((l: any) => typeof l?.label === "string" && typeof l?.pct === "number").map((l: any) => ({ label: safeLine(l.label).slice(0, 20), pct: l.pct, resets: typeof l.resets === "string" ? safeLine(l.resets).slice(0, 40) : "", resetsAt: typeof l.resetsAt === "number" ? l.resetsAt : undefined })) : undefined;
   // Their pull requests' states, for the rows; this machine's own reads win for a PR both have.
   for (const [key, st] of Object.entries(j.prs ?? {})) if (!prState.get(key)?.state || prState.get(key)!.at < Date.now() - 60_000) prState.set(key, { at: Date.now() - 30_000, state: st as PrState });

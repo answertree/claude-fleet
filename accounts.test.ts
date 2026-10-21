@@ -176,7 +176,7 @@ describe("renewing a login", () => {
 });
 
 describe("the accounts screen", () => {
-  test("this Mac first, then each listed account with its email; how to add one when none are listed", async () => {
+  test("your accounts in the list's order, each with the machines signed in to it; one a machine uses but you have not listed follows; how to add one when none are listed", async () => {
     const was = F.opt.usage;
     F.opt.usage = true;
     const file = A.accountsPath();
@@ -206,26 +206,42 @@ describe("the accounts screen", () => {
     expect(lines).toHaveLength(20);
     expect(lines.every((l) => l.length <= 100)).toBe(true);
     const at = lines.findIndex((l) => l.includes("client"));
-    expect(lines.findIndex((l) => l.includes("this Mac"))).toBeLessThan(at);
+    expect(lines.join("\n")).not.toContain("this Mac"); // no row of its own: it is a machine, marked on its account
     expect(lines[at]).toContain("me@work.example");
     expect(lines[at + 1]).toMatch(/5h .* 91%/);
     expect(lines[at + 2]).toMatch(/7d .* 20%/);
     expect(lines.join("\n")).not.toContain("No other accounts");
-    // Not the account in use (this Mac is signed in as someone else): it says when it resets, never when it fills.
+    // No machine is signed in to it: no mark, and it says when it resets, never when it fills.
+    expect(lines[at]).not.toContain("●");
     expect(lines[at + 1]).not.toContain("full in");
     expect(lines[at + 1]).toContain("resets");
-    // Signed in as the same person as this Mac, it is the account in use, and at 91% with half an hour left it fills.
+    // This Mac signed in to it, and another machine of the fleet too: both named on its right, and at 91% with half
+    // an hour left it fills.
     const mine = path.join(process.env.FLEET_HOME!, ".claude.json");
     fs.mkdirSync(path.dirname(mine), { recursive: true });
     fs.writeFileSync(
       mine,
-      JSON.stringify({ oauthAccount: { emailAddress: "me@work.example" } }),
+      JSON.stringify({ oauthAccount: { emailAddress: "Me@Work.example" } }),
     );
-    const inUse = A.accountsScreen(100, 20, NOW).map(strip);
-    expect(inUse[inUse.findIndex((l) => l.includes("client")) + 1]).toContain(
-      "full in",
-    );
-    fs.rmSync(mine);
+    F.peers.set("100.64.0.2:4777", { host: "mini", ip: "100.64.0.2", addr: "100.64.0.2:4777", sessions: [], at: Date.now(), fresh: false, busy: false, email: "me@work.example" });
+    try {
+      const inUse = A.accountsScreen(100, 20, NOW).map(strip);
+      const row = inUse.findIndex((l) => l.includes("client"));
+      expect(inUse[row]).toEndWith(`● ${F.selfHost()} · mini`);
+      expect(inUse[row + 1]).toContain("full in");
+      // This Mac signed in to an account you have not listed: it follows the list, with its own figures, and how to add it.
+      fs.writeFileSync(mine, JSON.stringify({ oauthAccount: { emailAddress: "elsewhere@x.example" } }));
+      fs.utimesSync(mine, new Date(), new Date(Date.now() + 10_000));
+      const other = A.accountsScreen(100, 20, NOW).map(strip);
+      const extra = other.findIndex((l) => l.includes("not in your list"));
+      expect(extra).toBeGreaterThan(other.findIndex((l) => l.includes("client")));
+      expect(other[extra]).toContain("elsewhere@x.example");
+      expect(other[extra]).toContain("a adds it here");
+      expect(other[extra]).toEndWith(`● ${F.selfHost()}`);
+    } finally {
+      F.peers.clear();
+      fs.rmSync(mine);
+    }
 
     fs.writeFileSync(file, "[]");
     fs.utimesSync(file, new Date(), new Date(Date.now() + 5000)); // a new mtime, so the list is read again
