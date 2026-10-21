@@ -6309,11 +6309,11 @@ h1{display:flex;align-items:center;gap:9px;font-size:21px;font-weight:700;margin
 #voice.on{opacity:1;pointer-events:auto}
 #voice .vtop{width:100%;display:flex;align-items:center;justify-content:space-between;color:#8a95a5;font-size:13px}#voice .vtop b{color:#e8eef6;font-weight:650;font-size:15px;display:flex;align-items:center;gap:8px}#voice .vtop img{width:22px;height:22px;border-radius:6px}
 #voice .stage{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:26px;width:100%}
-.orb{--lvl:0;position:relative;width:min(62vw,250px);aspect-ratio:1;border-radius:50%;transform:scale(calc(1 + var(--lvl) * .22));transition:transform .08s linear}
-.orb i{position:absolute;inset:0;border-radius:50%;filter:blur(1px)}
+.orb{--lvl:0;position:relative;width:min(62vw,250px);aspect-ratio:1;border-radius:50%;transform:scale(calc(1 + var(--lvl) * .22));transition:transform .12s ease-out;will-change:transform}
+.orb i{position:absolute;inset:0;border-radius:50%;will-change:transform}
 .orb i:nth-child(1){background:radial-gradient(circle at 35% 30%,#bdf6ff 0,#56cdd6 30%,#2f6bff 62%,#5b2bd6 100%);animation:orbspin 9s linear infinite}
-.orb i:nth-child(2){background:radial-gradient(circle at 70% 70%,#be94ffcc 0,#be94ff00 55%);mix-blend-mode:screen;animation:orbspin 6s linear infinite reverse}
-.orb i:nth-child(3){background:radial-gradient(circle at 30% 75%,#50c87899 0,#50c87800 50%);mix-blend-mode:screen;animation:orbspin 11s linear infinite}
+.orb i:nth-child(2){background:radial-gradient(circle at 70% 70%,#be94ffcc 0,#be94ff00 55%);animation:orbspin 6s linear infinite reverse}
+.orb i:nth-child(3){background:radial-gradient(circle at 30% 75%,#50c87899 0,#50c87800 50%);animation:orbspin 11s linear infinite}
 .orb i:nth-child(4){inset:-14%;background:radial-gradient(circle,#4aa3ff40 0,#4aa3ff00 65%);filter:blur(10px)}
 .orb.idle{animation:breathe 4s ease-in-out infinite}.orb.think i:nth-child(1){animation-duration:2.4s}
 @keyframes orbspin{to{transform:rotate(360deg)}}@keyframes breathe{50%{transform:scale(1.04)}}
@@ -6831,6 +6831,8 @@ async function tick(force = true) {
 function apply(text, force) {
   last = Date.now(); latestText = text;
   if (!force && text === lastText) return;
+  // Nothing re-renders under a voice call: the phone's attention stays on the audio. Closing the call catches up.
+  if (V.pc) return void (lastText = "");
   lastText = text;
   const d = JSON.parse(text);
   const q = document.getElementById("quip"); q.replaceChildren(); quip(d).forEach(([text, cls], i) => { if (i) q.append(" · "); q.append(el("span", cls || "", text)); });
@@ -6917,7 +6919,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden && (!
 // The phone talks to OpenAI's realtime model directly (WebRTC), with a key fleet makes for this one conversation. What
 // the model asks of the fleet (its tools) is answered here, from what fleet sends the page and through fleet's own
 // actions. Sending a message or pressing a choice is only ever done after Fleet has said it back and heard yes.
-const V = { pc: null, dc: null, mic: null, out: null, ctx: null, raf: 0, muted: false, said: "", heard: "", busy: 0, heardAt: 0, err: 0 };
+const V = { pc: null, dc: null, mic: null, energy: {}, raf: 0, muted: false, said: "", heard: "", busy: 0, heardAt: 0, err: 0 };
 const $ = (id) => document.getElementById(id);
 const vstate = (t) => ($("vstate").textContent = t);
 const vtool = (t) => ($("vtool").textContent = t || "");
@@ -7001,19 +7003,35 @@ async function onVoiceEvent(e) {
   }
   else if (t === "error") { vtool(""); V.busy = 0; V.err = 1; vstate((m.error && m.error.message) || "Something went wrong"); setTimeout(() => (V.err = 0), 4000); }
 }
-// The orb moves with whoever is speaking: Fleet's voice when it talks, yours when you do.
-function level(stream) { const a = V.ctx.createAnalyser(); a.fftSize = 512; V.ctx.createMediaStreamSource(stream).connect(a); return a; }
-function animate(inA) {
-  const buf = new Uint8Array(256);
-  const lvl = (a) => { if (!a) return 0; a.getByteTimeDomainData(buf); let s = 0; for (const v of buf) s += ((v - 128) / 128) ** 2; return Math.sqrt(s / buf.length); };
-  let shown = "";
-  const step = () => {
-    const out = lvl(V.out), now = Date.now();
+// The orb moves with whoever is speaking: Fleet's voice when it talks, yours when you do. The levels come from the call's
+// own statistics, never a Web Audio graph: tapping the voice with an AudioContext makes phones click and crackle.
+async function levels() {
+  const pc = V.pc; if (!pc) return { out: 0, mic: 0 };
+  // Loudness over the last interval from the energy counters: the incoming voice as played, and the microphone.
+  const got = { out: 0, mic: 0 };
+  try {
+    (await pc.getStats()).forEach((r) => {
+      const k = r.type === "inbound-rtp" && r.kind === "audio" ? "out" : r.type === "media-source" && r.kind === "audio" ? "mic" : "";
+      if (!k || r.totalAudioEnergy === undefined) return;
+      const was = V.energy[k]; V.energy[k] = [r.totalAudioEnergy, r.totalSamplesDuration];
+      if (was && r.totalSamplesDuration > was[1]) got[k] = Math.sqrt((r.totalAudioEnergy - was[0]) / (r.totalSamplesDuration - was[1]));
+    });
+  } catch {}
+  if (V.muted) got.mic = 0;
+  return got;
+}
+function animate() {
+  let shown = "", lvl = -1;
+  const step = async () => {
+    const { out, mic } = await levels(), now = Date.now();
+    if (!V.pc) return;
     if (out > 0.01) V.heardAt = now;
     if (V.busy && now - V.busy > 20000) V.busy = 0; // a reply that never came
     const mode = now - (V.heardAt || 0) < 700 ? "Speaking" : V.busy ? "Thinking" : V.muted ? "Muted" : "Listening";
     if (mode !== shown && !V.err) { shown = mode; vstate(mode); $("orb").className = mode === "Thinking" ? "orb think" : mode === "Speaking" ? "orb" : "orb idle"; }
-    const l = Math.min(1, Math.max(out, V.muted ? 0 : lvl(inA) * 0.8) * 4); $("orb").style.setProperty("--lvl", l.toFixed(3)); V.raf = requestAnimationFrame(step);
+    const l = Math.round(Math.min(1, Math.max(out, mic * 0.8) * 2.5) * 20) / 20; // twenty steps: the orb repaints only when it visibly moves
+    if (l !== lvl) { lvl = l; $("orb").style.setProperty("--lvl", String(l)); }
+    V.raf = setTimeout(step, 60);
   };
   step();
 }
@@ -7033,12 +7051,11 @@ async function openVoice() {
     const key = await fleetPost("api/voice/session", {});
     if (!key.ok) throw new Error(key.error || "no voice key");
     $("vmodel").textContent = key.model + " · " + key.voice;
-    V.ctx = new (window.AudioContext || window.webkitAudioContext)();
     // A permission sheet left unanswered never settles: say what's needed rather than spin.
     V.mic = await Promise.race([navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }), new Promise((_, no) => setTimeout(() => no(new Error("allow the microphone for this page, then tap the mic again")), 15000))]);
     const pc = (V.pc = new RTCPeerConnection());
     const audio = new Audio(); audio.autoplay = true; audio.playsInline = true;
-    pc.ontrack = (e) => { audio.srcObject = e.streams[0]; audio.play().catch(() => {}); V.out = level(e.streams[0]); };
+    pc.ontrack = (e) => { audio.srcObject = e.streams[0]; audio.play().catch(() => {}); };
     pc.addTrack(V.mic.getTracks()[0], V.mic);
     V.dc = pc.createDataChannel("oai-events");
     V.dc.onmessage = onVoiceEvent;
@@ -7051,18 +7068,18 @@ async function openVoice() {
     const r = await fetch("https://api.openai.com/v1/realtime/calls", { method: "POST", body: offer.sdp, headers: { authorization: "Bearer " + key.value, "content-type": "application/sdp" } });
     if (!r.ok) { const why = await r.json().catch(() => ({})); throw new Error("OpenAI said " + ((why.error && why.error.message) || r.status)); }
     await pc.setRemoteDescription({ type: "answer", sdp: await r.text() });
-    animate(level(V.mic));
+    animate();
   } catch (x) { vstate("Couldn't start: " + (x && x.message || x)); closeVoice(false); }
 }
 function closeVoice(hide = true) {
-  cancelAnimationFrame(V.raf);
+  clearTimeout(V.raf);
   try { V.dc && V.dc.close(); } catch {} try { V.pc && V.pc.close(); } catch {}
   if (V.mic) for (const t of V.mic.getTracks()) t.stop();
-  try { V.ctx && V.ctx.close(); } catch {}
-  Object.assign(V, { pc: null, dc: null, mic: null, out: null, ctx: null, muted: false, busy: 0, heardAt: 0, err: 0 });
+  Object.assign(V, { pc: null, dc: null, mic: null, energy: {}, muted: false, busy: 0, heardAt: 0, err: 0 });
   pending.clear();
   $("vmute").className = "";
   if (hide) { $("voice").classList.remove("on"); $("voice").setAttribute("aria-hidden", "true"); }
+  if (latestText) apply(latestText, true);
 }
 $("mic").addEventListener("click", openVoice);
 $("vend").addEventListener("click", () => closeVoice());
