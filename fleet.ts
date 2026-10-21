@@ -6642,7 +6642,7 @@ function armable(s, id, cls, content, what, act) {
     notes.set(s.sid, { cls: "", text: "sending…" }); tick();
     const r = act.key ? await post("api/keys", { sid: s.sid, key: act.key }) : await post("api/send", { sid: s.sid, text: act.text });
     const at = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    notes.set(s.sid, r.ok ? { cls: "ok", text: (act.key ? "pressed " + what : "sent " + what) + " ✓ " + at } : { cls: "err", text: "not done: " + (r.error || "unknown") });
+    notes.set(s.sid, r.ok ? { cls: "ok", text: (act.key ? "pressed " + what : (r.queued ? "queued " : "sent ") + what) + (r.queued ? " ⏳ " : " ✓ ") + at } : { cls: "err", text: "not done: " + (r.error || "unknown") });
     screens.delete(s.sid); tick();
   });
   return b;
@@ -6713,7 +6713,7 @@ function card(s) {
     try {
       const r = await fetch("api/send?t=" + encodeURIComponent(token), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sid: s.sid, text }) });
       const d = await r.json().catch(() => ({ ok: false, error: "fleet said " + r.status }));
-      if (d.ok) { following.set(s.sid, { text, at: Date.now() }); open.set(s.sid + "chat", true); stick.set(s.sid, true); const ch = f.closest("details.chat"); if (ch) ch.open = true; drafts.delete(s.sid); ta.value = ""; grow(ta); notes.set(s.sid, { cls: "ok", text: "sent ✓ " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) }); }
+      if (d.ok) { following.set(s.sid, { text, at: Date.now() }); open.set(s.sid + "chat", true); stick.set(s.sid, true); const ch = f.closest("details.chat"); if (ch) ch.open = true; drafts.delete(s.sid); ta.value = ""; grow(ta); notes.set(s.sid, d.queued ? { cls: "ok", text: "queued ⏳ it's busy: delivers as soon as it can" } : { cls: "ok", text: "sent ✓ " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) }); }
       else notes.set(s.sid, { cls: "err", text: "not sent: " + (d.error || "unknown") });
     } catch { notes.set(s.sid, { cls: "err", text: "not sent: can't reach fleet" }); }
     const n = notes.get(s.sid); note.className = "sent " + n.cls; note.textContent = n.text; go.disabled = false; ta.blur(); tick();
@@ -7310,7 +7310,7 @@ function pasteInto(server: string[], pane: string, text: string): boolean {
   return paste && spawnSync(tmuxCmd(), [...server, "send-keys", "-t", pane, "Enter"], { timeout: 3000 }).status === 0;
 }
 let sendChain: Promise<unknown> = Promise.resolve();
-type Reach = { ok: boolean; via?: string; error?: string; screen?: string; id?: string };
+type Reach = { ok: boolean; via?: string; error?: string; screen?: string; id?: string; later?: boolean; queued?: boolean };
 /**
  * Run `fn` with a session's terminal within reach, one session at a time. A background session is opened with
  * `claude attach` in a hidden tmux (and closed after; the session keeps running); a session running in a tmux pane
@@ -7329,8 +7329,9 @@ function withSession(s: Session, fn: (server: string[], pane: string, via: strin
         r = await attachAnd(s, fn);
         if (!r.ok && r.retry) svcLog(`could not open ${s.name || s.sid.slice(0, 8)} again (${r.error})${r.screen ? `. Its screen: ${safeLine(r.screen.trim().split("\n").slice(-3).join(" ⏎ ")).slice(0, 300)}` : ""}`);
       }
-      const { retry: _, ...out } = r;
-      return out;
+      // Out of reach for now (claude attach would not open it): worth another go later, which is the sender's call.
+      const { retry, ...out } = r;
+      return retry && !out.ok ? { ...out, later: true } : out;
     }
     const pane = paneOf(s.pid);
     if (!pane) return { ok: false, error: "this session is not a background session or in tmux, so it cannot be reached from here" };
@@ -7345,7 +7346,9 @@ let attachN = 0;
 async function attachAnd(s: Session, fn: (server: string[], pane: string, via: string) => Promise<Reach> | Reach): Promise<Reach & { retry?: boolean }> {
   const server = ["-L", `fleet-send-${process.pid}-${++attachN}`];
   const attach = process.env.FLEET_ATTACH_CMD || "claude";
-  if (spawnSync(tmuxCmd(), [...server, "new-session", "-d", "-x", "120", "-y", "40", attach, "attach", s.jobId!], { timeout: 5000 }).status !== 0) return { ok: false, error: "could not open the session", retry: true };
+  // The pane outlives claude attach for a moment, so when it will not open, what it said is on the screen for the log.
+  const run = ["sh", "-c", 'exec 2>&1; "$0" attach "$1"; echo "fleet: attach ended ($?)"; sleep 5', attach, s.jobId!];
+  if (spawnSync(tmuxCmd(), [...server, "new-session", "-d", "-x", "120", "-y", "40", ...run], { timeout: 5000 }).status !== 0) return { ok: false, error: "could not open the session", retry: true };
   try {
     // Ready once its prompt (the input line, or a choice) is drawn and either the screen has settled or the prompt
     // has stood for a second: a session that is thinking keeps its spinner turning, and takes a message all the same.
@@ -7355,6 +7358,7 @@ async function attachAnd(s: Session, fn: (server: string[], pane: string, via: s
       // claude attach has already exited (no such session, or it could not attach): no point waiting.
       if (spawnSync(tmuxCmd(), [...server, "has-session"], { timeout: 3000 }).status !== 0) return { ok: false, error: "could not open the session", retry: true, screen };
       screen = spawnSync(tmuxCmd(), [...server, "capture-pane", "-p"], { encoding: "utf8", timeout: 3000 }).stdout ?? "";
+      if (screen.includes("fleet: attach ended")) return { ok: false, error: "could not open the session", retry: true, screen };
       if (!screen.includes("❯")) promptSince = 0;
       else if (!promptSince) promptSince = i;
       if (promptSince && (screen === last || i - promptSince >= 4)) return await fn(server, "0", "attach");
@@ -7365,16 +7369,50 @@ async function attachAnd(s: Session, fn: (server: string[], pane: string, via: s
     spawnSync(tmuxCmd(), [...server, "kill-server"], { timeout: 3000 });
   }
 }
-/** Type a message into a session, as if you had typed it there, on whichever machine it is on. */
-export function sendToSession(s: Session, raw: string): Promise<Reach> {
-  const text = cleanMessage(raw);
-  if (!text) return Promise.resolve({ ok: false, error: "nothing to send" });
-  if (s.remote) return peerCall(s, "/peer/send", { sid: s.sid, text }); // its own machine's fleet types it in
-  return withSession(s, async (server, pane, via) => {
+const typeInto = (s: Session, text: string) =>
+  withSession(s, async (server, pane, via) => {
     if (!pasteInto(server, pane, text)) return { ok: false, error: "could not type into the session" };
     if (via === "attach") await pause(1000); // let it take the message before the attach closes
     return { ok: true, via };
   });
+/** Messages for sessions that would not open, delivered in order when they will: tried again, less often, for ten minutes. */
+const sendQueue = new Map<string, { s: Session; items: { text: string; done?: (r: Reach) => void }[]; since: number }>();
+const SEND_QUEUE_MS = 10 * 60_000;
+async function drainQueue(sid: string) {
+  const q = sendQueue.get(sid)!;
+  const step = Number(process.env.FLEET_SEND_RETRY_MS) || 10_000;
+  const name = q.s.name || sid.slice(0, 8);
+  for (let i = 1; q.items.length; i++) {
+    await pause(Math.min(6 * step, step * i));
+    const r = await typeInto(q.s, q.items[0].text);
+    if (r.ok) {
+      svcLog(`delivered a queued message to ${name}`);
+      q.items.shift()!.done?.({ ok: true, via: r.via });
+      continue;
+    }
+    if (r.later && Date.now() - q.since < SEND_QUEUE_MS) continue;
+    svcLog(`gave up on ${q.items.length} queued message${q.items.length === 1 ? "" : "s"} for ${name}: ${r.error}`);
+    for (const it of q.items) it.done?.({ ok: false, error: r.error });
+    break;
+  }
+  sendQueue.delete(sid);
+}
+/**
+ * Type a message into a session, as if you had typed it there, on whichever machine it is on. A session that will
+ * not open just now (busy, mid-turn, briefly out of reach) gets it queued, not refused: `queued` says so, and `done`
+ * hears when it is delivered or given up on.
+ */
+export async function sendToSession(s: Session, raw: string, done?: (r: Reach) => void): Promise<Reach> {
+  const text = cleanMessage(raw);
+  if (!text) return { ok: false, error: "nothing to send" };
+  if (s.remote) return peerCall(s, "/peer/send", { sid: s.sid, text }); // its own machine's fleet types it in
+  const waiting = sendQueue.get(s.sid);
+  if (waiting) return waiting.items.push({ text, done }), { ok: true, via: "queued", queued: true }; // after those before it
+  const r = await typeInto(s, text);
+  if (r.ok || !r.later) return r;
+  sendQueue.set(s.sid, { s, items: [{ text, done }], since: Date.now() });
+  void drainQueue(s.sid);
+  return { ok: true, via: "queued", queued: true };
 }
 /** The keys a button can press in a session: a numbered choice, Enter, or Esc (which stops what it is doing). */
 export const SESSION_KEYS: Record<string, string> = { "1": "1", "2": "2", "3": "3", "4": "4", "5": "5", "6": "6", "7": "7", "8": "8", "9": "9", E: "Enter", X: "Escape" };
@@ -8074,8 +8112,8 @@ export async function tgHandle(update: any): Promise<void> {
   if (target) {
     const s = tg.getSessions().find((x) => x.sid === target);
     if (!s) return void (await say("That session has finished, so I can't send to it."));
-    const r = await (web.send ?? sendToSession)(s, text);
-    const ack = await say(r.ok ? `✓ sent to ${tgName(s)}` : `✗ not sent: ${r.error}`);
+    const r = await (web.send ?? sendToSession)(s, text, (late) => void say(late.ok ? `✓ delivered to ${tgName(s)}` : `✗ could not deliver to ${tgName(s)}: ${late.error}`));
+    const ack = await say(r.queued ? `⏳ ${tgName(s)} can't take it this second: queued, and I'll say when it's delivered` : r.ok ? `✓ sent to ${tgName(s)}` : `✗ not sent: ${r.error}`);
     // Your message and the receipt belong to the session too, so a reply to either reaches it.
     rememberTg(m.message_id, s.sid);
     if (typeof ack.result?.message_id === "number") rememberTg(ack.result.message_id, s.sid);
@@ -10391,7 +10429,7 @@ async function pick(i) {
   if (!c || !s) return;
   busy = true;
   const r = c.key ? await post("/api/keys", { sid, key: c.key }) : await post("/api/send", { sid, text: c.text });
-  await show({ containerTotalNum: 1, textObject: [text0(1, "done", 0, 0, W, H, (r.ok ? "■ " + (c.key ? "Pressed " + (c.key === "X" ? "Esc" : c.key === "E" ? "Enter" : c.key) : "Sent") + " in " + s.name : "x Not done: " + (r.error || "fleet did not answer")), true)] });
+  await show({ containerTotalNum: 1, textObject: [text0(1, "done", 0, 0, W, H, (r.ok ? "■ " + (c.key ? "Pressed " + (c.key === "X" ? "Esc" : c.key === "E" ? "Enter" : c.key) : r.queued ? "Queued (busy)" : "Sent") + " in " + s.name : "x Not done: " + (r.error || "fleet did not answer")), true)] });
   setTimeout(async () => {
     busy = false;
     await refresh();

@@ -6008,6 +6008,31 @@ describe("reaching a background session", () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   }, 20_000);
+  test("one that still will not open gets the message queued, delivered when it opens, and the log says what it said", async () => {
+    if (Bun.spawnSync(["tmux", "-V"]).exitCode !== 0) return;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-queue-"));
+    const fake = path.join(dir, "claude");
+    // Refuses three attaches (the send and its second try, then the first from the queue); the fourth shows a prompt.
+    fs.writeFileSync(fake, `#!/bin/sh\nn=$(cat "${dir}/n" 2>/dev/null || echo 0); echo $((n+1)) > "${dir}/n"\nif [ "$n" -lt 3 ]; then echo "Session is busy compacting"; exit 1; fi\nprintf '\\342\\235\\257 '\nsleep 30\n`, { mode: 0o755 });
+    const saved = [process.env.FLEET_ATTACH_CMD, process.env.FLEET_SEND_RETRY_MS];
+    process.env.FLEET_ATTACH_CMD = fake;
+    process.env.FLEET_SEND_RETRY_MS = "300";
+    try {
+      const later = Promise.withResolvers<any>();
+      const s = { sid: "q1", jobId: "abc124", name: "queue me", cwd: "/x", mains: [], agents: [], workflows: [] } as any;
+      const r = await F.sendToSession(s, "hello", later.resolve);
+      expect(r).toEqual({ ok: true, via: "queued", queued: true });
+      expect(await later.promise).toEqual({ ok: true, via: "attach" });
+      expect(fs.readFileSync(path.join(dir, "n"), "utf8").trim()).toBe("4");
+      const log = fs.readFileSync(F.svcLogPath(), "utf8");
+      expect(log).toContain("Session is busy compacting");
+      expect(log).toContain("delivered a queued message to queue me");
+    } finally {
+      for (const [k, v] of [["FLEET_ATTACH_CMD", saved[0]], ["FLEET_SEND_RETRY_MS", saved[1]]] as const) if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 40_000);
 });
 
 describe("the home-screen launch picture", () => {
