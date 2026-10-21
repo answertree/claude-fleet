@@ -5353,11 +5353,12 @@ describe("key w: the phone page", () => {
       const post = (q: string, headers: Record<string, string> = {}) => fetch(`http://127.0.0.1:4981/api/voice/session${q}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: "{}" });
       expect((await post("?t=wrong")).status).toBe(403);
       expect((await post(`?t=${token}`, { origin: "https://evil.example" })).status).toBe(403);
-      expect((await fetch(`http://127.0.0.1:4981/api/voice/think?t=${token}`, { method: "POST", headers: { "content-type": "text/plain" }, body: "{}" })).status).toBe(403);
+      expect((await post(`?t=${token}`, { "content-type": "text/plain" })).status).toBe(403);
+      expect(await (await post(`?t=${token}`)).json()).toEqual({ ok: false, error: "no WebRTC offer" });
       delete process.env.OPENAI_API_KEY;
       if (noKey) expect(await (await post(`?t=${token}`)).json()).toEqual({ ok: false, error: "no OpenAI key: put OPENAI_API_KEY in fleet's .env" });
       expect(F.WEB_PAGE).toContain('id="mic"');
-      expect(F.WEB_PAGE).toContain("https://api.openai.com/v1/realtime/calls");
+      expect(F.WEB_PAGE).not.toContain("api.openai.com"); // the phone talks to fleet, which starts the session
       expect(F.WEB_PAGE).not.toContain("OPENAI_API_KEY"); // the page never sees the key
       expect(fs.readFileSync(path.join(here, ".gitignore"), "utf8").split("\n")).toContain(".env");
     } finally {
@@ -5368,6 +5369,17 @@ describe("key w: the phone page", () => {
       delete process.env.FLEET_WEB_PORT;
       delete process.env.FLEET_WEB_TOKEN_FILE;
     }
+  });
+
+  test("voice: a GPT-Live session in the stone voice, called PB, thinking on gpt-6-luna, and nothing typed without a proposal", () => {
+    const body: any = F.voiceSessionBody("v=0 offer", JSON.stringify({ counts: { working: 1 }, sessions: [{ name: "alpha", word: "working", sub: { text: "running the tests" } }] }));
+    expect([body.session.model, body.session.audio.output.voice, body.transport]).toEqual(["gpt-live-1", "stone", { type: "webrtc", sdp: "v=0 offer" }]);
+    expect(body.session.instructions).toContain("call the person PB");
+    expect(body.session.instructions).toContain("running the tests"); // where things stood, to open with
+    const d = body.session.delegation;
+    expect([d.type, d.responses.model, d.responses.reasoning.effort]).toEqual(["responses", "gpt-6-luna", "medium"]);
+    expect(d.responses.tools.map((t: any) => t.name)).toEqual(["fleet_overview", "session_detail", "usage", "read_choices", "propose_message", "propose_press", "confirm", "cancel"]);
+    expect(d.responses.instructions).toContain("Never type into a session or press a key without PB's yes");
   });
 
   test("pairing from one of your own devices (Tailscale says so) needs no code approved, and asks nothing on Telegram", () => {
