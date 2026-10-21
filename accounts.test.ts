@@ -227,17 +227,22 @@ describe("the accounts screen", () => {
     try {
       const inUse = A.accountsScreen(100, 20, NOW).map(strip);
       const row = inUse.findIndex((l) => l.includes("client"));
-      expect(inUse[row]).toMatch(new RegExp(`me@work\\.example   ● ${F.selfHost()} · mini$`)); // right after the email
+      // Flush with the block's right edge, where "resets …" ends, on a screen wide enough.
+      expect(inUse[row].trimEnd()).toEndWith(`● ${F.selfHost()} · mini`);
+      expect(inUse[row].trimEnd().length).toBe(A.usageBlock(100).end); // columns count from 1
       expect(inUse[row + 1]).toContain("full in");
+      expect(inUse[row + 3].trim()).toMatch(/^runs out ~\d\d:\d\d/); // and under the gauges, how its five hours go
+      expect(lines[at + 3].trim()).toBe(""); // an account no machine uses has no forecast
       // This Mac signed in to an account you have not listed: it follows the list, with its own figures, and how to add it.
       fs.writeFileSync(mine, JSON.stringify({ oauthAccount: { emailAddress: "elsewhere@x.example" } }));
       fs.utimesSync(mine, new Date(), new Date(Date.now() + 10_000));
-      const other = A.accountsScreen(100, 20, NOW).map(strip);
+      const other = A.accountsScreen(100, 40, NOW).map(strip);
       const extra = other.findIndex((l) => l.includes("not in your list"));
       expect(extra).toBeGreaterThan(other.findIndex((l) => l.includes("client")));
       expect(other[extra]).toContain("elsewhere@x.example");
-      expect(other[extra]).toContain("a adds it here");
-      expect(other[extra]).toContain(`elsewhere@x.example   ● ${F.selfHost()}`);
+      expect(other[extra]).toContain("elsewhere@x.example");
+      expect(other[extra].trimEnd()).toEndWith(`● ${F.selfHost()}`);
+      expect(other.slice(extra, extra + 5).join("\n")).toContain("a adds it here"); // in the header, or under the gauges where it does not fit
     } finally {
       F.peers.clear();
       fs.rmSync(mine);

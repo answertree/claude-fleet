@@ -5271,25 +5271,8 @@ function accountBlock(rows: Row[], g: Grid, a: AccountView | undefined, now: num
   const sonnet = limitOf("seven_day_sonnet");
   // The third row, first of all: how the five-hour limit goes at this pace, as the phone says it. "extra off" is
   // never said: it is the usual case and tells you nothing.
-  const f = fiveHourLine(now, a);
   const span = g.accountEnd - label + 1;
-  const forecast: Seg[][] =
-    f.kind === "out"
-      ? [
-          [["runs out ", C.red, true], [`~${f.outAt}`, C.red, true], [f.gap ? `, ${f.gap} before the ${f.resetAt} reset` : "", C.dim]],
-          [["runs out ", C.red, true], [`~${f.outAt}`, C.red, true], [f.gap ? ` · ${f.gap} early` : "", C.dim]],
-          [["out ", C.red, true], [`~${f.outAt}`, C.red, true]],
-        ]
-      : f.kind === "full"
-        ? [[["5h full", C.red, true], [f.resetAt ? ` · back at ${f.resetAt}` : "", C.dim]], [["5h full", C.red, true]]]
-        : f.kind === "lasts"
-          ? [
-              [["lasts", C.green, true], [` to the ${f.resetAt} reset · ~${f.by}% used by then`, C.dim]],
-              [["lasts", C.green, true], [` to ${f.resetAt} · ~${f.by}%`, C.dim]],
-              [["lasts", C.green, true], [` · ~${f.by}%`, C.dim]],
-            ]
-          : [];
-  const fits = forecast.find((segs) => segsWidth(segs) <= span);
+  const fits = fiveHourForms(fiveHourLine(now, a)).find((segs) => segsWidth(segs) <= span);
   if (fits) rows[2].segs(label, fits);
   else if (x?.enabled) {
     const spend: Seg[] = [[x.used, C.text], [` of ${x.limit}`, C.dim]];
@@ -10451,6 +10434,41 @@ export function fiveHourLine(now = clock(), acct: AccountView | undefined = opt.
     return { text: `5h ${pct}% · ~${by}% by ${at(l.resetsAt)} reset`, urgent: false, kind: "lasts", by, ...line };
   }
   return { text: `5h ${pct}%${l.resetsAt ? ` · resets ${at(l.resetsAt)}` : ""}`, urgent: false, kind: "steady", ...line };
+}
+
+/** The five-hour forecast as the screens word it, fullest first: green when it lasts to the reset, red when it runs out first. */
+export function fiveHourForms(f: FiveHour): Seg[][] {
+  if (f.kind === "out")
+    return [
+      [["runs out ", C.red, true], [`~${f.outAt}`, C.red, true], [f.gap ? `, ${f.gap} before the ${f.resetAt} reset` : "", C.dim]],
+      [["runs out ", C.red, true], [`~${f.outAt}`, C.red, true], [f.gap ? ` · ${f.gap} early` : "", C.dim]],
+      [["out ", C.red, true], [`~${f.outAt}`, C.red, true]],
+    ];
+  if (f.kind === "full") return [[["5h full", C.red, true], [f.resetAt ? ` · back at ${f.resetAt}` : "", C.dim]], [["5h full", C.red, true]]];
+  if (f.kind === "lasts")
+    return [
+      [["lasts", C.green, true], [` to the ${f.resetAt} reset · ~${f.by}% used by then`, C.dim]],
+      [["lasts", C.green, true], [` to ${f.resetAt} · ~${f.by}%`, C.dim]],
+      [["lasts", C.green, true], [` · ~${f.by}%`, C.dim]],
+    ];
+  return [];
+}
+/**
+ * An account's figures as another machine of the fleet sent them (for one in use there that is not in your list): the
+ * five-hour and weekly limits, with their pace, as if read here.
+ */
+export function viewFromPeerUsage(email: string, now: number): AccountView | undefined {
+  const k = email.toLowerCase();
+  const p = [...peers.values()].find((x) => x.at && x.email?.toLowerCase() === k && x.usage?.length);
+  if (!p?.usage) return undefined;
+  const windows: Record<string, [string, number]> = { "5h": ["five_hour", 5 * 3600_000], "7d": ["seven_day", 7 * 86_400_000] };
+  const limits: LimitView[] = p.usage
+    .filter((l) => windows[l.label] && l.resetsAt)
+    .map((l) => {
+      const [key, windowMs] = windows[l.label];
+      return { key, label: l.label, pct: l.pct, resetsAt: l.resetsAt!, windowMs, tick: paceTick(l.resetsAt!, windowMs, now), fullIn: paceForecast(l.pct, l.resetsAt!, windowMs, now) };
+    });
+  return limits.length ? { kind: "current", limits, asOf: p.at, reason: "", remedy: "", nextTry: 0, busy: false } : undefined;
 }
 
 export const GLASSES_PAGE = `<!doctype html>
