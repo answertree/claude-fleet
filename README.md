@@ -201,6 +201,9 @@ in until you say yes or tap Send. A session that is busy takes it as soon as it 
 
 - **Turning it on:** put `OPENAI_API_KEY=…` in a `.env` beside `fleet.ts` (git ignores it), or in the environment. The
   microphone appears on the page within a few seconds.
+- **Choosing the voice:** the menu at the top right of the voice screen lists GPT-Live's 21 voices, each with a button
+  to hear it say hello (made once with a few seconds of GPT-Live, then kept in fleet's cache). Your pick is kept on the
+  phone; picking another mid-call starts a fresh call in it.
 - **What it uses:** OpenAI's GPT-Live (`gpt-live-1`) for the conversation, in the `stone` voice. GPT-Live hands thinking
   and the fleet's tools (the whole fleet, one session in full, usage, a waiting session's choices, proposals) to
   `gpt-6-luna` at medium effort. Each can be changed (see Environment, below).
