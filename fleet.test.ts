@@ -5405,6 +5405,11 @@ describe("key w: the phone page", () => {
     expect(new TextDecoder().decode(wav.slice(0, 4)) + new TextDecoder().decode(wav.slice(8, 12))).toBe("RIFFWAVE");
     expect([wav.length, new DataView(wav.buffer).getUint32(24, true), new DataView(wav.buffer).getUint32(40, true)]).toEqual([48, 24_000, 4]);
     expect(F.WEB_PAGE).toContain('id="vpick"');
+    expect([F.voiceBlurb("stone"), F.voiceBlurb("juni"), F.voiceBlurb("bossa"), F.voiceBlurb("quartz")]).toEqual(["Irish English · male", "German · female", "Brazilian Portuguese · female", "Australian English · female"]);
+    expect(F.voiceHello("juni")).toStartWith("Hallo PB");
+    // Every voice comes with its preview, so the picker plays at once, with or without a key.
+    expect(F.LIVE_VOICES.filter((v: string) => !fs.existsSync(F.voicePreviewFile(v)))).toEqual([]);
+    expect(F.WEB_PAGE.match(/new Audio\(\)/g)?.length).toBe(2); // the call's voice, and the one player every preview shares
     expect(F.webState([], Date.now()).voices === undefined || F.webState([], Date.now()).voices.list.length === 21).toBe(true);
   });
 
@@ -5422,6 +5427,9 @@ describe("key w: the phone page", () => {
       expect((await get("?v=stone&t=wrong")).status).toBe(403);
       expect((await get(`?v=not-a-voice&t=${token}`)).status).toBe(404);
       expect((await get(`?v=../../etc&t=${token}`)).status).toBe(404);
+      const r = await get(`?v=juni&t=${token}`);
+      expect([r.status, r.headers.get("content-type")]).toEqual([200, "audio/mp4"]);
+      expect((await r.arrayBuffer()).byteLength).toBe(fs.statSync(F.voicePreviewFile("juni")).size);
     } finally {
       web.server?.stop(true);
       for (const [k, v] of [["FLEET_WEB_HOST", saved[0]], ["FLEET_WEB_PORT", saved[1]], ["FLEET_WEB_TOKEN_FILE", saved[2]]] as const) if (v === undefined) delete process.env[k];
