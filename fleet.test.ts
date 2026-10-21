@@ -1889,7 +1889,7 @@ describe("header and chrome", () => {
     " ◆ CLAUDE FLEET     ▲ 1 needs you    ● 2 working    ⠋ 5 agents    ≡ 1 workflow    ○ 1 idle                                       Tue 13 Oct  23:51:22",
     " cpu  ━━━━━━──────  54%  ▁▁▁▂▂▂▂▂▃▃▄▄▄▄▅▅▄▅▆▅  load 14.6    5h    ━━━━━─┼─────  38%  resets in 2h10                          ▁   ▃▆▂▅█▄▁    372 tools",
     " mem  ━━━━━───────  38%  49G of 128G                        7d    ━━━────┼────  21%  resets Fri 09:00      ▁ ▃  ▄▆▂▁▅█▄    ▁▅█▇▄████████      37k out",
-    " core ▅▅▄▄▃▃▃▃▄▄▆▆▆▆▇▇   top bun 212% · node 88%            extra ━━━─────────  24%  £12 of £50           ▆█▇█▁█████████▅▃▆█████████████     1m a bar",
+    " core ▅▅▄▄▃▃▃▃▄▄▆▆▆▆▇▇   top bun 212% · node 88%            lasts to the 02:01 reset · ~67% used by then  ▆█▇█▁█████████▅▃▆█████████████     1m a bar",
     " ──────────────────────────────────────────────────────────────────────────────────────────────────────── 30m ──────┴─────────┴───── now ────────────",
   ];
   const MEDIUM_150 = [
@@ -1901,7 +1901,7 @@ describe("header and chrome", () => {
     " ◆ CLAUDE FLEET   ▲ 1 needs you    ● 2 working    ⠋ 5 agents    ≡ 1 workflow    ○ 1 idle             23:51:22",
     " cpu  ━━━━────  54%  ▃▃▄▄▄▄▅▅▄▅▆▅        5h    ━━━─┼───  38%  2h10 left                 ▁   ▃▆▂▅█▄▁ 286 tools",
     " mem  ━━━─────  38%  49G of 128G         7d    ━━───┼──  21%  Fri 09:00        ▅█▄    ▁▅█▇▄████████   29k out",
-    " core ▅▅▄▄▃▃▃▃▄▄▆▆▆▆▇▇  load 14.6        extra ━━──────  24%  £12 of £50       ████▅▃▆█████████████ 90s a bar",
+    " core ▅▅▄▄▃▃▃▃▄▄▆▆▆▆▇▇  load 14.6        lasts to 02:01 · ~67%                 ████▅▃▆█████████████ 90s a bar",
     " ───────────────────────────────────────────────────────────────────────────── 30m ──┴─────┴─── now ─────────",
   ];
   const MEDIUM_110 = [
@@ -1966,7 +1966,7 @@ describe("header and chrome", () => {
   });
 
   test("the account block shows every state exactly, on the design's columns", () => {
-    expect(block(150, "current")).toEqual(["5h    ━━━━━─┼─────  38%  resets in 2h10", "7d    ━━━────┼────  21%  resets Fri 09:00", "extra ━━━─────────  24%  £12 of £50"]);
+    expect(block(150, "current")).toEqual(["5h    ━━━━━─┼─────  38%  resets in 2h10", "7d    ━━━────┼────  21%  resets Fri 09:00", "lasts to the 02:01 reset · ~67% used by then"]);
     // No reading yet: ╌ gauges, when the next try is, and the exact reason.
     expect(block(150, "none")).toEqual(["5h    ╌╌╌╌╌╌╌╌╌╌╌╌   --  no reading yet", "7d    ╌╌╌╌╌╌╌╌╌╌╌╌   --  next try 23:56", "✗ keychain: no answer in 5s · u retries"]);
     expect(block(150, "reading")).toEqual(["5h    ╌╌╌╌╌╌╌╌╌╌╌╌   --  no reading yet", "7d    ╌╌╌╌╌╌╌╌╌╌╌╌   --  reading now", ""]);
@@ -1975,10 +1975,10 @@ describe("header and chrome", () => {
     // Without --usage: the busiest processes on the same columns, one full core to a full gauge, and the machine's third row counts cores instead.
     expect(block(150, "off")).toEqual(["top   ━━━━━━━━━━━━ 212%  bun", "      ━━━━━━━━━━━─  88%  node", "      ━━━━━───────  41%  tsc"]);
     expect(head(150, 44, "off")[3].slice(0, 57).trimEnd()).toBe(" core ▅▅▄▄▃▃▃▃▄▄▆▆▆▆▇▇   16 cores");
-    // Extra usage off: the Opus and Sonnet weeks take the third row, but only when Anthropic returned them.
-    expect(block(150, "extraOff")[2]).toBe("extra off");
-    expect(block(150, "modelWeeks")[2]).toBe("opus  ━──────┼────  12%  sonnet 4%");
-    expect(block(150, "sonnetWeek")[2]).toBe("sonn… ━━━━━━━┿────  64%  resets Fri 09:00");
+    // The third row is the five-hour forecast whenever there is one, ahead of extra spend and the Opus and Sonnet
+    // weeks (which the usage screen, key u, always shows); "extra off" is never said.
+    for (const state of ["extraOff", "modelWeeks", "sonnetWeek"]) expect(block(150, state)[2]).toBe("lasts to the 02:01 reset · ~67% used by then");
+    expect(head(150, 44, "extraOff").join("\n")).not.toContain("extra off");
     // 110 columns: the same block on narrower columns, with reasons cut rather than spilling under the lane.
     expect(block(110, "none")).toEqual(["5h    ╌╌╌╌╌╌╌╌   --  no reading yet", "7d    ╌╌╌╌╌╌╌╌   --  next try 23:56", "✗ keychain: no answer in 5s"]);
     expect(block(110, "stale")[2]).toBe("✗ 23:12 · Anthropic answered 429"); // the status is worth more than the words "as of"
@@ -1993,7 +1993,7 @@ describe("header and chrome", () => {
     const early = raw(150, 44, "early");
     expect(early[1]).toContain(F.fg(F.C.red, "━━━━━━━━") + F.fg(F.C.white, "┿") + F.fg(F.C.red, "━") + F.fg(F.C.faint, "──"));
     expect(early[1]).toContain(F.bold(F.fg(F.C.red, "86%")));
-    expect(raw(150, 44, "sonnetWeek")[3]).toContain(F.bold(F.fg(F.C.white, "64%")));
+    expect(raw(150, 44)[3]).toContain(F.bold(F.fg(F.C.green, "lasts"))); // the five-hour limit lasts to its reset: green
     expect(raw(150, 44)[1]).toContain(F.fg(F.C.calm, "━━━━━") + F.fg(F.C.faint, "─") + F.fg(F.C.white, "┼")); // 38%: calm, with a white tick
     // The machine at 100% CPU: still the cool ramp. Memory at 85% is a limit, and red.
     const hot = draw("current", () => {
@@ -2030,7 +2030,8 @@ describe("header and chrome", () => {
     expect(strip(F.limitGauge(0, 8, 0))).toBe("┼───────");
     expect(strip(F.limitGauge(100, 8, 1))).toBe("━━━━━━━┿");
     for (const w of [6, 8, 12, 16]) for (const pct of [0, 1, 50, 99, 100, 140]) expect(F.cells(F.limitGauge(pct, w, 0.5))).toBe(w);
-    expect(block(150, "early")).toEqual(["5h    ━━━━━━━━┿━──  86%  full in ~35m", "7d    ━━━────┼────  21%  resets Fri 09:00", "extra ━━━─────────  24%  £12 of £50"]);
+    expect(block(150, "early")).toEqual(["5h    ━━━━━━━━┿━──  86%  full in ~35m", "7d    ━━━────┼────  21%  resets Fri 09:00", "runs out ~00:26, 50m before the 01:16 reset"]);
+    expect(raw(150, 44, "early")[3]).toContain(F.bold(F.fg(F.C.red, "runs out ~00:26"))); // and when it runs out first: red
     expect(raw(150, 44, "early")[1]).toContain(F.bold(F.fg(F.C.red, "full in ~35m")));
     expect(block(110, "early")[0]).toBe("5h    ━━━━━┿━─  86%  full in ~35m");
     expect(head(150, 34, "early")[1]).toContain("load 14.6    5h ━━━━━┿━─  86% full ~35m   7d ━━───┼──  21%  "); // the forecast says what it is; the week's reset time gives way
@@ -4226,7 +4227,7 @@ describe("demo", () => {
   test("--account shows each account state without a real account", () => {
     const frame = Object.fromEntries(["current", "extra-off", "stale", "none", "remote"].map((a) => [a, squash(demo(["--plain", "--account", a]))]));
     expect(frame.current).toContain("38%");
-    expect(frame.current).toContain("£12of£50");
+    expect(frame.current).toContain("laststothe"); // the five-hour forecast
     expect(frame.current).toContain("uusage"); // the usage screen's button, whatever the read is doing
     expect(frame["extra-off"]).toContain("12%"); // the Opus week, returned only here
     expect(frame.stale).toContain("anthropicanswered429");
@@ -4523,7 +4524,7 @@ describe("the demo never reads the real login", () => {
       expect(r.err).toBe("");
       expect(r.code).toBe(0);
       expect(r.calls).toEqual([]);
-      expect(r.out).toContain("£12 of £50"); // the made-up current account
+      expect(r.out).toMatch(/lasts to the|runs out ~/); // the made-up current account's five-hour forecast
     }
   }, 60_000);
 

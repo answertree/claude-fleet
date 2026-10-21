@@ -5269,7 +5269,29 @@ function accountBlock(rows: Row[], g: Grid, a: AccountView | undefined, now: num
   const x = a.extra;
   const opus = limitOf("seven_day_opus");
   const sonnet = limitOf("seven_day_sonnet");
-  if (x?.enabled) {
+  // The third row, first of all: how the five-hour limit goes at this pace, as the phone says it. "extra off" is
+  // never said: it is the usual case and tells you nothing.
+  const f = fiveHourLine(now, a);
+  const span = g.accountEnd - label + 1;
+  const forecast: Seg[][] =
+    f.kind === "out"
+      ? [
+          [["runs out ", C.red, true], [`~${f.outAt}`, C.red, true], [f.gap ? `, ${f.gap} before the ${f.resetAt} reset` : "", C.dim]],
+          [["runs out ", C.red, true], [`~${f.outAt}`, C.red, true], [f.gap ? ` · ${f.gap} early` : "", C.dim]],
+          [["out ", C.red, true], [`~${f.outAt}`, C.red, true]],
+        ]
+      : f.kind === "full"
+        ? [[["5h full", C.red, true], [f.resetAt ? ` · back at ${f.resetAt}` : "", C.dim]], [["5h full", C.red, true]]]
+        : f.kind === "lasts"
+          ? [
+              [["lasts", C.green, true], [` to the ${f.resetAt} reset · ~${f.by}% used by then`, C.dim]],
+              [["lasts", C.green, true], [` to ${f.resetAt} · ~${f.by}%`, C.dim]],
+              [["lasts", C.green, true], [` · ~${f.by}%`, C.dim]],
+            ]
+          : [];
+  const fits = forecast.find((segs) => segsWidth(segs) <= span);
+  if (fits) rows[2].segs(label, fits);
+  else if (x?.enabled) {
     const spend: Seg[] = [[x.used, C.text], [` of ${x.limit}`, C.dim]];
     limitRow(rows[2], "extra", { key: "extra", label: "extra", pct: x.pct, resetsAt: 0, windowMs: 0 }, segsWidth(spend) <= room ? spend : [spend[0]]);
   } else if (opus && sonnet) {
@@ -5278,7 +5300,7 @@ function accountBlock(rows: Row[], g: Grid, a: AccountView | undefined, now: num
   } else if (opus || sonnet) {
     const only = (opus ?? sonnet)!;
     limitRow(rows[2], fit(only.label, 5).trimEnd(), only);
-  } else if (x) rows[2].put(label, "extra off", C.dim);
+  }
   return false;
 }
 
@@ -10269,8 +10291,7 @@ export function glassesState(sessions: Session[], now: number) {
  *  the times are on this Mac's clock, `inText` is how long until it runs out (or, when full, until the reset),
  *  `gap` how long without tokens before the reset, `by` where it will be at the reset, and `start`/`out`/`resets` the timeline in ms. */
 export type FiveHour = { text: string; urgent: boolean; kind?: "full" | "out" | "lasts" | "steady"; outAt?: string; resetAt?: string; inText?: string; gap?: string; by?: number; start?: number; out?: number; resets?: number; now?: number };
-export function fiveHourLine(now = clock()): FiveHour {
-  const acct = opt.usage ? accountView(now) : undefined;
+export function fiveHourLine(now = clock(), acct: AccountView | undefined = opt.usage ? accountView(now) : undefined): FiveHour {
   const l = acct?.limits.find((x) => x.windowMs === 5 * 3600_000) ?? acct?.limits[0];
   if (!l) return { text: `5h: no usage figures${acct?.reason ? ` (${glassesSafe(acct.reason).slice(0, 30)})` : ""}`, urgent: false };
   const pct = Math.round(l.pct);
