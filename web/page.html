@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en" style="background:#0d1117"><head>
+<meta charset="utf-8">
+<style>html,body{background:#0d1117}
+#splash{position:fixed;inset:0;z-index:50;background:radial-gradient(120% 80% at 50% 38%,#18212d 0%,var(--bg) 62%);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;perspective:800px;transition:opacity .24s ease-out,transform .24s ease-out}
+#splash.gone{opacity:0;transform:scale(1.04);pointer-events:none}
+#splash .tilt{position:relative;will-change:transform}
+#splash .logo{position:relative;width:192px;height:192px;border-radius:48px;overflow:hidden;will-change:transform;box-shadow:0 1px 2px #0009,0px 6px 12px #0007,0px 18px 36px #0008,0px 40px 80px #000b,0px 26px 90px #3a5bff33,0 0 0 1px #ffffff14}
+#splash .logo img{width:100%;height:100%;display:block}
+#splash .logo b i.s{background:linear-gradient(115deg,transparent 36%,#ffffff30 43%,#fffffff0 50%,#ffffff30 57%,transparent 64%)}
+#splash .logo i.d{background:radial-gradient(circle at 50% 50%,#ffffff3a 0,#ffffff14 18%,transparent 34%);opacity:0}
+#splash .logo b i.d{background:radial-gradient(circle at 50% 50%,#ffffff80 0,#ffffff2a 18%,transparent 34%)}
+#splash .logo b{position:absolute;inset:0;overflow:hidden;-webkit-mask:url(__LOGO_MASK__) center/100% 100% no-repeat;mask:url(__LOGO_MASK__) center/100% 100% no-repeat}
+#splash .logo i{position:absolute;inset:-40%;will-change:transform,opacity}#splash .logo i.s{background:linear-gradient(115deg,transparent 38%,#ffffff10 44%,#ffffffb0 50%,#ffffff10 56%,transparent 62%);transform:translateX(-211px)}
+#splash .title{margin-top:28px;font-size:22px;font-weight:700;letter-spacing:-.01em;background:linear-gradient(100deg,#8a95a5 30%,#fff 50%,#8a95a5 70%);background-size:250% 100%;background-position:120% 0;-webkit-background-clip:text;background-clip:text;color:transparent}
+#splash .what{color:var(--dim);font-size:13px;min-height:1.4em}</style>
+__STARTUP__
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0d1117">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="color-scheme" content="dark">
+<link rel="manifest" href="/manifest.webmanifest?t=__TOKEN__">
+<meta name="referrer" content="no-referrer">
+<meta name="apple-mobile-web-app-title" content="Fleet">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon.ico">
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+<title>Claude Fleet</title>
+<style>
+__PAGE_CSS__</style></head><body>
+<div id="splash"><div class="tilt"><div class="logo"><img src="__ICON__" alt=""><i class="d"></i><i class="s"></i><b><i class="d"></i><i class="s"></i></b></div></div><div class="title">Claude Fleet</div><div class="what" id="splash-what">Reaching your Mac…</div></div>
+<script>
+// The splash's motion, from one thing: how far the logo has turned. Two lights reflect off it, a sharp one and a
+// diffuse one from another side, so where each shows follows the turn; the shadows and the title's sheen too. The
+// lights go one way, left to right: they follow the furthest the logo has turned this time round, so as it swings
+// back they are already gone (the sharp one off the right edge, the diffuse one fading), and each turn starts afresh.
+(() => {
+  const sp = document.getElementById("splash"), tilt = sp.querySelector(".tilt"), logo = sp.querySelector(".logo"), title = sp.querySelector(".title");
+  const sharp = sp.querySelectorAll(".logo i.s"), soft = sp.querySelectorAll(".logo i.d");
+  const DELAY = 0, CYCLE = 3120, L = 192;
+  const YAW = [[0, 0], [0.15, -5], [0.55, 14], [0.9, 0], [1, 0]], PITCH = [[0, 0], [0.15, 2], [0.55, -4], [0.9, 0], [1, 0]];
+  const along = (pts, p) => { for (let k = 1; k < pts.length; k++) if (p <= pts[k][0]) { const [p0, v0] = pts[k - 1], [p1, v1] = pts[k], u = (p - p0) / (p1 - p0); return v0 + (v1 - v0) * u * u * (3 - 2 * u); } return 0; };
+  const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const clamp = (v) => Math.max(0, Math.min(1, v));
+  function pose(ms) {
+    const t = ms - DELAY, p = t < 0 ? 0 : (t % CYCLE) / CYCLE;
+    const yaw = still ? 0 : along(YAW, p), pitch = still ? 0 : along(PITCH, p), lift = clamp(yaw / 14), x = -yaw * 1.4;
+    tilt.style.transform = "rotateY(" + yaw + "deg) rotateX(" + pitch + "deg) translateY(" + -3 * lift + "px)";
+    logo.style.boxShadow = "0 1px 2px #0009," + x * 0.3 + "px " + (6 + 2 * lift) + "px 12px #0007," + x * 0.6 + "px " + (18 + 4 * lift) + "px 36px #0008," + x + "px " + (40 + 8 * lift) + "px 80px #000b," + x * 0.5 + "px 26px 90px #3a5bff33,0 0 0 1px #ffffff14";
+    const furthest = p <= 0.55 ? Math.max(0, yaw) : 14; // the turn grows to its peak at 0.55 of the way round, then eases back
+    const xs = -0.6 + furthest * (2.1 / 14); // the sharp light: off the left edge at rest, clear off the right at the peak
+    for (const e of sharp) e.style.transform = "translateX(" + (xs - 0.5) * L + "px)";
+    const xd = 0.2 + furthest * 0.03, yd = 0.32 - pitch * 0.05, od = clamp(yaw / 10); // the diffuse one, as the face turns to it
+    for (const e of soft) { e.style.transform = "translate(" + (xd - 0.5) * L + "px," + (yd - 0.5) * L + "px)"; e.style.opacity = od; }
+    title.style.backgroundPosition = 120 - 250 * clamp((xs + 0.1) / 1.25) + "% 0";
+  }
+  const t0 = performance.now();
+  let stopAt = Infinity, held = false;
+  const frame = () => { if (held) return; const ms = performance.now() - t0; if (ms >= stopAt) return pose(0); pose(ms); requestAnimationFrame(frame); };
+  pose(0); requestAnimationFrame(frame);
+  window.splashMotion = {
+    // How long until the logo is back at rest at the end of a turn; it stays at rest from then.
+    untilRest() { if (still) return 0; const t = performance.now() - t0 - DELAY, left = t < 0 ? CYCLE - t : CYCLE - (t % CYCLE); stopAt = performance.now() - t0 + left; return left; },
+    hold(ms) { held = true; pose(ms); }, // to look at one moment
+  };
+})();
+</script>
+<header><h1><img src="/icon-192.png" alt="">Claude Fleet</h1><span class="top-right"><span id="views" class="seg" role="group" aria-label="View"><button data-v="cards" aria-label="Cards: everything about each session (1)" title="Cards: everything about each session (1)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg></button><button data-v="timeline" aria-label="Timeline: each session's activity across the window (3)" title="Timeline: each session's activity across the window (3)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"/><path d="M4 15l4-5 4 3 4-7 4 4"/></svg></button><button data-v="compact" aria-label="Compact: a line a session (2)" title="Compact: a line a session (2)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button></span><button id="newbtn" class="hbtn" aria-label="Start a session" title="Start a session"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button><button id="mic" hidden aria-label="Talk to Fleet"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3.5"/></svg></button><span id="clock"></span></span></header>
+<div id="voice" aria-hidden="true"><div class="vtop"><b><img src="/icon-192.png" alt="">Fleet</b><div class="vpick"><button id="vpick" aria-haspopup="listbox" aria-expanded="false" aria-label="Choose Fleet's voice"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6.5h16M4 12h16M4 17.5h16"/><g fill="currentColor" stroke="none"><circle cx="9" cy="6.5" r="2.4"/><circle cx="15.5" cy="12" r="2.4"/><circle cx="7" cy="17.5" r="2.4"/></g></svg></button><div class="vlist" id="vlist" role="listbox" hidden></div></div></div>
+<template id="vicons"><svg class="play" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l13-7.5z"/></svg><svg class="stop" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></template>
+<div class="stage"><canvas class="orbs" id="orbs" aria-hidden="true"></canvas><div class="vstate" id="vstate"></div><div class="vtool" id="vtool"></div></div>
+<div class="vcards" id="vcards"></div>
+<div class="controls"><button id="vmute" aria-label="Mute"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3.5"/></svg></button><button id="vend" class="end" aria-label="End"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div></div>
+<div class="sheet" id="newsheet" aria-hidden="true"><div class="sbox"><div class="shead"><b id="newtitle">Start a session</b><button class="x" id="newx" aria-label="Close">✕</button></div><div id="newbody"></div></div></div>
+<div class="focus" id="focus" aria-hidden="true"><div class="fhead"><button class="back" id="fback" aria-label="Back">‹ Back</button><span id="fname"></span></div><div class="fbody"><div id="fcard"></div><div class="fscreen"><div class="fsh"><b>Its screen</b><span id="fsat"></span></div><pre id="fscreen">…</pre></div></div></div>
+<div id="quip">Waking the fleet…</div>
+<div id="pair"></div>
+<div class="overview"><div class="beat" id="pulse"></div><div class="gauges" id="gauges"></div><div class="five" id="five"></div></div>
+<details class="usage" id="usage"><summary><b>Accounts</b><span id="usage-sum"></span></summary><div class="accts" id="accts"></div></details>
+<main id="cards"></main>
+<div class="foot" id="foot"></div>
+<script>
+__PAGE_JS__</script></body></html>

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Claude Fleet</title>
+<style>body{margin:0;padding:24px;background:#000;color:#4be37a;font:16px/1.5 -apple-system,system-ui,sans-serif}h1{font-size:17px;margin:0 0 12px}p{margin:6px 0;color:#9adbb0}
+#setup{margin-top:22px;padding:14px;border:1px solid #1f4d2e;border-radius:12px}#setup h2{font-size:15px;margin:0 0 10px;color:#4be37a}#setup label{display:block;font-size:13px;color:#9adbb0;margin-bottom:4px}
+#setup select{width:100%;font:15px -apple-system,system-ui,sans-serif;padding:8px;border-radius:8px;background:#0b1a10;color:#d8f5e1;border:1px solid #1f4d2e}#setup .row{display:flex;gap:8px;margin-top:12px}
+#setup button{flex:1;font:600 14px -apple-system,system-ui,sans-serif;padding:9px;border-radius:9px;border:0;background:#4be37a;color:#03140a}#setup button.quiet{background:#13301d;color:#9adbb0}#conn{font-size:13px}</style>
+</head><body>
+<h1>◆ Claude Fleet on your glasses</h1>
+<p id="s">Waiting for the Even app…</p>
+<p>The ring moves between sessions, a tap opens one, a double tap goes back.</p>
+<div id="setup" hidden>
+<h2>Setup</h2>
+<label for="base">Fleet on your Mac (its Tailscale address)</label>
+<select id="base"></select>
+<p id="conn"></p>
+<div class="row"><button id="save">Save and reconnect</button><button id="forget" class="quiet">Forget pairing</button></div>
+</div>
+<script type="module">
+__GLASSES_JS__</script></body></html>
