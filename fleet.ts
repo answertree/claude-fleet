@@ -18,7 +18,7 @@ import { StringDecoder } from "node:string_decoder";
 import { createInterface } from "node:readline/promises";
 import { deflateSync, inflateSync } from "node:zlib";
 import { spawn, spawnSync } from "node:child_process";
-import { accountWizard, accountsKey, accountsMain, accountsScreen, retryAccounts, tickAccounts } from "./accounts.ts";
+import { accountLines, accountWizard, accountsKey, accountsMain, accountsScreen, retryAccounts, tickAccounts } from "./accounts.ts";
 
 /**
  * Where Claude Code keeps its files; the demo and the tests point FLEET_HOME at made-up sessions. Read each
@@ -6202,7 +6202,32 @@ export function rosterOfView(v: View, now: number, win: Win) {
 }
 
 /** Everything the page shows, from the same views the terminal draws. */
-export function webState(sessions: Session[], now: number) {
+/**
+ * The fleet's pulse for the phone page, as the CLI's header draws it: tool calls across every machine's sessions over
+ * the last hour, a bar a minute, with the totals.
+ */
+export function pulseOf(sessions: Session[], now: number) {
+  const win = timeWindow(now, 60 * 60_000, 60);
+  const tails = sessions.flatMap(tailsOf);
+  const bars = bucketsIn(tails.map((t) => t.tools), win);
+  return { bars, tools: human(sum(bars)), out: human(tokensIn(tails, win)), bar: barLabel(win), machines: new Set(sessions.map((s) => s.remote?.host ?? selfHost())).size };
+}
+/** The usage screen (key u) for the phone page: your accounts in order, the machines on each, both limits and the forecast. */
+export function usageAccounts(now: number) {
+  return accountLines(now).map((l) => {
+    const v = l.view;
+    const status = v.kind === "none" ? (v.busy || !v.nextTry ? "reading…" : `no reading yet${v.reason ? ` · ${safeLine(v.reason).slice(0, 60)}` : ""}`) : v.kind === "stale" ? `as of ${hhmm(v.asOf)}${v.reason ? ` · ${safeLine(v.reason).slice(0, 60)}` : ""}` : "";
+    const limits = (["five_hour", "seven_day"] as const).map((key) => {
+      const x = v.limits.find((y) => y.key === key);
+      const label = key === "five_hour" ? "5h" : "7d";
+      if (!x) return { label };
+      return { label, pct: Math.round(x.pct), tick: x.tick, text: x.fullIn && v.kind === "current" ? fullInText(x.fullIn / 60_000) : x.resetsAt ? resetText(x.resetsAt, now, "short") : "", full: !!x.fullIn && v.kind === "current" };
+    });
+    const forms = l.forecast && v.kind !== "stale" ? fiveHourForms(l.forecast) : [];
+    return { name: l.name, email: l.email, machines: l.machines, unlisted: !!l.unlisted, stale: v.kind === "stale", status, limits, forecast: forms.length ? { kind: l.forecast!.kind, text: forms[0].map(([t]) => t).join("") } : undefined };
+  });
+}
+export function webState(sessions: Session[], now: number, full = true) {
   const all = buildViews(sessions, now);
   const shown = all.filter((v) => !isHidden(v));
   const win = laneWindow(now, 150);
@@ -6212,6 +6237,8 @@ export function webState(sessions: Session[], now: number) {
     now,
     counts,
     five: fiveHourLine(now), // the five-hour limit's forecast, always said
+    pulse: full ? pulseOf(sessions, now) : undefined, // tool calls across the fleet, as the CLI's header
+    accounts: full && opt.usage ? usageAccounts(now) : undefined, // the usage screen's accounts
     pairing: pairsPending(), // the glasses app asking to connect, waiting on you
     voice: !!openAIKey(), // an OpenAI key is set: the page offers voice
     voices: openAIKey() ? { list: LIVE_VOICES.map((id) => ({ id, about: voiceBlurb(id) })), default: VOICE.voice(), model: VOICE.model() } : undefined,
@@ -6302,7 +6329,7 @@ __STARTUP__
 <style>
 :root{--bg:#0d1117;--card:#151b23;--line:#262d37;--text:#c6cdd7;--dim:#6b7380;--faint:#3a404a;--white:#f5f7fa;--amber:#e5b544;--green:#50c878;--red:#f0625c;--cyan:#56cdd6;--purple:#be94ff;--blue:#61aaff}
 *{box-sizing:border-box;min-width:0}html,body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;font-variant-numeric:tabular-nums;-webkit-text-size-adjust:100%;overflow-x:hidden;overflow-wrap:anywhere}
-main,header,.overview,#quip,#pair,.foot{max-width:720px;margin-left:auto;margin-right:auto}
+main,header,.overview,.usage,#quip,#pair,.foot{max-width:720px;margin-left:auto;margin-right:auto}
 body{padding:calc(env(safe-area-inset-top) + 18px) max(12px,env(safe-area-inset-right)) calc(24px + env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left))}
 header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
 h1{display:flex;align-items:center;gap:9px;font-size:21px;font-weight:700;margin:0;color:var(--white);letter-spacing:-.01em}h1 img{width:30px;height:30px;border-radius:8px}
@@ -6377,16 +6404,34 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--dim);font-size:12px;li
 .tbar{display:flex;gap:2px;width:96px;height:8px;flex:none}.tbar i{flex:1;border-radius:2px;background:#2a313b}.tbar i.d{background:var(--green)}.tbar i.n{background:var(--white)}
 .r.task .nm{font-weight:400;white-space:normal}.r.task.pending .nm{color:var(--dim)}.blk{color:var(--red);font-size:10.5px;font-weight:700;border:1px solid #5a2a28;border-radius:999px;padding:0 6px;margin-left:6px}
 .foot{color:var(--faint);font-size:11px;text-align:center;margin-top:16px}.stale{color:var(--red)}
+/* The fleet's pulse: tool calls across every machine, a bar a minute for the last hour, as the CLI's header draws it. */
+.beat{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:10px 14px 9px;margin:0 0 12px}.beat:empty{display:none}
+.beat .ph{display:flex;justify-content:space-between;align-items:baseline;gap:10px;font-size:12px;color:var(--dim)}.beat .ph b{color:var(--white);font-size:14px;font-weight:650}.beat .ph em{font-style:normal;color:var(--text)}
+.beat .bars{display:flex;align-items:flex-end;gap:2px;height:46px;margin-top:8px}.beat .bars i{flex:1;min-height:2px;border-radius:2px 2px 0 0;background:linear-gradient(180deg,#56cdd6,#2f6bff)}.beat .bars i.z{background:#262d37}.beat .bars i:last-child{background:linear-gradient(180deg,#bdf6ff,#56cdd6)}
+.beat .ax{display:flex;justify-content:space-between;color:var(--faint);font-size:10px;margin-top:4px}
+/* Accounts: the usage screen (u in the CLI). Each account in your list's order, the machines signed in to it, its two
+   limits with their pace, and how the five hours go where it is in use. */
+.usage{background:var(--card);border:1px solid var(--line);border-radius:14px;margin:0 0 16px}.usage:not(:has(.acct)){display:none}
+.usage summary{list-style:none;cursor:pointer;padding:11px 14px;display:flex;gap:8px;align-items:baseline;color:var(--white);font-size:14px}.usage summary::-webkit-details-marker{display:none}
+.usage summary::before{content:"›";color:var(--blue);display:inline-block;transition:transform .15s}.usage[open] summary::before{transform:rotate(90deg)}.usage summary span{color:var(--dim);font-size:12px}
+.accts{display:grid;gap:10px;padding:0 12px 12px}
+.acct{border:1px solid var(--line);border-radius:12px;padding:10px 12px;background:#11161d}.acct.idle{opacity:.72}
+.acct .ah{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px}.acct .ah b{color:var(--white);font-size:14px}.acct .ah .em{color:var(--dim);font-size:12px}.acct .ah .on{margin-left:auto;color:var(--green);font-size:12px;font-weight:650}
+.acct .lim{display:grid;grid-template-columns:22px minmax(0,1fr) 40px auto;gap:8px;align-items:center;margin-top:7px;font-size:12px}.acct .lim .lb{color:var(--dim)}.acct .lim .pc{text-align:right;font-weight:650}.acct .lim .tx{color:var(--dim);white-space:nowrap}.acct .lim .tx.full{color:var(--red);font-weight:650}
+.acct .bar{position:relative;height:6px;border-radius:3px;background:#262d37}.acct .bar i{position:absolute;left:0;top:0;bottom:0;border-radius:3px}.acct .bar b{position:absolute;top:-3px;bottom:-3px;width:2px;margin-left:-1px;background:var(--white);border-radius:1px}
+.acct .fc{margin-top:8px;font-size:12px;color:var(--dim)}.acct .fc em{font-style:normal;font-weight:650}.acct .st{margin-top:7px;font-size:12px;color:var(--dim)}.acct .st.bad{color:var(--red)}
 /* A desktop: the page uses the width. The title top left, the mic and clock top right; the gauges and the five-hour
    forecast side by side; the cards in as many columns as fit, each wide enough to read. Phones keep one column. */
 @media (min-width:1100px){
   body{padding:calc(env(safe-area-inset-top) + 22px) 32px 32px}
-  main,header,#quip,#pair,.overview,.foot{max-width:1840px;margin-left:auto;margin-right:auto}
+  main,header,#quip,#pair,.overview,.usage,.foot{max-width:1840px;margin-left:auto;margin-right:auto}
   header{margin-bottom:6px}
   #quip{margin-bottom:12px}
-  .overview{display:grid;grid-template-columns:minmax(0,600px) minmax(0,1fr);gap:14px;align-items:stretch;margin-bottom:18px}
-  .overview .gauges,.overview .five{margin:0}.overview .five:empty{display:none}
-  .overview:has(.five:empty){grid-template-columns:minmax(0,600px)}
+  .overview{display:grid;grid-template-columns:minmax(0,600px) minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:stretch;margin-bottom:14px}
+  .overview .gauges,.overview .five,.overview .beat{margin:0}.overview .five:empty,.overview .beat:empty{display:none}
+  .overview .gauges{order:1}.overview .five{order:2}.overview .beat{order:3}
+  .overview:has(.five:empty){grid-template-columns:minmax(0,600px) minmax(0,1fr)}
+  .usage{margin-bottom:18px}.accts{grid-template-columns:repeat(auto-fill,minmax(380px,1fr))}
   /* Masonry: the page script packs each card into the shortest column, in order, so there are no gaps. */
   #cards.masonry{position:relative}
   #cards.masonry>*{position:absolute;margin:0;box-sizing:border-box}
@@ -6468,7 +6513,8 @@ details.tasks[open]>summary .sub,details.chat[open]>summary .sub{display:none}
 <div class="controls"><button id="vmute" aria-label="Mute"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3.5"/></svg></button><button id="vend" class="end" aria-label="End"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div></div>
 <div id="quip">Waking the fleet…</div>
 <div id="pair"></div>
-<div class="overview"><div class="gauges" id="gauges"></div><div class="five" id="five"></div></div>
+<div class="overview"><div class="beat" id="pulse"></div><div class="gauges" id="gauges"></div><div class="five" id="five"></div></div>
+<details class="usage" id="usage"><summary><b>Accounts</b><span id="usage-sum"></span></summary><div class="accts" id="accts"></div></details>
 <main id="cards"></main>
 <div class="foot" id="foot"></div>
 <script>
@@ -6514,6 +6560,47 @@ function sparkSvg(values, colour) {
 }
 // When the five-hour limit runs out: the one thing the rings above don't say. A headline, a timeline of the
 // window (now, when it runs out, the reset), and what that means.
+// The fleet's pulse: every machine's tool calls, a bar a minute for the last hour.
+function pulsePanel(p) {
+  const box = document.getElementById("pulse");
+  if (!p) return void box.replaceChildren();
+  const max = Math.max(1, ...p.bars);
+  const head = el("div", "ph"); const t = el("span"); t.append(el("b", "", "Fleet"), " " + (p.machines > 1 ? p.machines + " machines" : "this Mac"));
+  const fig = el("span"); fig.append(el("em", "", p.tools), " tools · ", el("em", "", p.out), " out · " + p.bar + " a bar");
+  head.append(t, fig);
+  const bars = el("div", "bars");
+  for (const n of p.bars) { const i = el("i", n ? "" : "z"); i.style.height = (n ? Math.max(6, Math.round((n / max) * 100)) : 4) + "%"; bars.append(i); }
+  const ax = el("div", "ax"); ax.append(el("span", "", "an hour ago"), el("span", "", "now"));
+  box.replaceChildren(head, bars, ax);
+}
+// Accounts, as the CLI's usage screen: open or closed as you left it on this phone.
+const acctTone = (pct) => (pct >= 80 ? "#f0625c" : pct >= 60 ? "#f5f7fa" : "#56cdd6");
+function usagePanel(list) {
+  const box = document.getElementById("accts"), det = document.getElementById("usage");
+  if (!list || !list.length) return void box.replaceChildren();
+  if (!det.dataset.wired) { det.dataset.wired = "1"; try { det.open = localStorage.getItem("fleet-usage-open") === "1"; } catch {} det.addEventListener("toggle", () => { try { localStorage.setItem("fleet-usage-open", det.open ? "1" : "0"); } catch {} }); }
+  const inUse = list.filter((a) => a.machines.length).length;
+  document.getElementById("usage-sum").textContent = list.length + " · " + inUse + " in use";
+  box.replaceChildren(...list.map((a) => {
+    const c = el("div", "acct" + (a.machines.length ? "" : " idle"));
+    const h = el("div", "ah"); h.append(el("b", "", a.unlisted ? "Not in your list" : a.name), el("span", "em", a.email || ""));
+    if (a.machines.length) h.append(el("span", "on", "● " + a.machines.join(" · ")));
+    c.append(h);
+    for (const l of a.limits) {
+      const r = el("div", "lim"), bar = el("div", "bar");
+      if (typeof l.pct === "number") {
+        const fill = el("i"); fill.style.width = Math.min(100, l.pct) + "%"; fill.style.background = a.stale ? "#3a404a" : acctTone(l.pct); bar.append(fill);
+        if (typeof l.tick === "number") { const tk = el("b"); tk.style.left = Math.round(l.tick * 100) + "%"; bar.append(tk); }
+      }
+      const pc = el("span", "pc", typeof l.pct === "number" ? l.pct + "%" : "--"); pc.style.color = typeof l.pct === "number" && !a.stale ? acctTone(l.pct) : "#6b7380";
+      r.append(el("span", "lb", l.label), bar, pc, el("span", "tx" + (l.full ? " full" : ""), l.text || ""));
+      c.append(r);
+    }
+    if (a.forecast) { const f = el("div", "fc"); const k = a.forecast.kind === "lasts" ? "#50c878" : "#f0625c"; const m = /^(lasts|runs out|out|5h full)(.*)$/.exec(a.forecast.text); const em = el("em", "", m ? m[1] : a.forecast.text); em.style.color = k; f.append(em, m ? m[2] : ""); c.append(f); }
+    if (a.status || a.unlisted) c.append(el("div", "st" + (a.status && !a.stale && /·/.test(a.status) ? " bad" : ""), [a.status, a.unlisted ? "add it with a in the CLI's usage screen" : ""].filter(Boolean).join(" · ")));
+    return c;
+  }));
+}
 function fivePanel(f) {
   const box = document.getElementById("five"); box.replaceChildren();
   if (!f || !f.kind) return;
@@ -6875,6 +6962,8 @@ function apply(text, force) {
   g.replaceChildren(gaugeTile("5 hours", five ? five.pct : undefined, five ? five.resets : "no figures", !!(d.five && d.five.urgent)), gaugeTile("week", week ? week.pct : undefined, week ? week.resets : ""), gaugeTile("cpu", d.machine.cpu, "load " + d.machine.load), gaugeTile("memory", d.machine.mem, d.machine.memText));
   // The five-hour forecast, always.
   fivePanel(d.five);
+  pulsePanel(d.pulse);
+  usagePanel(d.accounts);
   // The glasses app asking to connect: allow it if your glasses show the same code.
   const pb = document.getElementById("pair");
   pb.replaceChildren(...(d.pairing || []).map((r) => {
@@ -9417,7 +9506,7 @@ export function peerState(local: Session[], now: number): { body: Uint8Array; ta
     if (st) prs[`${pr.repo}#${pr.number}`] = st;
   }
   const tgc = readTg();
-  const ws = webState([], now);
+  const ws = webState([], now, false);
   const text = `{"proto":${PEER_PROTO},"build":${JSON.stringify(FLEET_BUILD)},"host":${JSON.stringify(selfHost())},"email":${JSON.stringify(loginEmail())},"machine":${JSON.stringify({ cpu: ws.machine.cpu, mem: ws.machine.mem })},"usage":${JSON.stringify(ws.account?.limits ?? null)},"tgReady":${!!tgc.token && tgWanted},"tg":${JSON.stringify(tgc.at ? tgc : null)},"prs":${JSON.stringify(prs)},"sessions":${encodeSessions(local, now)}}`;
   peerPayload = { at: now, seq: scanSeq, body: Bun.gzipSync(new TextEncoder().encode(text)), tag: `"${Bun.hash(text).toString(36)}"` };
   return peerPayload;
@@ -9635,7 +9724,7 @@ const usageAlerted = new Set<string>();
 const usageSeen = new Set<string>(); // machines whose figures have been seen once: what was already high at launch is not news
 /** The usage alerts due now: a limit crossing 80% or 95%, once per limit window, per machine. */
 export function usageAlerts(now = clock()): string[] {
-  const st = webState([], now);
+  const st = webState([], now, false);
   const blocks = [...(st.account?.limits.length ? [{ host: selfHost(), limits: st.account.limits }] : []), ...[...peers.values()].filter((p) => p.usage?.length).map((p) => ({ host: p.host, limits: p.usage! }))];
   const out: string[] = [];
   for (const b of blocks) {

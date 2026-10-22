@@ -6128,6 +6128,18 @@ describe("answering a session on another machine from the terminal", () => {
   });
 });
 
+describe("the phone page's pulse and accounts", () => {
+  test("the pulse counts every machine's tool calls, a bar a minute for the last hour", () => {
+    const now = Date.UTC(2026, 9, 22, 12, 0, 30);
+    const tail = (tools: number[]) => ({ tools, tokens: new Map(), prs: new Map(), lastT: now, mtime: now } as any);
+    const here = { sid: "a", name: "a", cwd: "/x", mains: [tail([now - 70_000, now - 10_000])], agents: [], workflows: [] } as any;
+    const there = { sid: "b", name: "b", cwd: "/x", mains: [tail([now - 3 * 3600_000, now - 5_000])], agents: [], workflows: [], remote: { host: "mini", ip: "1.2.3.4", addr: "1.2.3.4:4777", use: { cpu: 0, rss: 0, known: false } } } as any;
+    const p = F.pulseOf([here, there], now);
+    expect([p.bars.length, F.sum(p.bars), p.bars[59], p.machines, p.bar]).toEqual([60, 3, 2, 2, "1m"]); // the call three hours ago is out of the window
+    expect(F.webState([here], now, false).pulse).toBeUndefined(); // what machines send each other leaves it out
+  });
+});
+
 describe("session titles", () => {
   test("hyphens and underscores as spaces, in sentence case, with capitals that mean something kept", () => {
     expect(F.sessionTitle("rename-dynamic-workers-to-code-mode")).toBe("Rename dynamic workers to code mode");
