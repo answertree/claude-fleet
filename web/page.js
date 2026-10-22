@@ -60,7 +60,24 @@ function usagePanel(list) {
   if (!list || !list.length) return void box.replaceChildren();
   if (!det.dataset.wired) { det.dataset.wired = "1"; try { det.open = localStorage.getItem("fleet-usage-open") === "1"; } catch {} det.addEventListener("toggle", () => { try { localStorage.setItem("fleet-usage-open", det.open ? "1" : "0"); } catch {} }); }
   const inUse = list.filter((a) => a.machines.length).length;
-  document.getElementById("usage-sum").textContent = list.length + " · " + inUse + " in use";
+  // Closed, the summary says how the five hours end on each account: how many last to the reset, at what share each is
+  // on pace to have used by then, and any that run out first (red) or are full. Open, each account says it for itself.
+  const sum = document.getElementById("usage-sum"), five = list.map((a) => a.five).filter(Boolean);
+  const lasts = five.filter((f) => f.kind === "lasts"), out = five.filter((f) => f.kind === "out"), full = five.filter((f) => f.kind === "full");
+  const closed = el("span", "sc");
+  if (five.length) {
+    closed.append(lasts.length + (lasts.length === five.length && five.length > 1 ? " will all" : " will") + " last to 5h");
+    if (lasts.length) {
+      closed.append(" (");
+      lasts.forEach((f, i) => { if (i) closed.append(", "); const p = el("b", "", f.pct + "%"); p.style.color = acctTone(f.pct); closed.append(p); });
+      closed.append(" predicted)");
+    }
+    const at = (fs) => [...new Set(fs.map((f) => f.at).filter(Boolean))].map((t) => "~" + t).join(", ");
+    if (out.length) closed.append(" · ", el("em", "out", out.length + (out.length === 1 ? " runs" : " run") + " out" + (at(out) ? " " + at(out) : "")));
+    if (full.length) closed.append(" · ", el("em", "out", full.length + " full" + (at(full) ? " until " + at(full) : "")));
+    if (five.length < list.length) closed.append(" · " + (list.length - five.length) + " not read");
+  } else closed.append(list.length + " · " + inUse + " in use");
+  sum.replaceChildren(closed, el("span", "so", list.length + " · " + inUse + " in use"));
   box.replaceChildren(...list.map((a) => {
     const c = el("div", "acct" + (a.machines.length ? "" : " idle"));
     const h = el("div", "ah"); h.append(el("b", "", a.unlisted ? "Not in your list" : a.name), el("span", "em", a.email || ""));
