@@ -6212,6 +6212,36 @@ export function pulseOf(sessions: Session[], now: number) {
   const bars = bucketsIn(tails.map((t) => t.tools), win);
   return { bars, tools: human(sum(bars)), out: human(tokensIn(tails, win)), bar: barLabel(win), machines: new Set(sessions.map((s) => s.remote?.host ?? selfHost())).size };
 }
+/** Bars in a timeline card's charts on the phone page: fine enough for a full browser width, a few hundred bytes a session. */
+export const TIMELINE_BARS = 120;
+/**
+ * A session as the CLI's timeline (key 3) draws it, for the phone page's timeline view: its tool calls and output tokens a
+ * bar each across the window, and what happened when (the weightiest mark wins a bar shared by two, as on the terminal),
+ * each placed by its bar. With the CPU and memory of its processes.
+ */
+export function timelineOf(s: Session, win: Win) {
+  const tails = tailsOf(s);
+  const out = new Array(win.n).fill(0);
+  for (const t of tails)
+    for (const [ts, n] of t.tokens.values()) {
+      const k = barOf(ts, win);
+      if (k >= 0 && k < win.n) out[k] += n;
+    }
+  const at = new Map<number, [number, string, RGB]>();
+  for (const [t, weight, glyph, color] of marksOf(s)) {
+    if (t < win.start || t >= win.end) continue;
+    const i = barOf(t, win);
+    if (!at.has(i) || at.get(i)![0] < weight) at.set(i, [weight, glyph, color]);
+  }
+  const use = useOf(s);
+  return {
+    tools: bucketsIn(tails.map((t) => t.tools), win),
+    out,
+    marks: [...at].sort((a, b) => a[0] - b[0]).map(([i, [, g, c]]) => ({ i, g, c: hexOf(c) })),
+    cpu: Math.round(use.cpu),
+    mem: use.known || use.rss ? gb(use.rss * 1024) : undefined,
+  };
+}
 /**
  * Where a new session may start: each folder a session runs in, on each machine, most recently started first. Never
  * anywhere else, so the page (like Telegram's /new) cannot start Claude in a folder a request names.
@@ -6251,6 +6281,7 @@ export function webState(sessions: Session[], now: number, full = true) {
   const all = buildViews(sessions, now);
   const shown = all.filter((v) => !isHidden(v));
   const win = laneWindow(now, 150);
+  const tlWin = timeWindow(now, opt.windowMin * 60_000, TIMELINE_BARS);
   const counts = fleetCounts(sessions, now);
   const acct = opt.usage ? accountView(now) : undefined;
   return {
@@ -6258,6 +6289,7 @@ export function webState(sessions: Session[], now: number, full = true) {
     counts,
     five: fiveHourLine(now), // the five-hour limit's forecast, always said
     pulse: full ? pulseOf(sessions, now) : undefined, // tool calls across the fleet, as the CLI's header
+    timeline: full ? { start: tlWin.start, end: tlWin.end, bar: barLabel(tlWin), minutes: opt.windowMin } : undefined, // the timeline view's time axis
     places: full ? newPlaces(sessions) : undefined, // where the page may start a session: the folders sessions run in, by machine
     accounts: full && opt.usage ? usageAccounts(now) : undefined, // the usage screen's accounts
     pairing: pairsPending(), // the glasses app asking to connect, waiting on you
@@ -6283,6 +6315,7 @@ export function webState(sessions: Session[], now: number, full = true) {
         place: [machineOf(s) ? `${machineLabel(s)} ·` : "", foldersOf(s.cwd.replace(os.homedir(), "~")).slice(-2).join("/"), branch && branch !== "HEAD" ? `@ ${branch}` : ""].filter(Boolean).join(" "),
         state: v.state,
         word: STATE[v.state].word,
+        glyph: STATE[v.state].glyph,
         color: hexOf(STATE[v.state].color),
         time: stateTime(s, f, v.state, now, v.stall.since),
         sub: { source: sub.source, text: sub.text },
@@ -6297,6 +6330,7 @@ export function webState(sessions: Session[], now: number, full = true) {
         changes: s.side && (s.side.edits.length || gitOf(s)) ? segsJson(changeSegs(s.side.edits, gitOf(s), true)) : undefined,
         tasks: s.tasks ? { done: s.tasks.done, total: s.tasks.total, open: s.tasks.items.filter((t) => t.status !== "completed").map((t) => ({ status: t.status, text: taskText(t), since: t.since ? ago(now - t.since) : undefined, blocked: t.blocked || undefined })) } : undefined,
         roster: rosterOfView(v, now, win),
+        timeline: full ? timelineOf(s, tlWin) : undefined,
         workflows: s.workflows.filter((w) => w.status === "running" && w.lastT >= win.start).map((w) => ({ name: w.name, phase: w.phase, done: w.agents.filter((a) => a.done).length, total: w.agents.length })),
         agents: threads.map((a) => {
           const p = pendingOf(a.tail);
@@ -6429,7 +6463,9 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--dim);font-size:12px;li
 h1{white-space:nowrap;min-width:0}#clock{white-space:nowrap}
 @media (max-width:440px){h1{font-size:18px}h1 img{width:26px;height:26px}.top-right{gap:7px}.hbtn{width:34px;height:34px}.hbtn svg{width:16px;height:16px}#mic{width:38px;height:38px}#clock{font-size:18px}}
 .hbtn{width:38px;height:38px;border-radius:50%;border:1px solid var(--line);background:var(--card);color:var(--text);display:grid;place-items:center;cursor:pointer;padding:0}.hbtn svg{width:18px;height:18px}.hbtn:hover{color:var(--white);border-color:#3a4658}
-#viewbtn .grid{display:none}body.compact #viewbtn .grid{display:inline}body.compact #viewbtn .list{display:none}
+.seg{display:flex;gap:2px;padding:2px;border:1px solid var(--line);border-radius:999px;background:var(--card)}.seg button{width:34px;height:32px;border:0;border-radius:999px;padding:0;display:grid;place-items:center;background:none;color:var(--dim);cursor:pointer}.seg button svg{width:17px;height:17px}.seg button:hover{color:var(--white)}.seg button[aria-pressed="true"]{background:#26303d;color:var(--white)}
+/* On a phone the header keeps the one button it had: the view you are on, and a tap moves to the next. */
+@media (max-width:440px){.seg{padding:0;border:0;background:none}.seg button:not([aria-pressed="true"]){display:none}.seg button[aria-pressed="true"]{width:34px;height:34px;border:1px solid var(--line);background:var(--card)}.seg button svg{width:16px;height:16px}}
 /* Starting a session: which machine, which folder, what to ask. */
 .sheet{position:fixed;inset:0;z-index:35;background:#0009;display:flex;align-items:flex-end;justify-content:center;opacity:0;pointer-events:none;transition:opacity .2s}.sheet.on{opacity:1;pointer-events:auto}
 .sbox{width:100%;max-width:560px;max-height:86vh;overflow:auto;background:var(--card);border:1px solid var(--line);border-radius:18px 18px 0 0;padding:14px 16px calc(18px + env(safe-area-inset-bottom))}
@@ -6452,6 +6488,33 @@ h1{white-space:nowrap;min-width:0}#clock{white-space:nowrap}
 .crow .rs{color:var(--text);font-size:13px;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.crow.needs .rs{color:var(--amber);font-weight:600}.crow .rt{color:var(--dim);font-size:12px;white-space:nowrap;text-align:right}
 @media (max-width:700px){.crow{grid-template-columns:10px minmax(0,1fr) auto}.crow .rs{grid-column:2/4;grid-row:2}}
 @media (min-width:1100px){body.compact #cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(640px,1fr));gap:0 12px}body.compact #cards>:not(.crow){grid-column:1/-1}}
+/* Timeline: the CLI's timeline (key 3) on the whole browser width. Big cards where colour carries the state, each with
+   its tool calls (bars) and output tokens (the line) on one scale for every card, what happened when under them, and
+   its figures beside. */
+body.timeline main,body.timeline header,body.timeline #quip,body.timeline #pair,body.timeline .overview,body.timeline .usage,body.timeline .foot{max-width:none}
+.tcard{position:relative;background:var(--card);border:1px solid var(--line);border-left:6px solid var(--c);border-radius:16px;padding:14px 18px 10px;margin-bottom:12px;cursor:pointer}
+.tcard:hover{border-color:#3a4658;border-left-color:var(--c)}
+.tcard.needs{background:#2a2108;border-color:#5a4512;border-left-color:var(--c);box-shadow:0 0 0 1px #5a4512,0 0 24px #e5b54433;animation:glow 2s ease-in-out infinite}
+.tcard.receded .tn{color:var(--text)}.tcard.receded .tch{opacity:.7}
+.tcard .th{display:flex;justify-content:space-between;align-items:baseline;gap:14px}
+.tcard .tn{color:var(--white);font-size:19px;font-weight:700;letter-spacing:.16em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tcard .tst{color:var(--c);font-size:13px;font-weight:700;letter-spacing:.14em;white-space:nowrap}.tcard .tst small{color:var(--dim);font-size:12px;font-weight:500;letter-spacing:0;margin-left:8px}
+.tcard .tpl{color:var(--dim);font-size:12px;margin-top:1px}
+.tcard .tsub{color:var(--white);font-size:15px;margin:8px 0 10px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}.tcard.needs .tsub{font-weight:600}.tcard .tsub .you{color:var(--blue)}.tcard .tsub .cl{color:var(--cyan)}
+.tcard .tbody{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:10px 26px;align-items:start}
+.tcard .twrap{position:relative}
+.tcard .tch{display:block;width:100%;height:128px}
+.tcard .tleg{position:absolute;top:0;left:0;display:flex;gap:12px;font-size:10.5px;color:var(--dim);pointer-events:none}.tcard .tleg i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:-1px}.tcard .tleg i.ln{height:2px;border-radius:1px;vertical-align:2px}
+.tcard .tmk{position:relative;height:20px;font-size:15px;font-weight:700;line-height:20px}.tcard .tmk span{position:absolute;transform:translateX(-50%)}
+.tcard .tax{position:relative;height:14px;color:var(--dim);font-size:10.5px}.tcard .tax span{position:absolute;transform:translateX(-50%);white-space:nowrap}.tcard .tax span:first-child{transform:none}.tcard .tax span:last-child{transform:translateX(-100%)}
+.tcard .tcur{position:absolute;top:0;width:1px;height:128px;background:#ffffff55;pointer-events:none;display:none}
+.tcard .ttip{position:absolute;top:-6px;z-index:2;pointer-events:none;background:#0d1117f0;border:1px solid var(--line);border-radius:8px;padding:3px 8px;font-size:11.5px;color:var(--text);white-space:nowrap;display:none}
+.tcard .tside{display:grid;gap:8px;font-size:13px;color:var(--dim);padding-top:2px}.tcard .tside>div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.tcard .tside b{color:var(--text);font-weight:650}.tcard .tside .k{display:inline-block;width:42px;color:var(--dim);font-size:11px;letter-spacing:.08em}
+.tcard .tside .gg{display:inline-block;position:relative;width:100px;height:6px;margin:0 8px 0 0;border-radius:3px;background:#262d37;vertical-align:middle;overflow:hidden}.tcard .tside .gg i{position:absolute;left:0;top:0;bottom:0;border-radius:3px}
+.tcard .tside .tbar{display:inline-flex;width:100px;margin-right:8px;vertical-align:middle}
+.tcard .tside .live{color:var(--green)}.tcard .tside .wf{color:var(--purple)}
+@media (max-width:860px){.tcard .tbody{grid-template-columns:minmax(0,1fr)}.tcard .tside{grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:6px 20px}}
+@media (max-width:600px){.tcard{padding:12px 12px 8px}.tcard .tn{font-size:16px;letter-spacing:.1em}.tcard .tch,.tcard .tcur{height:84px}.tcard .th{flex-wrap:wrap;gap:2px 10px}}
 /* The fleet's pulse: tool calls across every machine, a bar a minute for the last hour, as the CLI's header draws it. */
 .beat{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:10px 14px 9px;margin:0 0 12px}.beat:empty{display:none}
 .beat .ph{display:flex;justify-content:space-between;align-items:baseline;gap:10px;font-size:12px;color:var(--dim)}.beat .ph b{color:var(--white);font-size:14px;font-weight:650}.beat .ph em{font-style:normal;color:var(--text)}
@@ -6553,7 +6616,7 @@ details.tasks[open]>summary .sub,details.chat[open]>summary .sub{display:none}
   };
 })();
 </script>
-<header><h1><img src="/icon-192.png" alt="">Claude Fleet</h1><span class="top-right"><button id="viewbtn" class="hbtn" aria-label="Compact view" title="Compact view"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path class="list" d="M4 6h16M4 12h16M4 18h16"/><g class="grid"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></g></svg></button><button id="newbtn" class="hbtn" aria-label="Start a session" title="Start a session"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button><button id="mic" hidden aria-label="Talk to Fleet"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3.5"/></svg></button><span id="clock"></span></span></header>
+<header><h1><img src="/icon-192.png" alt="">Claude Fleet</h1><span class="top-right"><span id="views" class="seg" role="group" aria-label="View"><button data-v="cards" aria-label="Cards: everything about each session (1)" title="Cards: everything about each session (1)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg></button><button data-v="timeline" aria-label="Timeline: each session's activity across the window (3)" title="Timeline: each session's activity across the window (3)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"/><path d="M4 15l4-5 4 3 4-7 4 4"/></svg></button><button data-v="compact" aria-label="Compact: a line a session (2)" title="Compact: a line a session (2)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button></span><button id="newbtn" class="hbtn" aria-label="Start a session" title="Start a session"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button><button id="mic" hidden aria-label="Talk to Fleet"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3.5"/></svg></button><span id="clock"></span></span></header>
 <div id="voice" aria-hidden="true"><div class="vtop"><b><img src="/icon-192.png" alt="">Fleet</b><div class="vpick"><button id="vpick" aria-haspopup="listbox" aria-expanded="false" aria-label="Choose Fleet's voice"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6.5h16M4 12h16M4 17.5h16"/><g fill="currentColor" stroke="none"><circle cx="9" cy="6.5" r="2.4"/><circle cx="15.5" cy="12" r="2.4"/><circle cx="7" cy="17.5" r="2.4"/></g></svg></button><div class="vlist" id="vlist" role="listbox" hidden></div></div></div>
 <template id="vicons"><svg class="play" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l13-7.5z"/></svg><svg class="stop" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></template>
 <div class="stage"><canvas class="orbs" id="orbs" aria-hidden="true"></canvas><div class="vstate" id="vstate"></div><div class="vtool" id="vtool"></div></div>
@@ -7028,7 +7091,8 @@ function apply(text, force) {
   const cards = document.getElementById("cards");
   for (const det of cards.querySelectorAll("details")) open.set(det.closest(".card")?.dataset.sid + det.className, det.open);
   if (swiping || (!force && Date.now() < touchedUntil)) return void (lastText = ""); // nor under a card being swiped, or a finger scrolling
-  const build = (s) => { const c = compactView ? compactRow(s) : card(s); c.dataset.sid = s.sid; for (const det of c.querySelectorAll("details")) { const k = s.sid + det.className; if (open.has(k)) det.open = open.get(k); } return c; };
+  timelineScale(d);
+  const build = (s) => { const c = view === "compact" ? compactRow(s) : view === "timeline" ? timelineCard(s) : card(s); c.dataset.sid = s.sid; for (const det of c.querySelectorAll("details")) { const k = s.sid + det.className; if (open.has(k)) det.open = open.get(k); } return c; };
   // Finished sessions swiped away stay away (on this phone) until they start again; a button at the bottom shows them.
   const away = putAway();
   for (const sid of Object.keys(away)) { const s = d.sessions.find((x) => x.sid === sid); if (!s || !isDone(s)) delete away[sid]; }
@@ -7503,7 +7567,7 @@ const wide = matchMedia("(min-width:1100px)");
 let layoutAsked = 0;
 function layoutCards() {
   const box = $("cards"), items = [...box.children];
-  if (!wide.matches || compactView) {
+  if (!wide.matches || view !== "cards") {
     if (box.classList.contains("masonry")) { box.classList.remove("masonry"); box.style.height = ""; for (const c of items) c.style.left = c.style.top = c.style.width = ""; }
     return;
   }
@@ -7531,10 +7595,111 @@ const sized = new ResizeObserver(relayout);
 new MutationObserver(() => { for (const c of $("cards").children) sized.observe(c); relayout(); }).observe($("cards"), { childList: true });
 addEventListener("resize", relayout);
 wide.addEventListener("change", relayout);
-// ── Compact: a line a session, kept on this device ──
-let compactView = false;
-try { compactView = localStorage.getItem("fleet-view") === "compact"; } catch {}
-document.body.classList.toggle("compact", compactView);
+// ── The view, kept on this device: cards (everything), timeline (activity across the window), compact (a line a session) ──
+const VIEWS = ["cards", "timeline", "compact"];
+let view = "cards";
+try { const v = localStorage.getItem("fleet-view"); if (VIEWS.includes(v)) view = v; } catch {}
+// A link can name the view (&view=timeline), for a screen on the wall that should always open on it.
+{ const v = new URLSearchParams(location.search).get("view"); if (VIEWS.includes(v)) view = v; }
+function setView(v) {
+  view = v;
+  try { localStorage.setItem("fleet-view", v); } catch {}
+  for (const x of VIEWS) document.body.classList.toggle(x, x === v);
+  for (const b of $("views").querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.v === v));
+  if (latestText) apply(latestText, true);
+}
+// ── Timeline: the CLI's timeline (key 3) on the whole browser width ──
+// Every card's charts share one scale, as the terminal's far cards do, so a busy session looks busier than a quiet one.
+let tl = { tools: 1, out: 1, axis: undefined, data: new Map() };
+function timelineScale(d) {
+  const all = (d.sessions || []).filter((s) => s.timeline);
+  tl = { tools: Math.max(1, ...all.flatMap((s) => s.timeline.tools)), out: Math.max(1, ...all.flatMap((s) => s.timeline.out)), axis: d.timeline, data: new Map(all.map((s) => [s.sid, s.timeline])) };
+}
+const kfmt = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e4 ? Math.round(n / 1e3) + "k" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n));
+const agoText = (min) => (min >= 120 ? Math.round(min / 60) + "h" : min >= 60 ? (min / 60).toFixed(1).replace(".0", "") + "h" : Math.round(min) + "m");
+const MARKS = { "▸": "you typed to it", "⇡": "it linked a pull request", "≡": "a workflow started", "◇": "a workflow started", "✓": "a task finished" };
+function timelineChart(s) {
+  const t = s.timeline, n = t.tools.length || 1, BW = 10, H = 100, top = 84; // bars rise to 84%, leaving the legend room
+  const colour = s.state === "needs" ? "#e5b544" : s.state === "stalled" ? "#f0625c" : "#61aaff";
+  const svg = svgEl("svg", { class: "tch", viewBox: "0 0 " + n * BW + " " + H, preserveAspectRatio: "none" });
+  for (const y of [H - top, H - top / 2]) svg.append(svgEl("line", { x1: 0, x2: n * BW, y1: y, y2: y, stroke: "#262d37", "stroke-width": "1", "stroke-dasharray": "3 4", "vector-effect": "non-scaling-stroke" }));
+  // Tool calls a bar each, the bar still filling brightest; every bar drawn, so a card updates in place.
+  t.tools.forEach((v, i) => {
+    const h = v ? Math.max(2, (v / tl.tools) * top) : 0;
+    svg.append(svgEl("rect", { x: i * BW + 1, y: H - h, width: BW - 2, height: h, rx: "1.5", fill: colour, "fill-opacity": i === n - 1 ? "1" : ".62" }));
+  });
+  // Output tokens as a line over them, on its own scale.
+  const pts = t.out.map((v, i) => [i * BW + BW / 2, H - 1 - (v / tl.out) * top]);
+  svg.append(svgEl("path", { d: pts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" "), fill: "none", stroke: "#be94ff", "stroke-width": "1.5", "stroke-opacity": ".9", "stroke-linejoin": "round", "vector-effect": "non-scaling-stroke" }));
+  const wrap = el("div", "twrap");
+  const leg = el("div", "tleg");
+  const k1 = el("span"); const i1 = el("i"); i1.style.background = colour; k1.append(i1, "tool calls");
+  const k2 = el("span"); const i2 = el("i", "ln"); i2.style.background = "#be94ff"; k2.append(i2, "output tokens");
+  leg.append(k1, k2);
+  const cur = el("div", "tcur"), tip = el("div", "ttip");
+  wrap.append(svg, leg, cur, tip);
+  // Hovering a bar says when it was and what happened in it, from the latest figures (the card is patched in place).
+  wrap.addEventListener("mousemove", (e) => {
+    const now = tl.data.get(s.sid), ax = tl.axis;
+    if (!now || !ax) return;
+    const r = svg.getBoundingClientRect(), N = now.tools.length, i = Math.max(0, Math.min(N - 1, Math.floor(((e.clientX - r.left) / r.width) * N)));
+    const barMs = (ax.end - ax.start) / N, at = new Date(ax.start + i * barMs);
+    const when = at.toLocaleTimeString([], barMs < 60000 ? { hour: "2-digit", minute: "2-digit", second: "2-digit" } : { hour: "2-digit", minute: "2-digit" });
+    tip.textContent = when + " · " + now.tools[i] + " tool call" + (now.tools[i] === 1 ? "" : "s") + " · " + kfmt(now.out[i]) + " out";
+    const x = ((i + 0.5) / N) * r.width;
+    cur.style.left = x + "px"; cur.style.display = "block";
+    tip.style.display = "block"; tip.style.left = Math.max(0, Math.min(r.width - tip.offsetWidth, x - tip.offsetWidth / 2)) + "px";
+  });
+  wrap.addEventListener("mouseleave", () => { cur.style.display = tip.style.display = "none"; });
+  // Under the chart, what happened when.
+  const marks = el("div", "tmk");
+  for (const m of t.marks) { const g = el("span", "", m.g); g.style.left = ((m.i + 0.5) / n) * 100 + "%"; g.style.color = m.c; g.title = MARKS[m.g] || ""; marks.append(g); }
+  const axis = el("div", "tax"), min = (tl.axis && tl.axis.minutes) || 30;
+  for (const f of [0, 1 / 3, 2 / 3, 1]) { const a = el("span", "", f === 1 ? "now" : agoText(min * (1 - f)) + (f ? "" : " ago")); a.style.left = f * 100 + "%"; axis.append(a); }
+  const box = el("div"); box.append(wrap, marks, axis);
+  return box;
+}
+function timelineCard(s) {
+  const receded = s.state === "yourTurn" || s.state === "idle" || s.state === "finished";
+  const c = el("section", "tcard" + (s.state === "needs" ? " needs" : "") + (receded ? " receded" : "")); c.style.setProperty("--c", s.color);
+  c.title = "Open " + s.name;
+  c.addEventListener("click", () => openFocus(s.sid));
+  // The name in letter-spaced capitals; the state, its glyph first, on the right.
+  const th = el("div", "th"), st = el("div", "tst", (s.glyph ? s.glyph + " " : "") + s.word);
+  if (s.time) st.append(el("small", "", s.time));
+  th.append(el("div", "tn", s.name), st);
+  c.append(th);
+  if (s.place) c.append(el("div", "tpl", s.place));
+  // What it is doing, or asking: the question, your prompt (▸) or Claude's reply (◆), as the CLI's subheading.
+  const sub = el("div", "tsub");
+  if (s.sub.source === "prompt") sub.append(el("span", "you", "▸ ")); else if (s.sub.source === "reply") sub.append(el("span", "cl", "◆ "));
+  sub.append(s.sub.text || "");
+  c.append(sub);
+  if (!s.timeline) return c;
+  const t = s.timeline, body = el("div", "tbody"), side = el("div", "tside");
+  const line = (...parts) => { const r = el("div"); r.append(...parts); side.append(r); return r; };
+  const nA = s.agents.length, nW = s.workflows.length;
+  const ag = el("span", nA ? "live" : "", (nA ? "● " : "○ ") + nA + " agent" + (nA === 1 ? "" : "s"));
+  line(ag, ...(nW ? ["   ", el("span", "wf", "≡ " + nW + " workflow" + (nW === 1 ? "" : "s"))] : []));
+  if (s.ctx) {
+    const gg = el("span", "gg"), fill = el("i"); fill.style.width = s.ctx.pct + "%"; fill.style.background = tone(s.ctx.pct); gg.append(fill);
+    const pct = el("b", "", s.ctx.pct + "%"); pct.style.color = tone(s.ctx.pct);
+    line(el("span", "k", "CTX"), gg, pct, " of " + s.ctx.max + (s.ctx.runway ? " · " + s.ctx.runway : ""));
+  }
+  line(el("span", "k", "CPU"), el("b", "", t.cpu + "%"), t.mem ? " · " + t.mem : "");
+  const tools = t.tools.reduce((a, b) => a + b, 0), out = t.out.reduce((a, b) => a + b, 0);
+  line(el("span", "k", "USE"), el("b", "", kfmt(tools)), " tool calls · ", el("b", "", kfmt(out)), " out" + (tl.axis ? " / " + agoText(tl.axis.minutes) : ""));
+  if (s.tasks && s.tasks.total) {
+    const T = s.tasks, doing = T.open.filter((x) => x.status === "in_progress").length, n = Math.min(20, T.total), bar = el("span", "tbar");
+    // One pip a task (scaled to 20 at most): done in green, in progress in white.
+    const dn = Math.round((T.done / T.total) * n), dg = Math.min(n - dn, Math.ceil((doing / T.total) * n));
+    for (let i = 0; i < n; i++) bar.append(el("i", i < dn ? "d" : i < dn + dg ? "n" : ""));
+    line(el("span", "k", "TASKS"), bar, el("b", "", T.done + "/" + T.total));
+  }
+  body.append(timelineChart(s), side);
+  c.append(body);
+  return c;
+}
 function compactRow(s) {
   const r = el("div", "crow" + (s.state === "needs" ? " needs" : "")); r.style.setProperty("--c", s.color);
   const n = el("div", "rn"); n.append(el("b", "", s.name), el("small", "", s.place || ""));
@@ -7545,13 +7710,17 @@ function compactRow(s) {
   r.addEventListener("click", () => openFocus(s.sid));
   return r;
 }
-$("viewbtn").addEventListener("click", () => {
-  compactView = !compactView;
-  try { localStorage.setItem("fleet-view", compactView ? "compact" : "cards"); } catch {}
-  document.body.classList.toggle("compact", compactView);
-  $("viewbtn").setAttribute("aria-label", compactView ? "Cards view" : "Compact view"); $("viewbtn").title = $("viewbtn").getAttribute("aria-label");
-  if (latestText) apply(latestText, true);
+const narrow = matchMedia("(max-width:440px)");
+for (const b of $("views").querySelectorAll("button")) b.addEventListener("click", () => setView(narrow.matches ? VIEWS[(VIEWS.indexOf(view) + 1) % VIEWS.length] : b.dataset.v));
+// The CLI's keys: 1 cards (detail), 2 compact, 3 timeline. Not while you type, nor over a sheet or the focus view.
+addEventListener("keydown", (e) => {
+  const v = { 1: "cards", 2: "compact", 3: "timeline" }[e.key];
+  if (!v || e.metaKey || e.ctrlKey || e.altKey || /^(TEXTAREA|INPUT|SELECT)$/.test((document.activeElement || {}).tagName || "")) return;
+  if (focusSid || $("newsheet").classList.contains("on") || $("voice").classList.contains("on")) return;
+  setView(v);
 });
+for (const x of VIEWS) document.body.classList.toggle(x, x === view);
+for (const b of $("views").querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.v === view));
 
 // ── The focus view: one session with everything open, and what its own terminal shows ──
 let focusSid = null, focusTimer = 0;

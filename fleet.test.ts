@@ -6148,6 +6148,27 @@ describe("the phone page's pulse and accounts", () => {
     expect([p.bars.length, F.sum(p.bars), p.bars[59], p.machines, p.bar]).toEqual([60, 3, 2, 2, "1m"]); // the call three hours ago is out of the window
     expect(F.webState([here], now, false).pulse).toBeUndefined(); // what machines send each other leaves it out
   });
+  test("a timeline card has its tool calls and output tokens a bar each, and the weightiest mark in each bar", () => {
+    const now = Date.UTC(2026, 9, 22, 12, 0, 30);
+    const win = F.timeWindow(now, 30 * 60_000, F.TIMELINE_BARS); // 15 s a bar
+    const main = {
+      tools: [now - 3_600_000, now - 20_000, now - 5_000, now - 4_000],
+      tokens: new Map([["m1", [now - 5_000, 1200]], ["m2", [now - 2 * 3_600_000, 99]]]),
+      prs: new Map(),
+      askLog: [now - 10 * 60_000, now - 3_600_000],
+      taskLog: new Map([["1", { started: now - 9 * 60_000, finished: now - 10 * 60_000 + 1 }]]), // in the same bar as the prompt: ✓ outweighs ▸
+      lastT: now,
+      mtime: now,
+    } as any;
+    const s = { sid: "a", name: "a", cwd: "/x", mains: [main], agents: [], workflows: [], remote: { host: "mini", ip: "1.2.3.4", addr: "1.2.3.4:4777", use: { cpu: 12.4, rss: 2 * 1024 ** 2, known: true } } } as any;
+    const t = F.timelineOf(s, win);
+    expect([t.tools.length, F.sum(t.tools), t.tools.at(-2), F.sum(t.out), t.out.at(-2)]).toEqual([120, 3, 2, 1200, 1200]); // the bar before the one still filling; what is older than the window is left out
+    expect(t.marks).toEqual([{ i: F.barOf(now - 10 * 60_000, win), g: "✓", c: expect.stringMatching(/^#/) }]);
+    expect([t.cpu, t.mem]).toEqual([12, "2.0G"]);
+    const page = F.webState([s], now);
+    expect([page.timeline!.minutes, page.timeline!.bar, page.timeline!.end - page.timeline!.start]).toEqual([30, "15s", 30 * 60_000]);
+    expect(F.webState([s], now, false).timeline).toBeUndefined(); // nor what machines send each other
+  });
 });
 
 describe("starting a session from the page", () => {
