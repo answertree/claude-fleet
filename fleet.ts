@@ -7830,18 +7830,28 @@ export function secureLink(token: string): string | undefined {
   return `https://${name}:${securePort()}/?t=${token}`;
 }
 let tlsRenew: ReturnType<typeof setInterval> | undefined;
+let secureRetry: ReturnType<typeof setTimeout> | undefined;
 function serveSecure(options: any, host: string, token: string) {
   if (process.env.FLEET_HOME || process.env.FLEET_WEB_TLS === "0") return; // made-up sessions (demo, tests), or turned off
+  // Whatever stops it now (Tailscale busy or starting, the port not yet free), it is tried again until the page is up:
+  // the phone's page and its microphone need HTTPS, and nothing else would bring it back.
+  const again = (why: string) => {
+    if (isServiceWorker) svcLog(`no HTTPS for the page yet (${why}): trying again in 30 s`);
+    clearTimeout(secureRetry);
+    secureRetry = setTimeout(() => web.server && !web.secure && serveSecure(options, host, token), 30_000);
+    secureRetry.unref?.();
+  };
   const name = tailnetName();
-  if (!name) return;
+  if (!name) return again("Tailscale did not say this machine's name");
   const dir = tlsDir();
   const cert = path.join(dir, "cert.pem"), key = path.join(dir, "key.pem");
   const start = () => {
     try {
       web.secure?.stop(true);
+      web.secure = undefined;
       web.secure = Bun.serve({ ...options, hostname: host, port: securePort(), tls: { cert: fs.readFileSync(cert, "utf8"), key: fs.readFileSync(key, "utf8") } } as any);
     } catch (e) {
-      if (isServiceWorker) svcLog(`could not serve the page over HTTPS: ${String((e as Error).message ?? e).slice(0, 120)}`);
+      again(String((e as Error).message ?? e).slice(0, 120));
     }
   };
   const fetchCert = () => {
@@ -7851,7 +7861,7 @@ function serveSecure(options: any, host: string, token: string) {
     runInBackground(tailscaleCmd(), ["cert", "--cert-file", cert, "--key-file", key, name], 60_000, (code) => {
       if (code === 0) start();
       else if (fs.existsSync(cert)) start(); // the one we have, while it lasts
-      else if (isServiceWorker) svcLog("no HTTPS for the page: tailscale cert failed (is HTTPS on for your tailnet?)");
+      else again("tailscale cert failed: is HTTPS on for your tailnet?");
     });
   };
   if (fs.existsSync(cert) && fs.existsSync(key)) start();
