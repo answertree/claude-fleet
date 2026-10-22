@@ -6140,6 +6140,29 @@ describe("the phone page's pulse and accounts", () => {
   });
 });
 
+describe("starting a session from the page", () => {
+  const mk = (sid: string, cwd: string, startedAt: number, remote?: any) => ({ sid, name: sid, cwd, startedAt, mains: [], agents: [], workflows: [], remote } as any);
+  const mini = { host: "mini", ip: "1.2.3.4", addr: "1.2.3.4:4777", use: { cpu: 0, rss: 0, known: false } };
+  test("only where a session already runs, by machine, newest first, each folder once", () => {
+    const places = F.newPlaces([mk("a", "/w/shop", 1), mk("b", "/w/shop", 3), mk("c", "/w/site", 2, mini), mk("d", "relative/path", 4)]);
+    expect(places.map((p: any) => [p.host, p.cwd])).toEqual([[F.selfHost(), "/w/shop"], ["mini", "/w/site"]]);
+  });
+  test("starts here or through the other machine's fleet, and refuses a folder no session is in", async () => {
+    const started: string[] = [];
+    F.web.start = async (cwd, prompt) => (started.push(`${cwd}: ${prompt}`), { ok: true, id: "abc" });
+    try {
+      const sessions = [mk("a", "/w/shop", 1)];
+      expect(await F.startFromPage(sessions, F.selfHost(), "/w/shop", "fix the flaky test")).toEqual({ ok: true, id: "abc", host: F.selfHost() });
+      expect(started).toEqual(["/w/shop: fix the flaky test"]);
+      expect((await F.startFromPage(sessions, F.selfHost(), "/etc", "x")).error).toBe("not a folder fleet knows on that machine");
+      expect((await F.startFromPage(sessions, "mini", "/w/shop", "x")).error).toBe("not a folder fleet knows on that machine"); // that folder is here, not there
+      expect((await F.startFromPage(sessions, F.selfHost(), "/w/shop", "   ")).error).toBe("nothing to ask");
+    } finally {
+      delete F.web.start;
+    }
+  });
+});
+
 describe("session titles", () => {
   test("hyphens and underscores as spaces, in sentence case, with capitals that mean something kept", () => {
     expect(F.sessionTitle("rename-dynamic-workers-to-code-mode")).toBe("Rename dynamic workers to code mode");

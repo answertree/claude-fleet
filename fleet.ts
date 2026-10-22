@@ -6212,6 +6212,26 @@ export function pulseOf(sessions: Session[], now: number) {
   const bars = bucketsIn(tails.map((t) => t.tools), win);
   return { bars, tools: human(sum(bars)), out: human(tokensIn(tails, win)), bar: barLabel(win), machines: new Set(sessions.map((s) => s.remote?.host ?? selfHost())).size };
 }
+/**
+ * Where a new session may start: each folder a session runs in, on each machine, most recently started first. Never
+ * anywhere else, so the page (like Telegram's /new) cannot start Claude in a folder a request names.
+ */
+export function newPlaces(sessions: Session[]) {
+  const seen = new Set<string>();
+  return [...sessions]
+    .sort((a, b) => b.startedAt - a.startedAt)
+    .map((s) => ({ host: s.remote?.host ?? selfHost(), cwd: s.cwd, place: foldersOf(s.cwd.replace(os.homedir(), "~")).slice(-2).join("/") }))
+    .filter((x) => absoluteDir(x.cwd) && !seen.has(x.host + "\0" + x.cwd) && seen.add(x.host + "\0" + x.cwd))
+    .slice(0, 40);
+}
+/** Start a session from the page: only in a folder where one already runs on that machine, through that machine's fleet. */
+export async function startFromPage(sessions: Session[], host: string, cwd: string, prompt: string): Promise<{ ok: boolean; id?: string; error?: string; host?: string }> {
+  const at = sessions.find((s) => (s.remote?.host ?? selfHost()) === host && s.cwd === cwd);
+  if (!at) return { ok: false, error: "not a folder fleet knows on that machine" };
+  if (!cleanMessage(prompt)) return { ok: false, error: "nothing to ask" };
+  const r = at.remote ? await peerCall(at, "/peer/new", { cwd, prompt }) : await (web.start ?? startSession)(cwd, prompt);
+  return { ...r, host };
+}
 /** The usage screen (key u) for the phone page: your accounts in order, the machines on each, both limits and the forecast. */
 export function usageAccounts(now: number) {
   return accountLines(now).map((l) => {
@@ -6238,6 +6258,7 @@ export function webState(sessions: Session[], now: number, full = true) {
     counts,
     five: fiveHourLine(now), // the five-hour limit's forecast, always said
     pulse: full ? pulseOf(sessions, now) : undefined, // tool calls across the fleet, as the CLI's header
+    places: full ? newPlaces(sessions) : undefined, // where the page may start a session: the folders sessions run in, by machine
     accounts: full && opt.usage ? usageAccounts(now) : undefined, // the usage screen's accounts
     pairing: pairsPending(), // the glasses app asking to connect, waiting on you
     voice: !!openAIKey(), // an OpenAI key is set: the page offers voice
@@ -6404,6 +6425,33 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--dim);font-size:12px;li
 .tbar{display:flex;gap:2px;width:96px;height:8px;flex:none}.tbar i{flex:1;border-radius:2px;background:#2a313b}.tbar i.d{background:var(--green)}.tbar i.n{background:var(--white)}
 .r.task .nm{font-weight:400;white-space:normal}.r.task.pending .nm{color:var(--dim)}.blk{color:var(--red);font-size:10.5px;font-weight:700;border:1px solid #5a2a28;border-radius:999px;padding:0 6px;margin-left:6px}
 .foot{color:var(--faint);font-size:11px;text-align:center;margin-top:16px}.stale{color:var(--red)}
+/* Header buttons: the compact view, starting a session. */
+h1{white-space:nowrap;min-width:0}#clock{white-space:nowrap}
+@media (max-width:440px){h1{font-size:18px}h1 img{width:26px;height:26px}.top-right{gap:7px}.hbtn{width:34px;height:34px}.hbtn svg{width:16px;height:16px}#mic{width:38px;height:38px}#clock{font-size:18px}}
+.hbtn{width:38px;height:38px;border-radius:50%;border:1px solid var(--line);background:var(--card);color:var(--text);display:grid;place-items:center;cursor:pointer;padding:0}.hbtn svg{width:18px;height:18px}.hbtn:hover{color:var(--white);border-color:#3a4658}
+#viewbtn .grid{display:none}body.compact #viewbtn .grid{display:inline}body.compact #viewbtn .list{display:none}
+/* Starting a session: which machine, which folder, what to ask. */
+.sheet{position:fixed;inset:0;z-index:35;background:#0009;display:flex;align-items:flex-end;justify-content:center;opacity:0;pointer-events:none;transition:opacity .2s}.sheet.on{opacity:1;pointer-events:auto}
+.sbox{width:100%;max-width:560px;max-height:86vh;overflow:auto;background:var(--card);border:1px solid var(--line);border-radius:18px 18px 0 0;padding:14px 16px calc(18px + env(safe-area-inset-bottom))}
+@media (min-width:700px){.sheet{align-items:center}.sbox{border-radius:18px}}
+.shead{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}.shead b{color:var(--white);font-size:16px}.shead .x{background:none;border:0;color:var(--dim);font-size:18px;cursor:pointer}
+.opts{display:grid;gap:8px}.opt{display:flex;justify-content:space-between;align-items:center;gap:10px;text-align:left;width:100%;padding:12px 14px;border-radius:12px;border:1px solid var(--line);background:#11161d;color:var(--white);font:inherit;font-size:15px;cursor:pointer}.opt small{color:var(--dim);font-size:12px}.opt:hover{border-color:#3a4658}
+.sbox .step{color:var(--dim);font-size:12px;margin:0 0 8px}.sbox textarea{width:100%;min-height:110px;resize:vertical;border-radius:12px;border:1px solid var(--line);background:#0d1117;color:var(--white);font:inherit;font-size:15px;padding:10px 12px;box-sizing:border-box}
+.sbox .go{margin-top:10px;width:100%;height:44px;border:0;border-radius:12px;color:#fff;font:inherit;font-weight:650;background:linear-gradient(135deg,#25d8fc,#0075fc 55%,#6c28fa);cursor:pointer}.sbox .go:disabled{opacity:.5}.sbox .note{margin-top:10px;font-size:13px;color:var(--dim)}.sbox .note.bad{color:var(--red)}.sbox .note.ok{color:var(--green)}
+.sbox .backlink{background:none;border:0;color:var(--blue);font:inherit;font-size:13px;cursor:pointer;padding:0;margin-bottom:8px}
+/* The focus view: one session, everything open, with its own screen. */
+.focus{position:fixed;inset:0;z-index:30;background:var(--bg);overflow:auto;opacity:0;pointer-events:none;transition:opacity .15s;padding:calc(env(safe-area-inset-top) + 12px) max(12px,env(safe-area-inset-right)) calc(24px + env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left))}.focus.on{opacity:1;pointer-events:auto}
+.fhead{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:12px;padding:6px 0 10px;background:var(--bg)}.fhead .back{background:none;border:1px solid var(--line);border-radius:10px;color:var(--text);font:inherit;padding:6px 10px;cursor:pointer}#fname{color:var(--white);font-weight:650}
+.fbody{max-width:1200px;margin:0 auto;display:grid;gap:14px}@media (min-width:1100px){.fbody{grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:start}}
+#fcard .card{margin:0}#fcard .card .log{max-height:none}
+.fscreen{background:#05070b;border:1px solid var(--line);border-radius:14px;padding:10px 12px}.fsh{display:flex;justify-content:space-between;color:var(--dim);font-size:12px;margin-bottom:6px}.fsh b{color:var(--white)}
+#fscreen{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;color:#c6cdd7;max-height:70vh;overflow:auto}
+/* Compact: a line a session. */
+.crow{display:grid;grid-template-columns:10px minmax(0,1.3fr) minmax(0,2fr) auto;gap:6px 12px;align-items:center;padding:9px 12px;border:1px solid var(--line);border-left:4px solid var(--c);border-radius:12px;background:var(--card);margin-bottom:6px;cursor:pointer}
+.crow:hover{border-color:#3a4658}.crow .dot{width:8px;height:8px;border-radius:50%;background:var(--c)}.crow .rn{min-width:0}.crow .rn b{display:block;color:var(--white);font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.crow .rn small{display:block;color:var(--dim);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.crow .rs{color:var(--text);font-size:13px;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.crow.needs .rs{color:var(--amber);font-weight:600}.crow .rt{color:var(--dim);font-size:12px;white-space:nowrap;text-align:right}
+@media (max-width:700px){.crow{grid-template-columns:10px minmax(0,1fr) auto}.crow .rs{grid-column:2/4;grid-row:2}}
+@media (min-width:1100px){body.compact #cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(640px,1fr));gap:0 12px}body.compact #cards>:not(.crow){grid-column:1/-1}}
 /* The fleet's pulse: tool calls across every machine, a bar a minute for the last hour, as the CLI's header draws it. */
 .beat{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:10px 14px 9px;margin:0 0 12px}.beat:empty{display:none}
 .beat .ph{display:flex;justify-content:space-between;align-items:baseline;gap:10px;font-size:12px;color:var(--dim)}.beat .ph b{color:var(--white);font-size:14px;font-weight:650}.beat .ph em{font-style:normal;color:var(--text)}
@@ -6505,12 +6553,14 @@ details.tasks[open]>summary .sub,details.chat[open]>summary .sub{display:none}
   };
 })();
 </script>
-<header><h1><img src="/icon-192.png" alt="">Claude Fleet</h1><span class="top-right"><button id="mic" hidden aria-label="Talk to Fleet"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3.5"/></svg></button><span id="clock"></span></span></header>
+<header><h1><img src="/icon-192.png" alt="">Claude Fleet</h1><span class="top-right"><button id="viewbtn" class="hbtn" aria-label="Compact view" title="Compact view"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path class="list" d="M4 6h16M4 12h16M4 18h16"/><g class="grid"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></g></svg></button><button id="newbtn" class="hbtn" aria-label="Start a session" title="Start a session"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button><button id="mic" hidden aria-label="Talk to Fleet"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3.5"/></svg></button><span id="clock"></span></span></header>
 <div id="voice" aria-hidden="true"><div class="vtop"><b><img src="/icon-192.png" alt="">Fleet</b><div class="vpick"><button id="vpick" aria-haspopup="listbox" aria-expanded="false" aria-label="Choose Fleet's voice"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6.5h16M4 12h16M4 17.5h16"/><g fill="currentColor" stroke="none"><circle cx="9" cy="6.5" r="2.4"/><circle cx="15.5" cy="12" r="2.4"/><circle cx="7" cy="17.5" r="2.4"/></g></svg></button><div class="vlist" id="vlist" role="listbox" hidden></div></div></div>
 <template id="vicons"><svg class="play" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l13-7.5z"/></svg><svg class="stop" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></template>
 <div class="stage"><canvas class="orbs" id="orbs" aria-hidden="true"></canvas><div class="vstate" id="vstate"></div><div class="vtool" id="vtool"></div></div>
 <div class="vcards" id="vcards"></div>
 <div class="controls"><button id="vmute" aria-label="Mute"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3.5"/></svg></button><button id="vend" class="end" aria-label="End"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div></div>
+<div class="sheet" id="newsheet" aria-hidden="true"><div class="sbox"><div class="shead"><b id="newtitle">Start a session</b><button class="x" id="newx" aria-label="Close">✕</button></div><div id="newbody"></div></div></div>
+<div class="focus" id="focus" aria-hidden="true"><div class="fhead"><button class="back" id="fback" aria-label="Back">‹ Back</button><span id="fname"></span></div><div class="fbody"><div id="fcard"></div><div class="fscreen"><div class="fsh"><b>Its screen</b><span id="fsat"></span></div><pre id="fscreen">…</pre></div></div></div>
 <div id="quip">Waking the fleet…</div>
 <div id="pair"></div>
 <div class="overview"><div class="beat" id="pulse"></div><div class="gauges" id="gauges"></div><div class="five" id="five"></div></div>
@@ -6796,7 +6846,9 @@ function card(s) {
   if (isDone(s) && !putAway()[s.sid]) swipeAway(c, s.sid);
   // The head: name and state, where it is; its context as a ring, split by what fills it, on the right.
   const top = el("div", "top"), left = el("div");
-  const head = el("div", "head"); head.append(el("div", "name", s.name), el("div", "state", s.word + (s.time ? " · " + s.time : ""))); left.append(head);
+  // Its name opens the focus view: everything about it, with its own screen.
+  const nm = el("div", "name", s.name); nm.style.cursor = "pointer"; nm.title = "Open " + s.name; nm.addEventListener("click", () => openFocus(s.sid));
+  const head = el("div", "head"); head.append(nm, el("div", "state", s.word + (s.time ? " · " + s.time : ""))); left.append(head);
   if (s.place) left.append(el("div", "place", s.place));
   top.append(left);
   if (s.ctx) {
@@ -6976,7 +7028,7 @@ function apply(text, force) {
   const cards = document.getElementById("cards");
   for (const det of cards.querySelectorAll("details")) open.set(det.closest(".card")?.dataset.sid + det.className, det.open);
   if (swiping || (!force && Date.now() < touchedUntil)) return void (lastText = ""); // nor under a card being swiped, or a finger scrolling
-  const build = (s) => { const c = card(s); c.dataset.sid = s.sid; for (const det of c.querySelectorAll("details")) { const k = s.sid + det.className; if (open.has(k)) det.open = open.get(k); } return c; };
+  const build = (s) => { const c = compactView ? compactRow(s) : card(s); c.dataset.sid = s.sid; for (const det of c.querySelectorAll("details")) { const k = s.sid + det.className; if (open.has(k)) det.open = open.get(k); } return c; };
   // Finished sessions swiped away stay away (on this phone) until they start again; a button at the bottom shows them.
   const away = putAway();
   for (const sid of Object.keys(away)) { const s = d.sessions.find((x) => x.sid === sid); if (!s || !isDone(s)) delete away[sid]; }
@@ -7013,6 +7065,7 @@ function apply(text, force) {
   next.forEach((n, i) => { if (cards.children[i] !== n) cards.insertBefore(n, cards.children[i] || null); });
   settleLogs();
   layoutCards();
+  renderFocus();
   document.getElementById("clock").textContent = new Date(d.now).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   document.getElementById("foot").textContent = (d.hidden ? d.hidden + " idle or finished not shown · " : "") + (linkDown ? "reconnecting…" : "live");
   document.getElementById("mic").hidden = !d.voice;
@@ -7368,7 +7421,7 @@ const wide = matchMedia("(min-width:1100px)");
 let layoutAsked = 0;
 function layoutCards() {
   const box = $("cards"), items = [...box.children];
-  if (!wide.matches) {
+  if (!wide.matches || compactView) {
     if (box.classList.contains("masonry")) { box.classList.remove("masonry"); box.style.height = ""; for (const c of items) c.style.left = c.style.top = c.style.width = ""; }
     return;
   }
@@ -7396,6 +7449,106 @@ const sized = new ResizeObserver(relayout);
 new MutationObserver(() => { for (const c of $("cards").children) sized.observe(c); relayout(); }).observe($("cards"), { childList: true });
 addEventListener("resize", relayout);
 wide.addEventListener("change", relayout);
+// ── Compact: a line a session, kept on this device ──
+let compactView = false;
+try { compactView = localStorage.getItem("fleet-view") === "compact"; } catch {}
+document.body.classList.toggle("compact", compactView);
+function compactRow(s) {
+  const r = el("div", "crow" + (s.state === "needs" ? " needs" : "")); r.style.setProperty("--c", s.color);
+  const n = el("div", "rn"); n.append(el("b", "", s.name), el("small", "", s.place || ""));
+  const doing = (s.sub && s.sub.text) || s.word;
+  const tail = [s.word + (s.time ? " · " + s.time : ""), s.ctx ? s.ctx.pct + "%" : ""].filter(Boolean).join(" · ");
+  r.append(el("span", "dot"), n, el("div", "rs", doing), el("div", "rt", tail));
+  r.title = "Open " + s.name;
+  r.addEventListener("click", () => openFocus(s.sid));
+  return r;
+}
+$("viewbtn").addEventListener("click", () => {
+  compactView = !compactView;
+  try { localStorage.setItem("fleet-view", compactView ? "compact" : "cards"); } catch {}
+  document.body.classList.toggle("compact", compactView);
+  $("viewbtn").setAttribute("aria-label", compactView ? "Cards view" : "Compact view"); $("viewbtn").title = $("viewbtn").getAttribute("aria-label");
+  if (latestText) apply(latestText, true);
+});
+
+// ── The focus view: one session with everything open, and what its own terminal shows ──
+let focusSid = null, focusTimer = 0;
+const sessionNow = (sid) => (fleetData().sessions || []).find((x) => x.sid === sid);
+function renderFocus() {
+  if (!focusSid) return;
+  const s = sessionNow(focusSid), box = $("fcard");
+  if (!s) { $("fname").textContent = "That session has gone"; return; }
+  $("fname").textContent = s.name;
+  if (box.contains(document.activeElement) && document.activeElement.tagName === "TEXTAREA") return; // never under your typing
+  const was = new Map([...box.querySelectorAll("details")].map((d) => [d.className, d.open]));
+  const c = card(s); c.dataset.sid = s.sid;
+  for (const d of c.querySelectorAll("details")) d.open = was.has(d.className) ? was.get(d.className) : true;
+  box.replaceChildren(c);
+}
+async function readScreen() {
+  if (!focusSid) return;
+  const r = await fleetPost("api/screen", { sid: focusSid });
+  if (!focusSid) return;
+  $("fscreen").textContent = r.ok ? r.screen || "(empty)" : "Can't see its screen: " + (r.error || "unknown");
+  $("fsat").textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+function openFocus(sid) {
+  focusSid = sid;
+  $("focus").classList.add("on"); $("focus").setAttribute("aria-hidden", "false");
+  $("fcard").replaceChildren(); $("fscreen").textContent = "reading its screen…";
+  renderFocus(); readScreen();
+  clearInterval(focusTimer); focusTimer = setInterval(readScreen, 4000);
+}
+function closeFocus() {
+  focusSid = null; clearInterval(focusTimer);
+  $("focus").classList.remove("on"); $("focus").setAttribute("aria-hidden", "true");
+}
+$("fback").addEventListener("click", closeFocus);
+addEventListener("keydown", (e) => { if (e.key === "Escape") { if (focusSid) closeFocus(); else if ($("newsheet").classList.contains("on")) closeNew(); } });
+
+// ── Starting a session: which machine (asked first), which folder, what to ask ──
+let newPick = {};
+function closeNew() { $("newsheet").classList.remove("on"); $("newsheet").setAttribute("aria-hidden", "true"); }
+function newStep() {
+  const body = $("newbody"), places = fleetData().places || [];
+  const hosts = [...new Set(places.map((p) => p.host))];
+  const opt = (label, small, go) => { const b = el("button", "opt"); b.type = "button"; b.append(el("span", "", label), el("small", "", small)); b.addEventListener("click", go); return b; };
+  const back = (to) => { const b = el("button", "backlink", "‹ " + to); b.type = "button"; b.addEventListener("click", () => { if (to === "Machines") newPick = {}; else newPick.cwd = undefined; newStep(); }); return b; };
+  if (!places.length) return body.replaceChildren(el("div", "note", "Nothing to start in yet: fleet offers the folders your sessions run in."));
+  if (!newPick.host) {
+    $("newtitle").textContent = "Start a session";
+    const grid = el("div", "opts");
+    for (const h of hosts) grid.append(opt(h, places.filter((p) => p.host === h).length + " folders", () => { newPick = { host: h }; newStep(); }));
+    return body.replaceChildren(el("div", "step", "Which machine?"), grid);
+  }
+  if (!newPick.cwd) {
+    $("newtitle").textContent = "On " + newPick.host;
+    const grid = el("div", "opts");
+    for (const p of places.filter((x) => x.host === newPick.host)) grid.append(opt(p.place, p.cwd.replace(/^\\/Users\\/[^/]+/, "~"), () => { newPick.cwd = p.cwd; newPick.place = p.place; newStep(); }));
+    return body.replaceChildren(...(hosts.length > 1 ? [back("Machines")] : []), el("div", "step", "Which folder?"), grid);
+  }
+  $("newtitle").textContent = "In " + newPick.place;
+  const ta = el("textarea"); ta.placeholder = "What should it do?";
+  const go = el("button", "go", "Start"); go.type = "button";
+  const note = el("div", "note", "On " + newPick.host + ", in " + newPick.cwd.replace(/^\\/Users\\/[^/]+/, "~"));
+  go.addEventListener("click", async () => {
+    const prompt = ta.value.trim(); if (!prompt) return ta.focus();
+    go.disabled = true; note.className = "note"; note.textContent = "Starting…";
+    const r = await fleetPost("api/new", { host: newPick.host, cwd: newPick.cwd, prompt });
+    if (r.ok) { note.className = "note ok"; note.textContent = "Started" + (r.id ? " (" + r.id + ")" : "") + " on " + newPick.host + ": it shows here in a moment."; setTimeout(closeNew, 1800); }
+    else { note.className = "note bad"; note.textContent = "Not started: " + (r.error || "unknown"); go.disabled = false; }
+  });
+  body.replaceChildren(back("Folders"), el("div", "step", "What should it do?"), ta, go, note);
+  setTimeout(() => ta.focus(), 50);
+}
+$("newbtn").addEventListener("click", () => {
+  const hosts = [...new Set((fleetData().places || []).map((p) => p.host))];
+  newPick = hosts.length === 1 ? { host: hosts[0] } : {};
+  newStep();
+  $("newsheet").classList.add("on"); $("newsheet").setAttribute("aria-hidden", "false");
+});
+$("newx").addEventListener("click", closeNew);
+$("newsheet").addEventListener("click", (e) => { if (e.target === $("newsheet")) closeNew(); });
 $("mic").addEventListener("click", openVoice);
 $("vend").addEventListener("click", () => closeVoice());
 $("vmute").addEventListener("click", () => {
@@ -8401,7 +8554,17 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
             } catch {}
             return Response.json({ ok: pairDecide(String(body.id ?? ""), body.allow === true) }, { headers });
           }
-          if (req.method === "POST" && (url.pathname === "/api/send" || url.pathname === "/api/keys" || url.pathname === "/api/choices")) {
+          if (req.method === "POST" && url.pathname === "/api/new") {
+            const origin = req.headers.get("origin");
+            if (!sameToken(url.searchParams.get("t") ?? "", token) || (origin && origin !== `${url.protocol}//${url.host}`) || !req.headers.get("content-type")?.startsWith("application/json")) return new Response("not from here", { status: 403, headers });
+            let body: { host?: unknown; cwd?: unknown; prompt?: unknown } = {};
+            try {
+              body = await req.json();
+            } catch {}
+            const r = await startFromPage(getSessions(), String(body.host ?? ""), String(body.cwd ?? ""), String(body.prompt ?? ""));
+            return Response.json(r, { status: r.ok ? 200 : 409, headers });
+          }
+          if (req.method === "POST" && (url.pathname === "/api/send" || url.pathname === "/api/keys" || url.pathname === "/api/choices" || url.pathname === "/api/screen")) {
             if (!sameToken(url.searchParams.get("t") ?? "", token)) return new Response("not without the link fleet showed you", { status: 403, headers });
             // Only the page itself may send: another site's form or script carries its own origin, or the wrong type.
             const origin = req.headers.get("origin");
@@ -8420,6 +8583,13 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
               if (typeof body.key !== "string") return Response.json({ ok: false, error: "no key" }, { status: 400, headers });
               const r = await (web.keys ?? keysToSession)(target, body.key);
               return Response.json(r, { status: r.ok ? 200 : 409, headers });
+            }
+            // The focus view: what the session's own terminal shows, as plain text.
+            if (url.pathname === "/api/screen") {
+              const r = await (web.peek ?? peekSession)(target);
+              const lines = (r.screen ?? "").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").split("\n").map((l) => l.trimEnd());
+              while (lines.length && !lines[lines.length - 1]) lines.pop();
+              return Response.json({ ok: r.ok, error: r.error, screen: lines.slice(-80).join("\n") }, { headers });
             }
             if (url.pathname === "/api/choices") {
               const r = await (web.peek ?? peekSession)(target);
