@@ -470,9 +470,20 @@ function apply(text, force) {
   for (const sid of Object.keys(away)) { const s = d.sessions.find((x) => x.sid === sid); if (!s || !isDone(s)) delete away[sid]; }
   savePutAway(away);
   const shown = d.sessions.filter((s) => !away[s.sid]), gone = d.sessions.filter((s) => away[s.sid]);
-  const list = shown.map(build);
+  // The timeline is one screen: as many cards as fit at their least, most pressing first, and the rest named on a line.
+  const fit = view === "timeline" ? timelineFit(shown.length) : shown.length;
+  const list = shown.slice(0, fit).map(build);
+  if (fit < shown.length) {
+    // Those waiting on you first, in amber, so one never hides among the rest.
+    const rest = shown.slice(fit).sort((a, b) => (b.state === "needs") - (a.state === "needs")), waiting = rest.filter((s) => s.state === "needs").length;
+    const more = el("div", "tmore"); more.append(el("b", "", "… " + rest.length + " more"));
+    if (waiting) more.append(" · ", el("em", "", waiting + " need" + (waiting === 1 ? "s" : "") + " you"));
+    more.append(": ");
+    rest.forEach((s, i) => { if (i) more.append(", "); more.append(el("span", s.state === "needs" ? "nd" : "", s.name + " (" + s.word.toLowerCase() + ")")); });
+    list.push(more);
+  }
   if (!shown.length) list.push(el("div", "empty", gone.length ? "Nothing else here: everything left has finished." : "No sessions working and nothing waiting on you."));
-  if (gone.length) {
+  if (gone.length && view !== "timeline") {
     const b = el("button", "shelf", showGone ? "Hide completed" : "Show " + gone.length + " completed"); b.type = "button";
     b.addEventListener("click", () => { showGone = !showGone; tick(); });
     list.push(b);
@@ -990,6 +1001,28 @@ function timelineScale(d) {
 const kfmt = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e4 ? Math.round(n / 1e3) + "k" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n));
 const agoText = (min) => (min >= 120 ? Math.round(min / 60) + "h" : min >= 60 ? (min / 60).toFixed(1).replace(".0", "") + "h" : Math.round(min) + "m");
 const MARKS = { "▸": "you typed to it", "⇡": "it linked a pull request", "≡": "a workflow started", "◇": "a workflow started", "✓": "a task finished" };
+// How many cards fit on the screen at their least height (what is left under the header, between the gaps), keeping a
+// line for the rest when not all do. Worked out again when that room changes size.
+const TL_MIN = () => (innerWidth < 600 ? 104 : 116), TL_GAP = 10, TL_MORE = 26;
+let tlFit = -1, tlCount = 0, tlCols = 1;
+function timelineFit(n) {
+  tlCount = n;
+  const box = $("cards"), room = box.clientHeight, min = TL_MIN();
+  // Two columns on a wide screen when one would make the cards short: each chart keeps a height worth reading.
+  tlCols = box.clientWidth >= 1400 && n > 1 && (room - (n - 1) * TL_GAP) / n < 220 ? 2 : 1;
+  const rows = (k) => Math.ceil(k / tlCols);
+  const fits = (k, more) => rows(k) * min + (rows(k) - 1) * TL_GAP + (more ? TL_MORE + TL_GAP : 0) <= room;
+  let fit = n;
+  if (room && !fits(n, false)) for (fit = 1; fit + 1 < n && fits(fit + 1, true); ) fit++;
+  box.style.setProperty("--cols", tlCols);
+  box.style.gridTemplateRows = "repeat(" + Math.max(1, rows(fit)) + ",minmax(0,1fr))" + (fit < n ? " auto" : "");
+  return (tlFit = fit);
+}
+new ResizeObserver(() => {
+  if (view !== "timeline" || !latestText) return;
+  const was = [tlFit, tlCols];
+  if (timelineFit(tlCount) !== was[0] || tlCols !== was[1]) apply(latestText, true);
+}).observe($("cards"));
 function timelineChart(s) {
   const t = s.timeline, n = t.tools.length || 1, BW = 10, H = 100, top = 84; // bars rise to 84%, leaving the legend room
   const colour = s.state === "needs" ? "#e5b544" : s.state === "stalled" ? "#f0625c" : "#61aaff";
@@ -1028,7 +1061,7 @@ function timelineChart(s) {
   for (const m of t.marks) { const g = el("span", "", m.g); g.style.left = ((m.i + 0.5) / n) * 100 + "%"; g.style.color = m.c; g.title = MARKS[m.g] || ""; marks.append(g); }
   const axis = el("div", "tax"), min = (tl.axis && tl.axis.minutes) || 30;
   for (const f of [0, 1 / 3, 2 / 3, 1]) { const a = el("span", "", f === 1 ? "now" : agoText(min * (1 - f)) + (f ? "" : " ago")); a.style.left = f * 100 + "%"; axis.append(a); }
-  const box = el("div"); box.append(wrap, marks, axis);
+  const box = el("div", "tchart"); box.append(wrap, marks, axis);
   return box;
 }
 function timelineCard(s) {
@@ -1049,24 +1082,25 @@ function timelineCard(s) {
   c.append(sub);
   if (!s.timeline) return c;
   const t = s.timeline, body = el("div", "tbody"), side = el("div", "tside");
-  const line = (...parts) => { const r = el("div"); r.append(...parts); side.append(r); return r; };
+  // One fact a row, each with its priority: a short card gives up p4 first, then p3, p2 (see the ladder in the stylesheet).
+  const line = (p, ...parts) => { const r = el("div", p); r.append(...parts); side.append(r); return r; };
   const nA = s.agents.length, nW = s.workflows.length;
   const ag = el("span", nA ? "live" : "", (nA ? "● " : "○ ") + nA + " agent" + (nA === 1 ? "" : "s"));
-  line(ag, ...(nW ? ["   ", el("span", "wf", "≡ " + nW + " workflow" + (nW === 1 ? "" : "s"))] : []));
+  line("p1", ag, ...(nW ? ["   ", el("span", "wf", "≡ " + nW + " workflow" + (nW === 1 ? "" : "s"))] : []));
   if (s.ctx) {
     const gg = el("span", "gg"), fill = el("i"); fill.style.width = s.ctx.pct + "%"; fill.style.background = tone(s.ctx.pct); gg.append(fill);
     const pct = el("b", "", s.ctx.pct + "%"); pct.style.color = tone(s.ctx.pct);
-    line(el("span", "k", "CTX"), gg, pct, " of " + s.ctx.max + (s.ctx.runway ? " · " + s.ctx.runway : ""));
+    line("p1", el("span", "k", "CTX"), gg, pct, " of " + s.ctx.max + (s.ctx.runway ? " · " + s.ctx.runway : ""));
   }
-  line(el("span", "k", "CPU"), el("b", "", t.cpu + "%"), t.mem ? " · " + t.mem : "");
+  line("p4", el("span", "k", "CPU"), el("b", "", t.cpu + "%"), t.mem ? " · " + t.mem : "");
   const tools = t.tools.reduce((a, b) => a + b, 0), out = t.out.reduce((a, b) => a + b, 0);
-  line(el("span", "k", "USE"), el("b", "", kfmt(tools)), " tool calls · ", el("b", "", kfmt(out)), " out" + (tl.axis ? " / " + agoText(tl.axis.minutes) : ""));
+  line("p3", el("span", "k", "USE"), el("b", "", kfmt(tools)), " tool calls · ", el("b", "", kfmt(out)), " out" + (tl.axis ? " / " + agoText(tl.axis.minutes) : ""));
   if (s.tasks && s.tasks.total) {
     const T = s.tasks, doing = T.open.filter((x) => x.status === "in_progress").length, n = Math.min(20, T.total), bar = el("span", "tbar");
     // One pip a task (scaled to 20 at most): done in green, in progress in white.
     const dn = Math.round((T.done / T.total) * n), dg = Math.min(n - dn, Math.ceil((doing / T.total) * n));
     for (let i = 0; i < n; i++) bar.append(el("i", i < dn ? "d" : i < dn + dg ? "n" : ""));
-    line(el("span", "k", "TASKS"), bar, el("b", "", T.done + "/" + T.total));
+    line("p2", el("span", "k", "TASKS"), bar, el("b", "", T.done + "/" + T.total));
   }
   body.append(timelineChart(s), side);
   c.append(body);

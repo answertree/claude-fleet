@@ -6472,7 +6472,7 @@ describe("the files fleet runs from", () => {
     for (const marker of ["__PAGE_CSS__", "__PAGE_JS__", "__GLASSES_JS__"]) expect(F.WEB_PAGE.includes(marker) || F.GLASSES_PAGE.includes(marker)).toBe(false);
     expect(F.WEB_PAGE).toStartWith("<!doctype html>");
     expect(F.WEB_PAGE).toContain("function timelineCard(s)"); // the script, in place
-    expect(F.WEB_PAGE).toContain(".tcard{position:relative"); // the stylesheet, in place
+    expect(F.WEB_PAGE).toContain(".tcard{min-height:0;container-type:size"); // the stylesheet, in place
     expect(F.GLASSES_PAGE).toContain('<script type="module">\n');
   });
   test("a change to any of them, the pages too, is a new fleet: its build, the service's restart, the window's notice", () => {
