@@ -354,7 +354,7 @@ const shapeOf = (n) => n.nodeType === 3 ? "#" : n.nodeType !== 1 ? "?" : n.tagNa
 function patch(a, b) {
   if (a.nodeType === 3) { if (a.nodeValue !== b.nodeValue) a.nodeValue = b.nodeValue; return; }
   if (a.nodeType !== 1) return;
-  const own = (name) => a.tagName === "TEXTAREA" && name === "style"; // its height is its own, from what you typed
+  const own = (name) => (a.tagName === "TEXTAREA" || a.classList.contains("tinfo")) && name === "style"; // a text box's height is its own, from what you typed; a card's detail, whether it fits
   for (const { name, value } of [...b.attributes]) if (!own(name) && a.getAttribute(name) !== value) a.setAttribute(name, value);
   for (const { name } of [...a.attributes]) if (!own(name) && !b.hasAttribute(name)) a.removeAttribute(name);
   for (let i = 0; i < a.childNodes.length; i++) patch(a.childNodes[i], b.childNodes[i]);
@@ -1091,32 +1091,36 @@ function timelineCard(s) {
   c.title = "Open " + s.name + (isDone(s) ? " · swipe to put away" : "");
   c.addEventListener("click", tapped(() => openFocus(s.sid)));
   if (isDone(s) && !putAway()[s.sid]) { c.classList.add("done"); swipeAway(c, s.sid); }
-  // The name in letter-spaced capitals; the state, its glyph first, on the right.
+  // The head: the name in letter-spaced capitals and the state, its glyph first; where it is; what it is doing or asking
+  // (the question, your prompt ▸ or Claude's reply ◆, as the CLI's subheading). Its context as a ring on the right.
+  const head = el("div", "thead"), left = el("div", "thl");
   const th = el("div", "th"), st = el("div", "tst", (s.glyph ? s.glyph + " " : "") + s.word);
   if (s.time) st.append(el("small", "", s.time));
   th.append(el("div", "tn", s.name), st);
-  c.append(th);
-  if (s.place) c.append(el("div", "tpl", s.place));
-  // What it is doing, or asking: the question, your prompt (▸) or Claude's reply (◆), as the CLI's subheading.
+  left.append(th);
+  if (s.place) left.append(el("div", "tpl", s.place));
   const sub = el("div", "tsub");
   if (s.sub.source === "prompt") sub.append(el("span", "you", "▸ ")); else if (s.sub.source === "reply") sub.append(el("span", "cl", "◆ "));
   sub.append(s.sub.text || "");
-  c.append(sub);
+  left.append(sub);
+  head.append(left);
+  if (s.ctx) {
+    const total = s.ctx.split.reduce((n, p) => n + p.tokens, 0) || 1;
+    const parts = s.ctx.split.map((p) => ({ frac: (p.tokens / total) * (s.ctx.pct / 100), color: p.color }));
+    const box = el("div", "tring"); box.title = "Context: " + s.ctx.used + " of " + s.ctx.max + (s.ctx.runway ? ", " + s.ctx.runway : "");
+    box.append(ring(52, 6, parts.length ? parts : [{ frac: s.ctx.pct / 100, color: tone(s.ctx.pct) }], s.ctx.pct + "%"), el("div", "", "of " + s.ctx.max));
+    if (s.ctx.runway) box.append(el("div", "rw", s.ctx.runway));
+    head.append(box);
+  }
+  c.append(head);
   if (!s.timeline) return c;
+  // The chart, no taller than 64 px, with its figures beside it (under it, on a narrow card).
   const t = s.timeline, body = el("div", "tbody"), side = el("div", "tside");
   // One fact a row, each with its priority: a short card gives up p4 first, then p3, p2 (see the ladder in the stylesheet).
   const line = (p, ...parts) => { const r = el("div", p); r.append(...parts); side.append(r); return r; };
   const nA = s.agents.length, nW = s.workflows.length;
   const ag = el("span", nA ? "live" : "", (nA ? "● " : "○ ") + nA + " agent" + (nA === 1 ? "" : "s"));
   line("p1", ag, ...(nW ? ["   ", el("span", "wf", "≡ " + nW + " workflow" + (nW === 1 ? "" : "s"))] : []));
-  if (s.ctx) {
-    const gg = el("span", "gg"), fill = el("i"); fill.style.width = s.ctx.pct + "%"; fill.style.background = tone(s.ctx.pct); gg.append(fill);
-    const pct = el("b", "", s.ctx.pct + "%"); pct.style.color = tone(s.ctx.pct);
-    line("p1", el("span", "k", "CTX"), gg, pct, " of " + s.ctx.max + (s.ctx.runway ? " · " + s.ctx.runway : ""));
-  }
-  line("p4", el("span", "k", "CPU"), el("b", "", t.cpu + "%"), t.mem ? " · " + t.mem : "");
-  const tools = t.tools.reduce((a, b) => a + b, 0), out = t.out.reduce((a, b) => a + b, 0);
-  line("p3", el("span", "k", "USE"), el("b", "", kfmt(tools)), " tool calls · ", el("b", "", kfmt(out)), " out" + (tl.axis ? " / " + agoText(tl.axis.minutes) : ""));
   if (s.tasks && s.tasks.total) {
     const T = s.tasks, doing = T.open.filter((x) => x.status === "in_progress").length, n = Math.min(20, T.total), bar = el("span", "tbar");
     // One pip a task (scaled to 20 at most): done in green, in progress in white.
@@ -1124,9 +1128,55 @@ function timelineCard(s) {
     for (let i = 0; i < n; i++) bar.append(el("i", i < dn ? "d" : i < dn + dg ? "n" : ""));
     line("p2", el("span", "k", "TASKS"), bar, el("b", "", T.done + "/" + T.total));
   }
+  const tools = t.tools.reduce((a, b) => a + b, 0), out = t.out.reduce((a, b) => a + b, 0);
+  line("p3", el("span", "k", "USE"), el("b", "", kfmt(tools)), " tool calls · ", el("b", "", kfmt(out)), " out" + (tl.axis ? " / " + agoText(tl.axis.minutes) : ""));
+  line("p4", el("span", "k", "CPU"), el("b", "", t.cpu + "%"), t.mem ? " · " + t.mem : "");
   body.append(timelineChart(s), side);
   c.append(body);
+  // Under it, in whatever height the card has left (never more: the timeline is one screen), what it is doing in
+  // detail, most useful first, a line each, running down and then across in columns, cut where the room ends.
+  const info = timelineInfo(s);
+  if (info.childNodes.length) c.append(info);
   return c;
+}
+// One line of a card's detail: a glyph in its colour, the words (a tool's name in cyan), and how long, on the right.
+function tiRow(cls, glyph, colour, words, right) {
+  const r = el("div", "ti" + (cls ? " " + cls : ""));
+  const g = el("span", "g", glyph); g.style.color = colour;
+  const w = el("span", "w"); for (const x of Array.isArray(words) ? words : [words]) w.append(x);
+  r.append(g, w);
+  if (right) r.append(el("span", "rt", right));
+  return r;
+}
+// Not even a line's height left: the detail is hidden rather than shown cut. Its style is its own (patch leaves it).
+const tinfoFits = new ResizeObserver((es) => { for (const e of es) { if (!e.target.isConnected) tinfoFits.unobserve(e.target); else e.target.style.visibility = e.contentRect.height < 19 ? "hidden" : ""; } });
+function timelineInfo(s) {
+  const box = el("div", "tinfo"), R = s.roster || { workflows: [], agents: [] };
+  tinfoFits.observe(box);
+  const doing = (a) => (a.tool ? [el("span", "tool", a.tool), " " + (a.doing || "")] : [a.doing || ""]);
+  const agent = (a, cls) => { const g = GLYPH[a.state] || GLYPH.quiet; return tiRow(cls, g[0], g[1], [el("b", "", a.label), " · ", ...doing(a)], a.ago); };
+  if (s.fails) box.append(tiRow("bad", "✗", "#f0625c", [el("b", "", s.fails.n + " failed"), " · " + s.fails.last], s.fails.ago));
+  if (R.main) box.append(agent(R.main, ""));
+  for (const w of R.workflows) {
+    // A workflow: its phases (✓ done, ◐ now, ○ next), how many of its agents are done; then each agent and what it is on.
+    const words = [el("b", "", w.name)];
+    if (w.outcome === "running") w.phases.forEach((p) => { const x = el("span", "ph " + p.state, " " + (p.state === "done" ? "✓" : p.state === "now" ? "◐" : "○") + " " + p.name); words.push(x); });
+    else words.push(" · " + (w.outcome === "completed" ? "completed" : w.status || "failed"));
+    box.append(tiRow("wfh", w.outcome === "running" ? "≡" : w.outcome === "completed" ? "✓" : "✗", w.outcome === "failed" ? "#f0625c" : "#be94ff", words, w.done + "/" + w.total + " · " + w.age));
+    for (const a of w.agents) box.append(agent(a, "child"));
+    if (w.more) box.append(tiRow("child", "+", "#6b7380", w.more + " more agents"));
+  }
+  for (const a of R.agents) box.append(agent(a, ""));
+  if (s.tasks && s.tasks.open.length) {
+    const open = [...s.tasks.open.filter((t) => t.status === "in_progress"), ...s.tasks.open.filter((t) => t.status !== "in_progress")];
+    box.append(tiRow("head", "☰", "#56cdd6", [el("b", "", "Tasks"), " · " + s.tasks.done + "/" + s.tasks.total + " done"]));
+    for (const t of open) box.append(tiRow("child" + (t.status === "in_progress" ? " now" : " todo"), t.status === "in_progress" ? "◐" : "○", t.status === "in_progress" ? "#f5f7fa" : "#6b7380", [t.text, ...(t.blocked ? [el("span", "blk", "blocked")] : [])], t.since));
+  }
+  for (const p of s.prs) box.append(tiRow("", "⇡", "#c6cdd7", segs(p)));
+  for (const b of s.bg) box.append(tiRow("", "↻", "#56cdd6", b.desc, b.ago));
+  if (s.changes) box.append(tiRow("", "±", "#6b7380", segs(s.changes)));
+  if (R.finished) box.append(tiRow("", "✓", "#3e805c", R.finished + " agent" + (R.finished === 1 ? "" : "s") + " finished in the window"));
+  return box;
 }
 function compactRow(s) {
   const r = el("div", "crow" + (s.state === "needs" ? " needs" : "")); r.style.setProperty("--c", s.color);
