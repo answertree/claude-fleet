@@ -6302,7 +6302,7 @@ __STARTUP__
 <style>
 :root{--bg:#0d1117;--card:#151b23;--line:#262d37;--text:#c6cdd7;--dim:#6b7380;--faint:#3a404a;--white:#f5f7fa;--amber:#e5b544;--green:#50c878;--red:#f0625c;--cyan:#56cdd6;--purple:#be94ff;--blue:#61aaff}
 *{box-sizing:border-box;min-width:0}html,body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;font-variant-numeric:tabular-nums;-webkit-text-size-adjust:100%;overflow-x:hidden;overflow-wrap:anywhere}
-main,header,.gauges,#quip{max-width:720px;margin-left:auto;margin-right:auto}
+main,header,.overview,#quip,#pair,.foot{max-width:720px;margin-left:auto;margin-right:auto}
 body{padding:calc(env(safe-area-inset-top) + 18px) max(12px,env(safe-area-inset-right)) calc(24px + env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left))}
 header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
 h1{display:flex;align-items:center;gap:9px;font-size:21px;font-weight:700;margin:0;color:var(--white);letter-spacing:-.01em}h1 img{width:30px;height:30px;border-radius:8px}
@@ -6377,6 +6377,20 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--dim);font-size:12px;li
 .tbar{display:flex;gap:2px;width:96px;height:8px;flex:none}.tbar i{flex:1;border-radius:2px;background:#2a313b}.tbar i.d{background:var(--green)}.tbar i.n{background:var(--white)}
 .r.task .nm{font-weight:400;white-space:normal}.r.task.pending .nm{color:var(--dim)}.blk{color:var(--red);font-size:10.5px;font-weight:700;border:1px solid #5a2a28;border-radius:999px;padding:0 6px;margin-left:6px}
 .foot{color:var(--faint);font-size:11px;text-align:center;margin-top:16px}.stale{color:var(--red)}
+/* A desktop: the page uses the width. The title top left, the mic and clock top right; the gauges and the five-hour
+   forecast side by side; the cards in as many columns as fit, each wide enough to read. Phones keep one column. */
+@media (min-width:1100px){
+  body{padding:calc(env(safe-area-inset-top) + 22px) 32px 32px}
+  main,header,#quip,#pair,.overview,.foot{max-width:1840px;margin-left:auto;margin-right:auto}
+  header{margin-bottom:6px}
+  #quip{margin-bottom:12px}
+  .overview{display:grid;grid-template-columns:minmax(0,600px) minmax(0,1fr);gap:14px;align-items:stretch;margin-bottom:18px}
+  .overview .gauges,.overview .five{margin:0}.overview .five:empty{display:none}
+  .overview:has(.five:empty){grid-template-columns:minmax(0,600px)}
+  #cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(520px,1fr));gap:14px;align-items:start}
+  #cards>.card{margin-bottom:0}
+  #cards>:not(.card){grid-column:1/-1}
+}
 .confetti{position:absolute;inset:0;pointer-events:none;overflow:hidden}.confetti i{position:absolute;top:-10px;width:6px;height:10px;opacity:.9;animation:fall 2.6s linear infinite}
 @keyframes fall{to{transform:translateY(260px) rotate(540deg)}}
 .party{color:var(--amber);font-weight:700;margin-top:4px}
@@ -6454,8 +6468,7 @@ details.tasks[open]>summary .sub,details.chat[open]>summary .sub{display:none}
 <div class="controls"><button id="vmute" aria-label="Mute"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3.5"/></svg></button><button id="vend" class="end" aria-label="End"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div></div>
 <div id="quip">Waking the fleet…</div>
 <div id="pair"></div>
-<div class="gauges" id="gauges"></div>
-<div class="five" id="five"></div>
+<div class="overview"><div class="gauges" id="gauges"></div><div class="five" id="five"></div></div>
 <main id="cards"></main>
 <div class="foot" id="foot"></div>
 <script>
