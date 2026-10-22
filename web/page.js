@@ -370,7 +370,9 @@ function leaveSplash() {
 }
 // Finished cards a swipe has put away, by session, kept on this phone.
 const isDone = (s) => s.state === "justDone" || s.state === "finished";
-let showGone = false, swiping = false, touchedUntil = 0, touching = false;
+let showGone = false, swiping = false, touchedUntil = 0, touching = false, swipedAt = 0;
+// A finished session's row or card, in any view, is put away by a swipe; what opens on a tap does not open for one.
+const tapped = (fn) => () => { if (Date.now() - swipedAt > 400) fn(); };
 addEventListener("pointerdown", () => { touching = true; touchedUntil = Infinity; }, { passive: true });
 addEventListener("pointerup", () => { touching = false; touchedUntil = Date.now() + 700; }, { passive: true });
 addEventListener("pointercancel", () => { touching = false; touchedUntil = Date.now() + 700; }, { passive: true });
@@ -394,8 +396,9 @@ function swipeAway(c, sid) {
   });
   const end = () => {
     if (!locked) return reset();
+    swipedAt = Date.now();
     c.style.transition = "transform .22s ease, opacity .22s ease";
-    if (Math.abs(dx) > c.offsetWidth * 0.33) {
+    if (Math.abs(dx) > Math.min(160, c.offsetWidth * 0.33)) { // a third of the way, or 160 px on a wide row or card
       c.style.transform = "translateX(" + Math.sign(dx) * c.offsetWidth * 1.2 + "px)"; c.style.opacity = "0";
       setTimeout(() => { const a = putAway(); a[sid] = Date.now(); savePutAway(a); reset(); tick(); }, 220);
     } else { c.style.transform = ""; c.style.opacity = ""; reset(); }
@@ -504,7 +507,7 @@ function apply(text, force) {
     const b = el("button", "shelf", showGone ? "Hide completed" : "Show " + gone.length + " completed"); b.type = "button";
     b.addEventListener("click", () => { showGone = !showGone; tick(); });
     list.push(b);
-    if (showGone) for (const s of gone) { const c = build(s); c.classList.add("gone"); const pb = el("button", "putback", "Put back"); pb.type = "button"; pb.addEventListener("click", () => { const a = putAway(); delete a[s.sid]; savePutAway(a); tick(); }); c.prepend(pb); list.push(c); }
+    if (showGone) for (const s of gone) { const c = build(s); c.classList.add("gone"); const pb = el("button", "putback", "Put back"); pb.type = "button"; pb.addEventListener("click", (e) => { e.stopPropagation(); const a = putAway(); delete a[s.sid]; savePutAway(a); tick(); }); if (c.classList.contains("crow")) c.append(pb); else c.prepend(pb); list.push(c); }
   }
   // Cards are updated in place, so nothing flickers and animations run on: a card laid out as before has only its
   // words and figures changed; one laid out differently is replaced, except the one you are typing in, where only
@@ -531,7 +534,8 @@ function apply(text, force) {
   layoutCards();
   renderFocus();
   document.getElementById("clock").textContent = new Date(d.now).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  document.getElementById("foot").textContent = (d.hidden ? d.hidden + " idle or finished not shown · " : "") + (linkDown ? "reconnecting…" : "live");
+  const awayN = view === "timeline" ? d.sessions.filter((s) => putAway()[s.sid]).length : 0; // the timeline has no shelf: it says how many
+  document.getElementById("foot").textContent = (d.hidden ? d.hidden + " idle or finished not shown · " : "") + (awayN ? awayN + " put away (the other views can show them) · " : "") + (linkDown ? "reconnecting…" : "live");
   document.getElementById("mic").hidden = !d.voice;
   document.title = (d.counts.needs ? "▲" + d.counts.needs + " " : "") + "Claude Fleet";
   leaveSplash();
@@ -1084,8 +1088,9 @@ function timelineChart(s) {
 function timelineCard(s) {
   const receded = s.state === "yourTurn" || s.state === "idle" || s.state === "finished";
   const c = el("section", "tcard" + (s.state === "needs" ? " needs" : "") + (receded ? " receded" : "")); c.style.setProperty("--c", s.color);
-  c.title = "Open " + s.name;
-  c.addEventListener("click", () => openFocus(s.sid));
+  c.title = "Open " + s.name + (isDone(s) ? " · swipe to put away" : "");
+  c.addEventListener("click", tapped(() => openFocus(s.sid)));
+  if (isDone(s) && !putAway()[s.sid]) { c.classList.add("done"); swipeAway(c, s.sid); }
   // The name in letter-spaced capitals; the state, its glyph first, on the right.
   const th = el("div", "th"), st = el("div", "tst", (s.glyph ? s.glyph + " " : "") + s.word);
   if (s.time) st.append(el("small", "", s.time));
@@ -1129,8 +1134,9 @@ function compactRow(s) {
   const doing = (s.sub && s.sub.text) || s.word;
   const tail = [s.word + (s.time ? " · " + s.time : ""), s.ctx ? s.ctx.pct + "%" : ""].filter(Boolean).join(" · ");
   r.append(el("span", "dot"), n, el("div", "rs", doing), el("div", "rt", tail));
-  r.title = "Open " + s.name;
-  r.addEventListener("click", () => openFocus(s.sid));
+  r.title = "Open " + s.name + (isDone(s) ? " · swipe to put away" : "");
+  r.addEventListener("click", tapped(() => openFocus(s.sid)));
+  if (isDone(s) && !putAway()[s.sid]) { r.classList.add("done"); swipeAway(r, s.sid); }
   return r;
 }
 const narrow = matchMedia("(max-width:440px)");
