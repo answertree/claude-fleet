@@ -6148,6 +6148,12 @@ describe("the phone page's pulse and accounts", () => {
     expect([p.bars.length, F.sum(p.bars), p.bars[59], p.machines, p.bar]).toEqual([60, 3, 2, 2, "1m"]); // the call three hours ago is out of the window
     expect(F.webState([here], now, false).pulse).toBeUndefined(); // what machines send each other leaves it out
   });
+  test("an open page is told which fleet.ts made its data, and loads the new page when fleet is updated", () => {
+    expect(F.webState([], Date.now()).build).toBe(F.FLEET_BUILD);
+    expect(F.FLEET_BUILD).not.toBe("");
+    expect(F.WEB_PAGE).toContain("d.build !== pageBuild");
+    expect(F.WEB_PAGE).toContain("location.reload()");
+  });
   test("a timeline card has its tool calls and output tokens a bar each, and the weightiest mark in each bar", () => {
     const now = Date.UTC(2026, 9, 22, 12, 0, 30);
     const win = F.timeWindow(now, 30 * 60_000, F.TIMELINE_BARS); // 15 s a bar

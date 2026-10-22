@@ -6289,6 +6289,7 @@ export function webState(sessions: Session[], now: number, full = true, everythi
   const acct = opt.usage ? accountView(now) : undefined;
   return {
     now,
+    build: FLEET_BUILD, // which fleet.ts made this: an open page that was made by another reloads itself
     counts,
     five: fiveHourLine(now), // the five-hour limit's forecast, always said
     pulse: full ? pulseOf(sessions, now) : undefined, // tool calls across the fleet, as the CLI's header
@@ -7220,6 +7221,7 @@ function swipeAway(c, sid) {
   c.addEventListener("pointerup", end); c.addEventListener("pointercancel", end);
 }
 const drafts = new Map(), notes = new Map();
+let pageBuild = ""; // the build of the fleet that served this page, from its first state
 // The conversation and the box to write in are one: folded, a line with the latest message; open, the recent
 // messages in a short scroller that fades out at the top and stays at the newest unless you scroll back, what the
 // session is doing, then the answers and the box. It opens when the session asks you something, and when you send.
@@ -7270,6 +7272,10 @@ function apply(text, force) {
   if (V.pc) return void (lastText = "");
   lastText = text;
   const d = JSON.parse(text);
+  // Fleet was updated (its service restarts itself onto the new fleet.ts): this page is the old one, so it loads the new.
+  // Never over something you are writing: then it waits for the next change after the text is sent or cleared.
+  if (d.build && pageBuild && d.build !== pageBuild && ![...document.querySelectorAll("textarea")].some((t) => t.value.trim())) return void location.reload();
+  pageBuild = pageBuild || d.build;
   const q = document.getElementById("quip"); q.replaceChildren(); quip(d).forEach(([text, cls], i) => { if (i) q.append(" · "); q.append(el("span", cls || "", text)); });
   // The gauges as rings: the five-hour and weekly limits (with when each resets), this machine's CPU and memory.
   const g = document.getElementById("gauges");
