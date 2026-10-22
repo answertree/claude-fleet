@@ -6265,6 +6265,20 @@ export async function startFromPage(sessions: Session[], host: string, cwd: stri
   const r = at.remote ? await peerCall(at, "/peer/new", { cwd, prompt }) : await (web.start ?? startSession)(cwd, prompt);
   return { ...r, host };
 }
+/**
+ * How an account's five hours end, for the closed Accounts summary: it lasts to the reset (at `pct`, the share it is on
+ * pace to have used by then), it runs out first (`at` when), or it is full (`at` when it is back). An account nobody is
+ * using lasts where it is; one too early to tell, likewise. Nothing when there is no five-hour figure to go on.
+ */
+export function fiveOutlook(f: FiveHour | undefined, v: AccountView): { kind: "lasts" | "out" | "full"; pct: number; at?: string } | undefined {
+  const l = v.kind === "none" ? undefined : v.limits.find((x) => x.windowMs === 5 * 3600_000);
+  if (!l) return undefined;
+  const pct = Math.round(l.pct);
+  if (f?.kind === "full" || pct >= 100) return { kind: "full", pct: 100, at: f?.resetAt };
+  if (f?.kind === "out" && v.kind === "current") return { kind: "out", pct: 100, at: f.outAt };
+  if (f?.kind === "lasts" && f.by !== undefined) return { kind: "lasts", pct: Math.max(pct, f.by) };
+  return { kind: "lasts", pct };
+}
 /** The usage screen (key u) for the phone page: your accounts in order, the machines on each, both limits and the forecast. */
 export function usageAccounts(now: number) {
   return accountLines(now).map((l) => {
@@ -6277,7 +6291,7 @@ export function usageAccounts(now: number) {
       return { label, pct: Math.round(x.pct), tick: x.tick, text: x.fullIn && v.kind === "current" ? fullInText(x.fullIn / 60_000) : x.resetsAt ? resetText(x.resetsAt, now, "short") : "", full: !!x.fullIn && v.kind === "current" };
     });
     const forms = l.forecast && v.kind !== "stale" ? fiveHourForms(l.forecast) : [];
-    return { name: l.name, email: l.email, machines: l.machines, unlisted: !!l.unlisted, stale: v.kind === "stale", status, limits, forecast: forms.length ? { kind: l.forecast!.kind, text: forms[0].map(([t]) => t).join("") } : undefined };
+    return { name: l.name, email: l.email, machines: l.machines, unlisted: !!l.unlisted, stale: v.kind === "stale", status, limits, forecast: forms.length ? { kind: l.forecast!.kind, text: forms[0].map(([t]) => t).join("") } : undefined, five: fiveOutlook(l.forecast, v) };
   });
 }
 export function webState(sessions: Session[], now: number, full = true, everything = false) {

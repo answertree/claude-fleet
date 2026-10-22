@@ -6481,3 +6481,17 @@ describe("the files fleet runs from", () => {
     expect(files.some((f) => f.endsWith(".test.ts") || f === "demo.ts")).toBe(false);
   });
 });
+
+describe("the closed Accounts summary", () => {
+  const view = (pct: number, kind = "current") => ({ kind, limits: [{ key: "five_hour", label: "5h", windowMs: 5 * 3600_000, pct, resetsAt: 0 }], asOf: 0, reason: "", remedy: "", nextTry: 0, busy: false }) as any;
+  test("each account's five hours: lasting at the share it is on pace for, running out, full, or where it is when nobody uses it", () => {
+    expect(F.fiveOutlook({ text: "", urgent: false, kind: "lasts", by: 62 }, view(40))).toEqual({ kind: "lasts", pct: 62 });
+    expect(F.fiveOutlook({ text: "", urgent: true, kind: "out", outAt: "14:20" }, view(70))).toEqual({ kind: "out", pct: 100, at: "14:20" });
+    expect(F.fiveOutlook({ text: "", urgent: true, kind: "full", resetAt: "16:00" }, view(100))).toEqual({ kind: "full", pct: 100, at: "16:00" });
+    expect(F.fiveOutlook({ text: "", urgent: false, kind: "steady" }, view(12))).toEqual({ kind: "lasts", pct: 12 });
+    expect(F.fiveOutlook(undefined, view(35))).toEqual({ kind: "lasts", pct: 35 }); // in nobody's hands: it stays where it is
+    expect(F.fiveOutlook({ text: "", urgent: true, kind: "out", outAt: "14:20" }, view(70, "stale"))).toEqual({ kind: "lasts", pct: 70 }); // an old reading forecasts nothing
+    expect(F.fiveOutlook(undefined, { ...view(0), kind: "none", limits: [] })).toBeUndefined();
+    expect(F.WEB_PAGE).toContain('" will all" : " will") + " last to 5h"');
+  });
+});

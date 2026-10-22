@@ -164,7 +164,7 @@ body.timeline .foot{margin-top:6px}
    limits with their pace, and how the five hours go where it is in use. */
 .usage{background:var(--card);border:1px solid var(--line);border-radius:14px;margin:0 0 16px}.usage:not(:has(.acct)){display:none}
 .usage summary{list-style:none;cursor:pointer;padding:11px 14px;display:flex;gap:8px;align-items:baseline;color:var(--white);font-size:14px}.usage summary::-webkit-details-marker{display:none}
-.usage summary::before{content:"›";color:var(--blue);display:inline-block;transition:transform .15s}.usage[open] summary::before{transform:rotate(90deg)}.usage summary span{color:var(--dim);font-size:12px}
+.usage summary::before{content:"›";color:var(--blue);display:inline-block;transition:transform .15s}.usage[open] summary::before{transform:rotate(90deg)}.usage summary span{color:var(--dim);font-size:12px}.usage summary .sc b{font-weight:650}.usage summary .sc em{font-style:normal;color:var(--red);font-weight:650}.usage[open] summary .sc,.usage:not([open]) summary .so{display:none}
 .accts{display:grid;gap:10px;padding:0 12px 12px}
 .acct{border:1px solid var(--line);border-radius:12px;padding:10px 12px;background:#11161d}.acct.idle{opacity:.72}
 .acct .ah{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px}.acct .ah b{color:var(--white);font-size:14px}.acct .ah .em{color:var(--dim);font-size:12px}.acct .ah .on{margin-left:auto;color:var(--green);font-size:12px;font-weight:650}
