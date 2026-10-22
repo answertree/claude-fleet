@@ -6466,3 +6466,18 @@ describe("the MCP server", () => {
     }
   });
 });
+
+describe("the files fleet runs from", () => {
+  test("the pages are read from web/ and put together, with nothing of their markers left", () => {
+    for (const marker of ["__PAGE_CSS__", "__PAGE_JS__", "__GLASSES_JS__"]) expect(F.WEB_PAGE.includes(marker) || F.GLASSES_PAGE.includes(marker)).toBe(false);
+    expect(F.WEB_PAGE).toStartWith("<!doctype html>");
+    expect(F.WEB_PAGE).toContain("function timelineCard(s)"); // the script, in place
+    expect(F.WEB_PAGE).toContain(".tcard{position:relative"); // the stylesheet, in place
+    expect(F.GLASSES_PAGE).toContain('<script type="module">\n');
+  });
+  test("a change to any of them, the pages too, is a new fleet: its build, the service's restart, the window's notice", () => {
+    const files = F.codeFiles();
+    expect(files).toEqual(expect.arrayContaining(["fleet.ts", "accounts.ts", "web/page.html", "web/page.css", "web/page.js", "web/glasses.html", "web/glasses.js"]));
+    expect(files.some((f) => f.endsWith(".test.ts") || f === "demo.ts")).toBe(false);
+  });
+});
