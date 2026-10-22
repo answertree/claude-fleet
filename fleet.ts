@@ -7183,12 +7183,13 @@ async function onVoiceEvent(e) {
   let m; try { m = JSON.parse(e.data); } catch { return; }
   const t = m.type || "";
   V.seen.add(t === "response.event" && m.event ? "response.event/" + m.event.type : t);
-  if (t === "session.started") vtell("Greet PB as Fleet in a few words, then the one-line headline from what you know: what, if anything, is waiting on PB, and how many sessions are working. Then stop and listen.");
+  if (t === "session.started" && V.waking) { if (V.listen) V.listen.draining = true; } // what PB said while it woke goes in first
+  else if (t === "session.started") vtell("Greet PB as Fleet in a few words, then the one-line headline from what you know: what, if anything, is waiting on PB, and how many sessions are working. Then stop and listen.");
   else if (t === "session.delegation.created") { V.deleg = true; V.busy = Date.now(); vtool("Looking into it…"); }
   // Fleet talking with nothing handed off is not thinking (the start of a call, or between sentences). Its words are
   // not shown (only the cards are), but the last few are kept for a look from the console.
-  else if (t === "session.input_transcript.delta") V.pbAt = Date.now();
-  else if (t === "session.output_transcript.delta") { V.saidAt = Date.now(); if (!V.deleg) V.busy = 0; V.log.push("Fleet: " + (m.delta || "")); V.log = V.log.slice(-400); }
+  else if (t === "session.input_transcript.delta") { V.pbAt = Date.now(); note("PB", m.delta || ""); }
+  else if (t === "session.output_transcript.delta") { V.saidAt = Date.now(); note("Fleet", m.delta || ""); if (!V.deleg) V.busy = 0; V.log.push("Fleet: " + (m.delta || "")); V.log = V.log.slice(-400); }
   else if (t === "response.event" && m.event) {
     const ev = m.event;
     V.busy = Date.now();
@@ -7293,7 +7294,10 @@ function drawOrbs(now, out, mic, mode) {
 function animate() {
   let shown = "";
   const step = (now) => {
-    if (!V.pc) return;
+    if (!V.pc && !V.idle && !V.waking) { V.raf = 0; return; }
+    if (V.idle || (V.waking && !V.pc)) { drawOrbs(now, 0, 0, "Idle"); V.raf = requestAnimationFrame(step); return; }
+    const quietFor = Date.now() - Math.max(V.heardAt || 0, V.pbAt || 0, V.saidAt || 0, V.startedAt || 0);
+    if (!V.busy && !V.waking && quietFor > IDLE_MS()) { goIdle(); V.raf = requestAnimationFrame(step); return; }
     const { out, mic, raw } = levelsNow(), at = Date.now();
     if (raw > 0.015) V.heardAt = at;
     if (V.busy && at - V.busy > 45000) V.busy = 0; // a backend that never came back
@@ -7330,28 +7334,106 @@ async function openVoice() {
     st.append(msg); vstate(""); return;
   }
   vstate("Connecting…");
+  V.turns = []; V.idleStop = false;
   try {
     V.mic = await microphone();
+    await connect(V.mic.getAudioTracks()[0], "");
+  } catch (x) { closeVoice(false); V.err = 1; vstate("Couldn't start: " + (x && x.message || x)); }
+}
+// A GPT-Live call carrying "track": the live microphone, or (waking from idle) the buffered speech first. "recap" is the
+// conversation so far, so a call that went idle carries straight on.
+async function connect(track, recap) {
+  {
     const pc = (V.pc = new RTCPeerConnection());
     const audio = new Audio(); audio.autoplay = true; audio.playsInline = true;
     pc.ontrack = (e) => { audio.srcObject = e.streams[0]; audio.play().catch(() => {}); };
-    pc.addTrack(V.mic.getTracks()[0], V.mic);
+    pc.addTrack(track, V.mic);
     V.dc = pc.createDataChannel("oai-events");
     V.dc.onmessage = onVoiceEvent;
     await pc.setLocalDescription(await pc.createOffer());
     // The whole offer, candidates and all, goes in the one request.
     await new Promise((ok) => { if (pc.iceGatheringState === "complete") return ok(); const done = () => pc.iceGatheringState === "complete" && ok(); pc.addEventListener("icegatheringstatechange", done); setTimeout(ok, 2500); });
-    const r = await fleetPost("api/voice/session", { sdp: pc.localDescription.sdp, voice: chosenVoice() });
+    const r = await fleetPost("api/voice/session", { sdp: pc.localDescription.sdp, voice: chosenVoice(), recap });
     if (!r.ok) throw new Error(r.error || "no answer");
     $("vpick").setAttribute("aria-label", "Fleet's voice: " + cap(r.voice) + ". Choose another");
     await pc.setRemoteDescription({ type: "answer", sdp: r.sdp });
     V.startedAt = Date.now(); V.poll = setInterval(pollLevels, 50);
     V.busy = Date.now();
-    animate();
-  } catch (x) { closeVoice(false); V.err = 1; vstate("Couldn't start: " + (x && x.message || x)); }
+    if (!V.raf) animate();
+  }
+}
+
+// ── Idle: a minute with nobody speaking ends the call (GPT-Live bills by the second it is open), but the microphone stays
+// open. Speech wakes it: what is said from just before it started is kept, a new call starts with a recap of this one,
+// and the kept speech goes in first, then the live microphone at the next pause. The phone's audio engine is used only
+// while idle, and put away once the live microphone is back, so a call itself never runs through it.
+const IDLE_MS = () => window.__fleetIdleMs || 60000;
+const recapOf = () => (V.turns || []).map((t) => t.who + ": " + t.text.trim()).filter((l) => l.length > 6).join(" / ").slice(-6000);
+function note(who, delta) {
+  const turns = (V.turns = V.turns || []);
+  const last = turns[turns.length - 1];
+  if (last && last.who === who) last.text += delta; else turns.push({ who, text: delta });
+  if (turns.length > 60) turns.shift();
+}
+function goIdle() {
+  V.idle = true; V.idleRecap = recapOf();
+  if (V.dc && V.dc.readyState === "open") vsend({ type: "session.close", event_id: "idle" });
+  if (V.pc && V.startedAt) void fleetPost("api/voice/health", callHealth());
+  try { V.dc && V.dc.close(); } catch {} try { V.pc && V.pc.close(); } catch {}
+  clearInterval(V.poll);
+  Object.assign(V, { pc: null, dc: null, energy: {}, lvAt: {}, health: {}, startedAt: 0, busy: 0, deleg: false, heardAt: 0, saidAt: 0, pbAt: 0 });
+  V.calls.clear();
+  vstate(V.muted ? "Idle · unmute to talk" : "Idle · just talk"); vtool("");
+  listen();
+}
+// While idle: the last second of the microphone kept, and speech (a few loud frames in a row) wakes the call.
+function listen() {
+  try {
+    const ctx = (V.actx = V.actx || new (window.AudioContext || window.webkitAudioContext)());
+    void ctx.resume();
+    const src = ctx.createMediaStreamSource(V.mic), proc = ctx.createScriptProcessor(2048, 1, 1), dest = ctx.createMediaStreamDestination();
+    src.connect(proc); proc.connect(dest);
+    const L = (V.listen = { ctx, src, proc, dest, before: [], queue: [], capturing: false, draining: false, loud: 0, quiet: 0 });
+    proc.onaudioprocess = (e) => {
+      const inp = new Float32Array(e.inputBuffer.getChannelData(0));
+      let sq = 0; for (let i = 0; i < inp.length; i++) sq += inp[i] * inp[i];
+      const loud = Math.sqrt(sq / inp.length) > 0.02 && !V.muted;
+      L.loud = loud ? L.loud + 1 : 0; L.quiet = loud ? 0 : L.quiet + 1;
+      if (!L.capturing) {
+        L.before.push(inp); if (L.before.length > 24) L.before.shift(); // about a second
+        if (L.loud >= 3) { L.capturing = true; L.queue.push(...L.before); L.before = []; void wake(); }
+      } else if (!L.draining || loud) L.queue.push(inp); // once playing out, pauses are skipped so it catches up
+      const out = e.outputBuffer.getChannelData(0);
+      if (L.draining && L.queue.length) out.set(L.queue.shift()); else out.fill(0);
+      if (L.draining && !L.queue.length && L.quiet >= 8) liveAgain();
+    };
+  } catch { vstate("Idle · tap the mic to talk again"); }
+}
+async function wake() {
+  const L = V.listen; if (!L) return;
+  vstate("Waking…"); V.waking = true; V.idle = false;
+  try { await connect(L.dest.stream.getAudioTracks()[0], V.idleRecap || ""); }
+  catch (x) { V.waking = false; stopListening(); closeVoice(false); V.err = 1; vstate("Couldn't wake: " + (x && x.message || x)); }
+}
+// The kept speech has gone in and PB has paused: back to the live microphone, and the audio engine put away.
+function liveAgain() {
+  const L = V.listen; if (!L || !V.pc) return;
+  const sender = V.pc.getSenders().find((x) => x.track && x.track.kind === "audio");
+  if (sender && V.mic) void sender.replaceTrack(V.mic.getAudioTracks()[0]);
+  V.waking = false;
+  stopListening();
+}
+function stopListening() {
+  const L = V.listen; if (!L) return;
+  V.listen = null;
+  L.proc.onaudioprocess = null;
+  try { L.src.disconnect(); L.proc.disconnect(); } catch {}
+  void L.ctx.suspend();
 }
 function closeVoice(hide = true) {
-  cancelAnimationFrame(V.raf);
+  cancelAnimationFrame(V.raf); V.raf = 0;
+  stopListening(); V.idle = false; V.waking = false;
+  if (V.actx) { void V.actx.close(); V.actx = null; }
   if (V.dc && V.dc.readyState === "open") vsend({ type: "session.close", event_id: "bye" });
   try { V.dc && V.dc.close(); } catch {} try { V.pc && V.pc.close(); } catch {}
   if (V.mic) for (const t of V.mic.getTracks()) t.enabled = false; // kept, switched off, for the next call
@@ -8208,7 +8290,7 @@ function voiceSnapshot(stateBody: string) {
     return "{}";
   }
 }
-export function voiceSessionBody(sdp: string, stateBody: string, voice?: string) {
+export function voiceSessionBody(sdp: string, stateBody: string, voice?: string, recap = "") {
   return {
     session: {
       model: VOICE.model(),
@@ -8216,7 +8298,8 @@ export function voiceSessionBody(sdp: string, stateBody: string, voice?: string)
         "You are Fleet: the voice of PB's fleet of Claude Code sessions, running on PB's Macs. Call yourself Fleet, and call the person PB. Speak British English: warm, quick, a little dry, never gushing. "
         + "Keep it short: one to three sentences, then stop and listen. Say session names naturally; never read out ids, hashes or file paths. If something is waiting on PB, say that first. "
         + "Anything about the sessions as they are now, or any action, goes to your backend, which has the tools. To type into a session or press a choice, the backend first puts it on PB's screen; read the gist back in a few words and ask, and only on a clear yes have it confirmed. "
-        + "When the conversation starts, PB's sessions were: " + voiceSnapshot(stateBody),
+        + "When the conversation starts, PB's sessions were: " + voiceSnapshot(stateBody)
+        + (recap ? " This conversation went quiet for a while and has just picked up again: PB is speaking now. Do not greet; carry straight on. What was said before: " + recap.slice(-6000) : ""),
       audio: { output: { voice: pickVoice(voice) } },
       delegation: {
         type: "responses",
@@ -8381,7 +8464,7 @@ export function voiceHealthLine(b: Record<string, unknown>): string | undefined 
   return `voice call, ${seconds}s on ${phone}: packets lost ${lost ?? "?"} of ${received ?? "?"} (${pct(lost, (received ?? 0) + (lost ?? 0))}), audio concealed ${pct(n("concealed"), samples)} in ${n("concealments") ?? "?"} events (${pct(n("silentConcealed"), samples)} silent), stretched ${ms("stretched")}, squeezed ${ms("squeezed")}, jitter ${n("jitterMs") ?? "?"} ms, buffer ${n("bufferMs") ?? "?"} ms, round trip ${n("rttMs") ?? "?"} ms`;
 }
 /** Start a GPT-Live conversation for the phone's WebRTC offer, with this Mac's key: the answer for the phone. */
-async function voiceSession(sdp: string, stateBody: string, voice?: string): Promise<{ ok: boolean; sdp?: string; id?: string; model?: string; voice?: string; error?: string }> {
+async function voiceSession(sdp: string, stateBody: string, voice?: string, recap = ""): Promise<{ ok: boolean; sdp?: string; id?: string; model?: string; voice?: string; error?: string }> {
   const key = openAIKey();
   if (!key) return { ok: false, error: "no OpenAI key: put OPENAI_API_KEY in fleet's .env" };
   if (!sdp.startsWith("v=0") || sdp.length > 30_000) return { ok: false, error: "no WebRTC offer" };
@@ -8389,7 +8472,7 @@ async function voiceSession(sdp: string, stateBody: string, voice?: string): Pro
     const r = await fetch("https://api.openai.com/v1/live/sessions", {
       method: "POST",
       headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-      body: JSON.stringify(voiceSessionBody(sdp, stateBody, voice)),
+      body: JSON.stringify(voiceSessionBody(sdp, stateBody, voice, recap)),
       signal: AbortSignal.timeout(20_000),
     });
     const j: any = await r.json().catch(() => ({}));
@@ -8539,11 +8622,11 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
           if (req.method === "POST" && url.pathname === "/api/voice/session") {
             const origin = req.headers.get("origin");
             if (!sameToken(url.searchParams.get("t") ?? "", token) || (origin && origin !== `${url.protocol}//${url.host}`) || !req.headers.get("content-type")?.startsWith("application/json")) return new Response("not from here", { status: 403, headers });
-            let body: { sdp?: unknown; voice?: unknown } = {};
+            let body: { sdp?: unknown; voice?: unknown; recap?: unknown } = {};
             try {
               body = await req.json();
             } catch {}
-            return Response.json(await voiceSession(String(body.sdp ?? ""), pageState().body, typeof body.voice === "string" ? body.voice : undefined), { headers });
+            return Response.json(await voiceSession(String(body.sdp ?? ""), pageState().body, typeof body.voice === "string" ? body.voice : undefined, typeof body.recap === "string" ? safeLine(body.recap).slice(-6000) : ""), { headers });
           }
           if (req.method === "POST" && url.pathname === "/api/pair/decide") {
             const origin = req.headers.get("origin");

@@ -5388,7 +5388,17 @@ describe("key w: the phone page", () => {
     expect(line).toBe("voice call, 60s on iPhone: packets lost 6 of 3000 (0.20%), audio concealed 0.17% in 5 events (0.00% silent), stretched 200 ms, squeezed 100 ms, jitter 12 ms, buffer 80 ms, round trip 41 ms");
     expect(F.voiceHealthLine({ phone: "iPhone" })).toBeUndefined(); // no length, nothing to say
     expect(F.voiceHealthLine({ seconds: 5, phone: "<script>", lost: "lots" as any })).toContain("5s on other: packets lost ? of ?");
-    for (const tap of ["createMediaStreamSource", "new (window.AudioContext", "new AudioContext"]) expect(F.WEB_PAGE).not.toContain(tap); // the call's audio is never tapped: iPhones click when it is
+    // Fleet's voice is never tapped (iPhones click when it is): the audio engine serves only the microphone while idle.
+    expect(F.WEB_PAGE).not.toContain("createMediaStreamSource(e.streams");
+    expect(F.WEB_PAGE.match(/createMediaStreamSource\(/g)?.length).toBe(1);
+    expect(F.WEB_PAGE).toContain("createMediaStreamSource(V.mic)");
+  });
+
+  test("voice: a call that went idle starts again with a recap and no greeting", () => {
+    const fresh: any = F.voiceSessionBody("v=0", "{}");
+    expect(fresh.session.instructions).not.toContain("picked up again");
+    const again: any = F.voiceSessionBody("v=0", "{}", undefined, "PB: how is the build / Fleet: green");
+    expect(again.session.instructions).toContain("Do not greet; carry straight on. What was said before: PB: how is the build / Fleet: green");
   });
 
   test("voice picker: GPT-Live's voices, the one PB picks for the call (anything else falls back), samples trimmed and wrapped as WAV", () => {
