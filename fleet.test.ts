@@ -6348,3 +6348,115 @@ describe("the glasses' slide and dashboards", () => {
     expect(F.GLASSES_PAGE).toContain("width: 288, height: 144");
   });
 });
+
+describe("the MCP server", () => {
+  const now = Date.UTC(2026, 9, 22, 12, 0, 30);
+  const tail = () => ({ tools: [now - 20_000], tokens: new Map(), prs: new Map(), askLog: [], taskLog: new Map(), lastT: now, mtime: now } as any);
+  const session = (sid: string, name: string, cwd = "/work/shop") => ({ sid, name, cwd, startedAt: now - 60_000, mains: [tail()], agents: [], workflows: [] } as any);
+  const fleet = [session("aaaa1111-0000-4000-8000-000000000001", "Checkout flow redesign"), session("bbbb2222-0000-4000-8000-000000000002", "Flaky test hunt"), session("cccc3333-0000-4000-8000-000000000003", "Flaky docs build", "/work/docs")];
+
+  test("a session is found by its id, the start of its id, its name or words from it, and never guessed between two", () => {
+    const name = (q: string) => { const r = F.findSession(fleet, q); return r.s ? r.s.name : r.error; };
+    expect(name("aaaa1111-0000-4000-8000-000000000001")).toBe("Checkout flow redesign");
+    expect(name("bbbb2")).toBe("Flaky test hunt");
+    expect(name("checkout flow redesign")).toBe("Checkout flow redesign");
+    expect(name("checkout")).toBe("Checkout flow redesign");
+    expect(name("flaky hunt")).toBe("Flaky test hunt"); // every word, in any order
+    expect(name("flaky")).toContain("could be Flaky test hunt (bbbb2222");
+    expect(name("bbb")).toContain('no session called "bbb"'); // too short for an id's start
+    expect(name("")).toBe("say which session");
+  });
+
+  test("the tools act on the session named: typing, keys by name, the screen without its colours, its choices", async () => {
+    const sent: [string, string][] = [], pressed: [string, string][] = [];
+    F.web.send = async (s, text) => (sent.push([s.sid, text]), text === "later" ? { ok: true, queued: true } : { ok: true });
+    F.web.keys = async (s, key) => (pressed.push([s.name, key]), { ok: true });
+    F.web.peek = async () => ({ ok: true, screen: "\x1b[1mApprove?\x1b[0m\n ❯ 1. Yes   \n   2. No\n\n\n" });
+    try {
+      expect(await F.mcpCall("send_message", { session: "checkout", text: "go ahead" }, fleet, now)).toEqual({ text: "sent to Checkout flow redesign" });
+      expect((await F.mcpCall("send_message", { session: "flaky hunt", text: "later" }, fleet, now)).text).toContain("queued");
+      expect(sent).toEqual([["aaaa1111-0000-4000-8000-000000000001", "go ahead"], ["bbbb2222-0000-4000-8000-000000000002", "later"]]);
+      await F.mcpCall("press_key", { session: "checkout", key: "Enter" }, fleet, now);
+      await F.mcpCall("press_key", { session: "checkout", key: "Esc" }, fleet, now);
+      await F.mcpCall("press_key", { session: "checkout", key: "2" }, fleet, now);
+      expect(pressed.map(([, k]) => k)).toEqual(["E", "X", "2"]);
+      expect((await F.mcpCall("read_screen", { session: "checkout" }, fleet, now)).text).toBe("Approve?\n ❯ 1. Yes\n   2. No");
+      expect((await F.mcpCall("read_screen", { session: "checkout", lines: 1 }, fleet, now)).text).toBe("   2. No");
+      expect(JSON.parse((await F.mcpCall("read_choices", { session: "checkout" }, fleet, now)).text)).toEqual([{ key: "1", label: "Yes" }, { key: "2", label: "No" }]);
+      const nobody = await F.mcpCall("send_message", { session: "nobody", text: "hi" }, fleet, now);
+      expect([nobody.error, sent.length]).toEqual([true, 2]);
+    } finally {
+      delete F.web.send;
+      delete F.web.keys;
+      delete F.web.peek;
+    }
+  });
+
+  test("a session starts only in a folder where one already runs, and the fleet and a session read as words", async () => {
+    const started: [string, string][] = [];
+    F.web.start = async (cwd, prompt) => (started.push([cwd, prompt]), { ok: true, id: "new1" });
+    try {
+      expect((await F.mcpCall("start_session", { folder: "/etc", prompt: "hi" }, fleet, now)).error).toBe(true);
+      const r = await F.mcpCall("start_session", { folder: "/work/docs", prompt: "build it" }, fleet, now);
+      expect([r.error, JSON.parse(r.text).id, started]).toEqual([undefined, "new1", [["/work/docs", "build it"]]]);
+      expect(JSON.parse((await F.mcpCall("start_places", {}, fleet, now)).text).map((p: any) => p.path)).toEqual(["/work/shop", "/work/docs"]);
+    } finally {
+      delete F.web.start;
+    }
+    const all = JSON.parse((await F.mcpCall("fleet_overview", { all: true }, fleet, now)).text);
+    expect(all.sessions.map((s: any) => s.name).sort()).toEqual(["Checkout flow redesign", "Flaky docs build", "Flaky test hunt"]);
+    const one = JSON.parse((await F.mcpCall("session_detail", { session: "docs" }, fleet, now)).text);
+    expect([one.name, one.activity.toolCalls, JSON.stringify(one).includes("spark")]).toEqual(["Flaky docs build", 1, false]);
+  });
+
+  test("over HTTP: the secret as a bearer token, never from another site; JSON-RPC in, JSON out, notifications answered with 202", async () => {
+    process.env.FLEET_WEB_HOST = "127.0.0.1";
+    process.env.FLEET_WEB_PORT = "4979";
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-mcp-"));
+    process.env.FLEET_WEB_TOKEN_FILE = path.join(dir, "web-token");
+    for (const k of ["server", "url", "error"] as const) delete (F.web as any)[k];
+    const sent: string[] = [];
+    F.web.send = async (_s, text) => (sent.push(text), { ok: true });
+    const web = F.startWeb(() => fleet, () => now);
+    try {
+      const url = new URL(web.url!);
+      const token = url.searchParams.get("t")!;
+      const mcp = `${url.protocol}//${url.host}/mcp`;
+      const rpc = (body: unknown, headers: Record<string, string> = { authorization: `Bearer ${token}` }) => fetch(mcp, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...headers }, body: JSON.stringify(body) });
+      expect((await rpc({ jsonrpc: "2.0", id: 1, method: "tools/list" }, {})).status).toBe(403);
+      expect((await rpc({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { authorization: "Bearer nope" })).status).toBe(403);
+      expect((await rpc({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { authorization: `Bearer ${token}`, origin: "https://evil.example" })).status).toBe(403);
+      expect((await fetch(mcp, { headers: { authorization: `Bearer ${token}` } })).status).toBe(405);
+      const init = await (await rpc({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "bot", version: "1" } } })).json();
+      expect([init.result.protocolVersion, init.result.serverInfo.name, !!init.result.capabilities.tools]).toEqual(["2025-03-26", "claude-fleet", true]);
+      expect((await rpc({ jsonrpc: "2.0", method: "notifications/initialized" })).status).toBe(202);
+      const [list, ping] = await (await rpc([{ jsonrpc: "2.0", id: 2, method: "tools/list" }, { jsonrpc: "2.0", id: 3, method: "ping" }])).json();
+      expect(list.result.tools.map((t: any) => t.name)).toEqual(["fleet_overview", "session_detail", "usage", "read_screen", "read_choices", "send_message", "press_key", "start_places", "start_session"]);
+      expect(ping).toEqual({ jsonrpc: "2.0", id: 3, result: {} });
+      const call = await (await rpc({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "send_message", arguments: { session: "test hunt", text: "carry on" } } }, { authorization: `Bearer ${token}`, origin: `${url.protocol}//${url.host}` })).json();
+      expect([call.result.isError, call.result.content[0].text, sent]).toEqual([false, "sent to Flaky test hunt", ["carry on"]]);
+      const unknown = await (await rpc({ jsonrpc: "2.0", id: 5, method: "resources/list" })).json();
+      expect(unknown.error.code).toBe(-32601);
+      expect((await (await rpc({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "rm_rf" } })).json()).error.code).toBe(-32602);
+      expect((await fetch(mcp + `?t=${token}`, { method: "POST", headers: { "content-type": "application/json" }, body: "{" })).status).toBe(400);
+    } finally {
+      web.server?.stop();
+      delete F.web.send;
+      delete process.env.FLEET_WEB_HOST;
+      delete process.env.FLEET_WEB_PORT;
+      delete process.env.FLEET_WEB_TOKEN_FILE;
+    }
+  });
+
+  test("--mcp says where and how, and never prints the secret", () => {
+    process.env.FLEET_WEB_TOKEN_FILE = path.join(os.homedir(), ".config", "claude-fleet", "web-token");
+    try {
+      const text = F.mcpHelp();
+      expect(text).toContain('--header "Authorization: Bearer $(cat $HOME/.config/claude-fleet/web-token)"');
+      expect(text).toMatch(/http:\/\/[\d.]+:\d+\/mcp/);
+      expect(F.parseArgs(["--mcp"])).toBe("mcp");
+    } finally {
+      delete process.env.FLEET_WEB_TOKEN_FILE;
+    }
+  });
+});

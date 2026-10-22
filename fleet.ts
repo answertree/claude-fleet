@@ -71,6 +71,8 @@ Usage: bun fleet.ts [minutes] [options]
   --glyphs       print a test card of every glyph the screen uses, to check that
                  your terminal draws each one a single cell wide, and exit
   --plain-glyphs use fallbacks for glyphs some fonts lack (≡ ┿ ╌ ◇)
+  --mcp          say how to connect another bot to fleet's MCP server (it can
+                 read every session, type into one, press keys, start one)
 
 Keys: 1 2 3 view mode (3: timeline) · r open the session waiting on you (or
       the focused one) to reply · + - window · a all sessions · d finished agents
@@ -101,8 +103,9 @@ export const opt = {
 };
 
 /** Read the command line into `opt`. Returns the one-shot command it asked for, if any. */
-export function parseArgs(argv: string[]): "help" | "glyphs" | undefined {
+export function parseArgs(argv: string[]): "help" | "glyphs" | "mcp" | undefined {
   if (argv.includes("--help") || argv.includes("-h")) return "help";
+  if (argv.includes("--mcp")) return "mcp";
   setPlainGlyphs(argv.includes("--plain-glyphs"));
   if (argv.includes("--glyphs")) return "glyphs";
   const TAKES_VALUE = ["--mode", "--stall"];
@@ -6277,9 +6280,9 @@ export function usageAccounts(now: number) {
     return { name: l.name, email: l.email, machines: l.machines, unlisted: !!l.unlisted, stale: v.kind === "stale", status, limits, forecast: forms.length ? { kind: l.forecast!.kind, text: forms[0].map(([t]) => t).join("") } : undefined };
   });
 }
-export function webState(sessions: Session[], now: number, full = true) {
+export function webState(sessions: Session[], now: number, full = true, everything = false) {
   const all = buildViews(sessions, now);
-  const shown = all.filter((v) => !isHidden(v));
+  const shown = everything ? all : all.filter((v) => !isHidden(v)); // everything: the idle and finished too (the MCP server's sessions)
   const win = laneWindow(now, 150);
   const tlWin = timeWindow(now, opt.windowMin * 60_000, TIMELINE_BARS);
   const counts = fleetCounts(sessions, now);
@@ -6349,6 +6352,204 @@ export function webState(sessions: Session[], now: number, full = true) {
       };
     }),
   };
+}
+
+// ───────────────────────── the MCP server ─────────────────────────
+// Another bot (Claude Code, Claude Desktop, an agent of your own) can do what the phone page does, through the Model
+// Context Protocol: read the fleet and any session, read a session's screen and the choices on it, type into a session,
+// press a key in it, start a session. It is served beside the page, at /mcp on the same port (Streamable HTTP, each
+// answer plain JSON), on every machine's sessions, and it wants the page's secret as a bearer token: the same key, the
+// same reach. `bun fleet.ts --mcp` says how to connect.
+
+/** The protocol versions fleet speaks, newest first: a client asking for one of these gets it, any other the newest. */
+export const MCP_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
+const MCP_INSTRUCTIONS =
+  "Claude Fleet: every live Claude Code session on the user's machines. Start with fleet_overview; a session that needs the user is waiting on a question, "
+  + "which session_detail, read_screen and read_choices show in full. send_message types into a session exactly as the user would at its prompt "
+  + "(a busy session gets it when it can take it); press_key presses a numbered choice, Enter or Esc (which stops what it is doing). "
+  + "start_session starts a new session, only in a folder where one already runs (start_places lists them). Name sessions by their name, words from it, or their id.";
+const mcpTool = (name: string, description: string, properties: Record<string, unknown> = {}, required: string[] = Object.keys(properties), readOnly = true) => ({
+  name,
+  description,
+  inputSchema: { type: "object", properties, required, additionalProperties: false },
+  annotations: { readOnlyHint: readOnly, destructiveHint: false, openWorldHint: false },
+});
+const aSession = { session: { type: "string", description: "The session's name, words from it, or its id (as fleet_overview lists them)" } };
+/** What another bot can do: the phone page's reach, by name. The reading tools share their names with the voice's. */
+export const MCP_TOOLS = [
+  mcpTool("fleet_overview", "Every Claude Code session right now, on every machine: id, name, folder and branch, state (NEEDS YOU, WORKING, STALLED?, YOUR TURN, IDLE, FINISHED) and for how long, what it is doing or asking, context use, tasks, agents, workflows, pull requests and failures. With the usage limits and the machine. Use it first.", { all: { type: "boolean", description: "Also list idle and finished sessions (by default only those working or waiting)" } }, []),
+  mcpTool("session_detail", "One session in full: its recent conversation (the user's prompts and Claude's replies), open tasks, the main thread, workflows and what each agent is doing, pull requests, failures, background commands, changed files, and its activity over the window (tool calls, output tokens, when the user typed, tasks finished, workflows started).", aSession),
+  mcpTool("usage", "The Claude usage limits: five-hour and weekly, when each resets, and when the five-hour limit runs out at this pace; every account fleet knows with the machines on it; and this machine's CPU and memory."),
+  mcpTool("read_screen", "What the session's own terminal shows right now, as plain text: the way to see a question, a permission prompt or a menu exactly as it is drawn.", { ...aSession, lines: { type: "integer", minimum: 1, maximum: 200, description: "How many lines from the bottom (default 80)" } }, ["session"]),
+  mcpTool("read_choices", "The numbered choices on a waiting session's screen (its question's options), each with the key that picks it, for press_key.", aSession),
+  mcpTool("send_message", "Type a message into a session and press Enter, exactly as the user would at its prompt, on whichever machine it runs. A session that cannot take it just now (busy, mid-turn) gets it queued and delivered when it can.", { ...aSession, text: { type: "string", description: "The message, as typed (up to 4000 characters)" } }, undefined, false),
+  mcpTool("press_key", "Press a key in a session: a numbered choice (1-9, see read_choices), Enter, or Esc (which stops what it is doing).", { ...aSession, key: { type: "string", enum: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "Enter", "Esc"] } }, undefined, false),
+  mcpTool("start_places", "Where start_session can start a session: each folder a session already runs in, on each machine, newest first."),
+  mcpTool("start_session", "Start a new background Claude Code session with a first prompt, in a folder where a session already runs (see start_places), on that folder's machine.", { folder: { type: "string", description: "The folder, as start_places lists it (its short form or its full path)" }, prompt: { type: "string", description: "The first prompt" }, machine: { type: "string", description: "Which machine, when the folder is on more than one" } }, ["folder", "prompt"], false),
+];
+
+/** The session a bot means: its id, the start of its id, its name, or words from its name; never a guess between two. */
+export function findSession(sessions: Session[], asked: unknown): { s?: Session; error?: string } {
+  const q = typeof asked === "string" ? asked.trim().toLowerCase() : "";
+  if (!q) return { error: "say which session" };
+  const named = sessions.map((s) => ({ s, name: sessionTitle(s.name).toLowerCase() }));
+  const words = q.split(/\s+/);
+  const tries = [
+    named.filter((x) => x.s.sid.toLowerCase() === q),
+    named.filter((x) => x.name === q),
+    q.length >= 4 ? named.filter((x) => x.s.sid.toLowerCase().startsWith(q)) : [],
+    named.filter((x) => x.name.includes(q)),
+    named.filter((x) => words.every((w) => x.name.includes(w))),
+  ];
+  for (const hits of tries) {
+    if (hits.length === 1) return { s: hits[0].s };
+    if (hits.length > 1) return { error: `"${asked}" could be ${hits.map((x) => `${sessionTitle(x.s.name)} (${x.s.sid})`).join(", ")}: say which, by id` };
+  }
+  return { error: `no session called "${asked}"${sessions.length ? `; there are ${sessions.map((s) => sessionTitle(s.name)).join(", ")}` : ""}` };
+}
+
+const MARK_WORDS: Record<string, string> = { [ICON.you]: "you typed to it", [ICON.pr]: "it linked a pull request", [ICON.workflow]: "a workflow started", "≡": "a workflow started", [ICON.done]: "a task finished" };
+/** A session as the page has it, in words for a bot: no colours, no sparklines, coloured pieces joined into text. */
+function mcpSession(x: any, win: { start: number; end: number } | undefined, brief: boolean) {
+  const base = {
+    id: x.sid,
+    name: x.name,
+    where: x.place || undefined,
+    state: x.word,
+    for: x.time || undefined,
+    needsYou: x.state === "needs" || undefined,
+    doing: x.sub?.text || undefined,
+    context: x.ctx ? `${x.ctx.pct}% of ${x.ctx.max}${x.ctx.runway ? `, ${x.ctx.runway}` : ""}` : undefined,
+    tasks: x.tasks?.total ? `${x.tasks.done}/${x.tasks.total} done` : undefined,
+    agents: x.agents?.length ? x.agents.map((a: any) => `${a.label}: ${a.doing} (${a.ago})`) : undefined,
+    workflows: x.workflows?.length ? x.workflows.map((w: any) => `${w.name}${w.phase ? ` · ${w.phase}` : ""} · ${w.done}/${w.total} agents done`) : undefined,
+    pullRequests: x.prs?.length ? x.prs.map(segText) : undefined,
+    failures: x.fails ? `${x.fails.n} failed, last ${x.fails.ago} ago: ${x.fails.last}` : undefined,
+  };
+  if (brief) return base;
+  const t = x.timeline;
+  const bar = t && win ? (win.end - win.start) / t.tools.length : 0;
+  const strip = (v: unknown) => JSON.parse(JSON.stringify(v ?? null, (k, val) => (k === "spark" || k === "color" ? undefined : val)));
+  return {
+    ...base,
+    openTasks: x.tasks?.open?.length ? x.tasks.open : undefined,
+    backgroundCommands: x.bg?.length ? x.bg.map((b: any) => `${b.desc} (${b.ago})`) : undefined,
+    changes: x.changes ? segText(x.changes) : undefined,
+    threads: strip(x.roster),
+    activity: t && win ? {
+      window: `${Math.round((win.end - win.start) / 60_000)}m`,
+      toolCalls: sum(t.tools),
+      outputTokens: sum(t.out),
+      events: t.marks.map((m: any) => ({ at: new Date(win.start + m.i * bar).toISOString(), what: MARK_WORDS[m.g] ?? m.g })),
+      cpu: `${t.cpu}%`,
+      memory: t.mem,
+    } : undefined,
+    conversation: x.talk?.map((m: any) => ({ who: m.who === "you" ? "user" : "claude", ago: m.ago, text: m.text })),
+  };
+}
+
+type McpResult = { text: string; error?: boolean };
+const mcpJson = (v: unknown): McpResult => ({ text: JSON.stringify(v, null, 2) });
+const mcpError = (text: string): McpResult => ({ text, error: true });
+const reachText = (r: Reach, did: string): McpResult => (r.ok ? { text: r.queued ? `${did}, queued: the session is busy, and gets it as soon as it can take it` : did } : mcpError(r.error || "it did not work"));
+
+/** Carry out one tool call, for the session list as it is now. */
+export async function mcpCall(name: string, args: Record<string, any>, sessions: Session[], now: number): Promise<McpResult> {
+  const a = args && typeof args === "object" ? args : {};
+  if (name === "fleet_overview" || name === "usage" || name === "session_detail") {
+    const one = name === "session_detail" ? findSession(sessions, a.session) : undefined;
+    if (one?.error) return mcpError(one.error);
+    const d = webState(one ? [one.s!] : sessions, now, true, !!a.all || !!one);
+    if (name === "session_detail") return mcpJson(mcpSession(d.sessions[0], d.timeline, false));
+    const usage = { fiveHour: d.five?.text, limits: d.account?.limits.map((l) => `${l.label}: ${l.pct}%${l.resets ? `, ${l.resets}` : ""}`), accounts: d.accounts, machine: d.machine };
+    if (name === "usage") return mcpJson(usage);
+    return mcpJson({ counts: d.counts, hidden: d.hidden || undefined, ...usage, accounts: undefined, sessions: d.sessions.map((x) => mcpSession(x, d.timeline, true)) });
+  }
+  if (name === "start_places") return mcpJson(newPlaces(sessions).map((p) => ({ machine: p.host, folder: p.place, path: p.cwd })));
+  if (name === "start_session") {
+    const folder = String(a.folder ?? "").trim(), machine = String(a.machine ?? "").trim().toLowerCase();
+    if (!folder || typeof a.prompt !== "string" || !a.prompt.trim()) return mcpError("say which folder, and the first prompt");
+    const places = newPlaces(sessions).filter((p) => (p.cwd === folder || p.place === folder || p.cwd.endsWith("/" + folder)) && (!machine || p.host.toLowerCase() === machine));
+    if (!places.length) return mcpError(`fleet starts sessions only where one already runs, and "${folder}"${machine ? ` on ${machine}` : ""} is not one: see start_places`);
+    if (places.length > 1) return mcpError(`"${folder}" is ${places.map((p) => `${p.cwd} on ${p.host}`).join(", ")}: say which machine, or give the full path`);
+    const r = await startFromPage(sessions, places[0].host, places[0].cwd, a.prompt);
+    svcLog(`MCP: ${r.ok ? "started" : "could not start"} a session in ${places[0].place} on ${places[0].host}`);
+    return r.ok ? mcpJson({ started: true, machine: r.host, folder: places[0].place, id: r.id }) : mcpError(r.error || "it did not start");
+  }
+  const found = findSession(sessions, a.session);
+  if (!found.s) return mcpError(found.error!);
+  const s = found.s;
+  if (name === "read_screen" || name === "read_choices") {
+    const r = await (web.peek ?? peekSession)(s);
+    if (!r.ok) return mcpError(`cannot see its screen: ${r.error || "unknown"}`);
+    if (name === "read_choices") {
+      const options = screenOptions(r.screen ?? "");
+      return mcpJson(options.length ? options : "no numbered choices on its screen");
+    }
+    const lines = (r.screen ?? "").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").split("\n").map((l) => l.trimEnd());
+    while (lines.length && !lines[lines.length - 1]) lines.pop();
+    return { text: lines.slice(-Math.max(1, Math.min(200, Number(a.lines) || 80))).join("\n") || "(empty)" };
+  }
+  if (name === "send_message") {
+    if (typeof a.text !== "string" || !a.text.trim()) return mcpError("nothing to send");
+    const r = await (web.send ?? sendToSession)(s, a.text);
+    svcLog(`MCP: ${r.ok ? "typed" : "could not type"} a message into ${sessionTitle(s.name)}`);
+    return reachText(r, `sent to ${sessionTitle(s.name)}`);
+  }
+  if (name === "press_key") {
+    const key = ({ Enter: "E", Esc: "X" } as Record<string, string>)[a.key] ?? String(a.key ?? "");
+    const r = await (web.keys ?? keysToSession)(s, key);
+    svcLog(`MCP: ${r.ok ? "pressed" : "could not press"} ${a.key} in ${sessionTitle(s.name)}`);
+    return reachText(r, `pressed ${a.key} in ${sessionTitle(s.name)}`);
+  }
+  return mcpError(`no tool called ${name}`);
+}
+
+/** `--mcp`: where the MCP server is and how to connect a bot to it. The secret stays in its file: the command reads it there. */
+export function mcpHelp(): string {
+  const url = `http://${tailnetAddress() ?? "127.0.0.1"}:${Number(process.env.FLEET_WEB_PORT) || 4777}/mcp`;
+  const file = webTokenPath().replace(os.homedir(), "$HOME");
+  return [
+    `Claude Fleet's MCP server: ${url}`,
+    "",
+    "It is served while fleet runs on this machine, in a window or in the background (key i), and reaches the",
+    "sessions on all your machines. It wants the phone page's secret as a bearer token: whoever has it can type",
+    "into your sessions, so give it only to a bot you trust.",
+    "",
+    "Claude Code:",
+    `  claude mcp add --transport http fleet ${url} --header "Authorization: Bearer $(cat ${file})"`,
+    "",
+    "Anything else that speaks MCP over HTTP (Streamable HTTP): that URL, with the header",
+    `  Authorization: Bearer <the contents of ${file}>`,
+    "",
+    `Tools: ${MCP_TOOLS.map((t) => t.name).join(", ")}`,
+    "",
+  ].join("\n");
+}
+/** One JSON-RPC message to the MCP server: the answer, or nothing for a notification. */
+export async function mcpHandle(msg: any, sessions: () => Session[], now: () => number): Promise<object | undefined> {
+  if (!msg || typeof msg !== "object" || Array.isArray(msg) || msg.jsonrpc !== "2.0" || typeof msg.method !== "string") return { jsonrpc: "2.0", id: msg?.id ?? null, error: { code: -32600, message: "not a JSON-RPC 2.0 request" } };
+  const note = !("id" in msg);
+  const reply = (result: object) => ({ jsonrpc: "2.0", id: msg.id, result });
+  const fail = (code: number, message: string) => ({ jsonrpc: "2.0", id: msg.id, error: { code, message } });
+  if (msg.method === "initialize") {
+    const asked = msg.params?.protocolVersion;
+    return reply({ protocolVersion: MCP_VERSIONS.includes(asked) ? asked : MCP_VERSIONS[0], capabilities: { tools: { listChanged: false } }, serverInfo: { name: "claude-fleet", title: "Claude Fleet", version: FLEET_BUILD || "dev" }, instructions: MCP_INSTRUCTIONS });
+  }
+  if (note) return undefined; // notifications/initialized and the like: nothing to answer
+  if (msg.method === "ping") return reply({});
+  if (msg.method === "tools/list") return reply({ tools: MCP_TOOLS });
+  if (msg.method === "tools/call") {
+    const name = msg.params?.name;
+    if (!MCP_TOOLS.some((t) => t.name === name)) return fail(-32602, `no tool called ${name}`);
+    try {
+      const r = await mcpCall(name, msg.params?.arguments ?? {}, sessions(), now());
+      return reply({ content: [{ type: "text", text: r.text }], isError: !!r.error });
+    } catch (e) {
+      return reply({ content: [{ type: "text", text: `fleet failed: ${safeLine(String((e as Error)?.message ?? e)).slice(0, 200)}` }], isError: true });
+    }
+  }
+  return fail(-32601, `fleet has no method ${msg.method}`);
 }
 
 export const WEB_PAGE = `<!doctype html>
@@ -8759,6 +8960,27 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
               if (url.pathname === "/peer/peek") return Response.json(await (web.peek ?? peekSession)(target), { headers });
             }
             return new Response("not allowed", { status: 405, headers });
+          }
+          // The MCP server, for another bot: the page's secret as a bearer token (or the link's ?t=), JSON-RPC in, JSON out.
+          // A browser's request carries an origin; only the page's own may call (no other site, nor a rebound name, can).
+          if (url.pathname === "/mcp") {
+            const origin = req.headers.get("origin");
+            if (origin && origin !== `${url.protocol}//${url.host}`) return new Response("not from here", { status: 403, headers });
+            const bearer = /^Bearer\s+(\S+)\s*$/i.exec(req.headers.get("authorization") ?? "")?.[1] ?? url.searchParams.get("t") ?? "";
+            if (!sameToken(bearer, token)) return Response.json({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "fleet wants the page's secret as a bearer token: see bun fleet.ts --mcp" } }, { status: 403, headers });
+            if (req.method !== "POST") return new Response("POST JSON-RPC here", { status: 405, headers: { ...headers, allow: "POST" } });
+            if (!req.headers.get("content-type")?.startsWith("application/json")) return new Response("JSON only", { status: 415, headers });
+            let msg: any;
+            try {
+              const raw = await req.text();
+              if (raw.length > 1_000_000) return new Response("too big", { status: 413, headers });
+              msg = JSON.parse(raw);
+            } catch {
+              return Response.json({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "not JSON" } }, { status: 400, headers });
+            }
+            const answers = (await Promise.all((Array.isArray(msg) ? msg : [msg]).map((m) => mcpHandle(m, getSessions, now)))).filter(Boolean);
+            if (!answers.length) return new Response(null, { status: 202, headers }); // notifications only
+            return Response.json(Array.isArray(msg) ? answers : answers[0], { headers });
           }
           // Pairing the installed glasses app. Asking needs no secret (that is what it is for); the answer is yours to give.
           if (req.method === "POST" && (url.pathname === "/api/pair/start" || url.pathname === "/api/pair/poll")) {
@@ -12084,7 +12306,7 @@ if (import.meta.main) {
   if (process.argv[2] === "accounts") await accountsMain(process.argv.slice(3)); // never returns
   const command = parseArgs(process.argv.slice(2));
   if (command) {
-    process.stdout.write(command === "help" ? HELP : glyphCard());
+    process.stdout.write(command === "help" ? HELP : command === "mcp" ? mcpHelp() : glyphCard());
     process.exit(0);
   }
 

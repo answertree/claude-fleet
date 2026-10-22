@@ -13,6 +13,7 @@ Every live Claude Code session, on every one of your machines, on one screen: wh
 - **In the background.** Press `i` and fleet keeps all of this running with every window closed, starting when you log in. See [In the background](#in-the-background).
 - **Telegram.** Pair your own bot with `t` and fleet messages you, on every device, when a session needs you, gets stuck, or a pull request changes. Tap ↩ Reply to answer, 📺 Screen to see the session's own terminal and tap a choice on it, or ask for anything the detail view shows: `/status`, `/menu`, `/tasks`, `/prs`, `/usage`, `/screen`, `/new` to start a session, a morning digest, quiet hours and a live pinned picture of the fleet that redraws itself. See [On Telegram](#on-telegram).
 - **Your glasses.** On [Even Realities G2](https://www.evenrealities.com) glasses, fleet is one slide of every session, a dashboard for each, and an answer from the ring when one asks you something. Scan a QR code from fleet, or install it for good from your own Even Hub account. See [On your glasses](#on-your-glasses).
+- **Another bot.** Fleet is an MCP server too: Claude Code, Claude Desktop or an agent of your own can read every session, type into one, press its choices and start new ones. `bun fleet.ts --mcp` says how to connect it. See [For another bot](#for-another-bot-mcp).
 
 <p align="center">
   <img src="docs/phone.png" width="300" alt="The phone page: the limits and the machine as rings, when the five-hour limit runs out, and a session waiting on you with its question and the chat">
@@ -157,6 +158,7 @@ Every control has a key, and all but `tab` and `esc` are also buttons on the bot
 | `--stall <minutes>` | How long a thread may sit on a tool call in silence before it is marked `stalled?` (default 10; 0 turns the watch off) |
 | `--glyphs` | Print the glyph test card and exit |
 | `--plain-glyphs` | Use the fallback glyphs |
+| `--mcp` | Say how to connect another bot to fleet's MCP server, and exit (see [For another bot](#for-another-bot-mcp)) |
 | `--no-mouse` | Do not capture clicks |
 | `--once` | Print one frame and exit (what it also does when its output goes to a file or a pipe) |
 
@@ -306,6 +308,29 @@ Menus, cards, pictures and confirmations delete themselves ten minutes after you
 Setting it up: in Telegram, open @BotFather, send `/newbot` and follow it; it gives you a token. Press `t` in fleet, paste the token and press Enter (it is shown as dots, and kept in `~/.config/claude-fleet/telegram.json`, readable only by you). Fleet then shows a QR code: scan it with your phone, or open the link, and tap Start. Only the chat that opens that link is paired; the bot ignores everyone else. On the `t` screen afterwards, `s` sends a test message and `x` unpairs and forgets the token.
 
 The messages go through Telegram's servers, so they can read them. With several fleets open, one talks to the bot (Telegram allows only one reader) and another takes over when it quits.
+
+## For another bot (MCP)
+
+Another bot can do what the phone page does, through the [Model Context Protocol](https://modelcontextprotocol.io): Claude Code or Claude Desktop on another machine, or an agent of your own. Fleet serves it beside the page, at `/mcp` on the same port (Streamable HTTP, each answer plain JSON), whenever fleet runs, in a window or in the background, and it reaches the sessions on all your machines. `bun fleet.ts --mcp` prints the address and the command to connect Claude Code:
+
+```bash
+claude mcp add --transport http fleet http://100.x.y.z:4777/mcp --header "Authorization: Bearer $(cat ~/.config/claude-fleet/web-token)"
+```
+
+Its tools:
+
+| Tool | What it does |
+| --- | --- |
+| `fleet_overview` | Every session on every machine (`all` adds the idle and finished): state and for how long, what it is doing or asking, context, tasks, agents, workflows, pull requests, failures; with the usage limits and the machine |
+| `session_detail` | One session in full: its recent conversation, open tasks, threads and what each agent is doing, background commands, changed files, and its activity over the window |
+| `usage` | The five-hour and weekly limits, when the five hours run out at this pace, every account and the machines on it, the machine's CPU and memory |
+| `read_screen` | What the session's own terminal shows, as plain text |
+| `read_choices` | The numbered choices on a waiting session's screen |
+| `send_message` | Types a message into a session, as you would (queued while it is busy) |
+| `press_key` | A numbered choice, Enter, or Esc (which stops what it is doing) |
+| `start_places`, `start_session` | Starts a session with a first prompt, only in a folder where one already runs, on that folder's machine |
+
+A session is named by its name, words from it, or its id; a name that could be two is refused, never guessed. The bot needs the page's secret as a bearer token (the `?t=` of the link also works), and a request from a web page other than fleet's own is refused, so a site you visit cannot use it. Whoever has the secret can type into your sessions: give it only to a bot you trust, and delete `~/.config/claude-fleet/web-token` to change it. What a bot types, presses or starts is noted in the background service's log.
 
 ## In the background
 
