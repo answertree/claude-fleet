@@ -4688,7 +4688,7 @@ function headRows(b: Block, p: Paint): Row[] {
   const stateSegs: Seg[] = [[STATE[state].glyph + " ", tone, true], [[...STATE[state].word].join(" "), tone, true], ...(time ? ([["  ·  ", dim], [time, tone]] as Seg[]) : [])];
   const stateAt = g.figEnd - segsWidth(stateSegs) + 1;
   const limit = Math.min(g.textEnd, stateAt - 3);
-  const upper = s.name.toUpperCase();
+  const upper = sessionTitle(s.name).toUpperCase();
   const spaced = [...upper].join(" ");
   const title = cutTo(g.icon + width(spaced) - 1 <= limit ? spaced : upper, limit - g.icon + 1);
   const party = partyOn(s.sid, now);
@@ -4951,7 +4951,7 @@ export function detailView(views: View[], W: number, avail: number, now: number,
   if (more.length) {
     // Whole sessions that did not fit, in one line: "… 2 more: name, name". A waiting one is still marked.
     const r = new Row(W);
-    const names = more.flatMap((b, i): Seg[] => [...(i ? [[", ", C.dim] as Seg] : []), ...(needsYou(b) ? [[`${ICON.needs} ${b.v.s.name}`, C.amber, true] as Seg] : [[b.v.s.name, C.dim] as Seg])]);
+    const names = more.flatMap((b, i): Seg[] => [...(i ? [[", ", C.dim] as Seg] : []), ...(needsYou(b) ? [[`${ICON.needs} ${sessionTitle(b.v.s.name)}`, C.amber, true] as Seg] : [[sessionTitle(b.v.s.name), C.dim] as Seg])]);
     r.segs(g.rail, fitSegs([[`${ICON.cut} ${more.length} more: `, C.dim], ...names], g.figEnd - g.rail + 1));
     out.push(String(r));
   }
@@ -5537,9 +5537,9 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
       // Title: the name in letter-spaced capitals. The state, its glyph first, ends at the right edge and never shrinks.
       const stateText = st.word.split("").join(" ");
       const nameRoom = W - width(stateText) - 9;
-      const spaced = [...s.name.toUpperCase()].join(" ");
+      const spaced = [...sessionTitle(s.name).toUpperCase()].join(" ");
       const title = row();
-      title.put(5, fit(width(spaced) <= nameRoom ? spaced : s.name.toUpperCase(), nameRoom, "l", true).trimEnd(), quietened ? C.text : C.white, true);
+      title.put(5, fit(width(spaced) <= nameRoom ? spaced : sessionTitle(s.name).toUpperCase(), nameRoom, "l", true).trimEnd(), quietened ? C.text : C.white, true);
       title.segsr(W - 1, [[`${st.glyph} `, st.color, true], [stateText, st.color, true]]);
       out.push(title.toString());
 
@@ -5692,7 +5692,7 @@ export function render(sessions: Session[], cols: number, rows: number, now: num
       " " +
         dot +
         " " +
-        fg(quietened ? C.text : C.white, bold(fit(s.name, nameW))) +
+        fg(quietened ? C.text : C.white, bold(fit(sessionTitle(s.name), nameW))) +
         "  " +
         fg(C.dim, fit(`${s.kind || "cli"} ${s.sid.slice(0, 8)}`, idW)) +
         (whereW ? "  " + fg(C.dim, fit(where, whereW)) : "") +
@@ -6231,7 +6231,7 @@ export function webState(sessions: Session[], now: number) {
       const threads = [...s.agents, ...s.workflows.flatMap((w) => w.agents)].filter((a) => !a.done && lastWriteOf(a.tail) >= win.start);
       return {
         sid: s.sid,
-        name: s.name,
+        name: sessionTitle(s.name),
         place: [machineOf(s) ? `${machineLabel(s)} ·` : "", foldersOf(s.cwd.replace(os.homedir(), "~")).slice(-2).join("/"), branch && branch !== "HEAD" ? `@ ${branch}` : ""].filter(Boolean).join(" "),
         state: v.state,
         word: STATE[v.state].word,
@@ -6308,9 +6308,9 @@ header{display:flex;align-items:center;justify-content:space-between;gap:8px;mar
 h1{display:flex;align-items:center;gap:9px;font-size:21px;font-weight:700;margin:0;color:var(--white);letter-spacing:-.01em}h1 img{width:30px;height:30px;border-radius:8px}
 #clock{color:var(--white);font-size:21px;font-weight:600}
 .top-right{display:flex;align-items:center;gap:12px}
-#mic{width:42px;height:42px;border-radius:50%;border:0;padding:0;display:grid;place-items:center;cursor:pointer;color:#fff;background:radial-gradient(circle at 30% 28%,#7ee8f0 0,#4aa3ff 38%,#8a5cff 78%);box-shadow:0 0 0 1px #ffffff22,0 4px 18px #4aa3ff66,0 0 28px #8a5cff44;animation:micglow 3.2s ease-in-out infinite}
+#mic{width:42px;height:42px;border-radius:50%;border:0;padding:0;display:grid;place-items:center;cursor:pointer;color:#fff;background:radial-gradient(circle at 30% 28%,#7ee8f0 0,#4aa3ff 38%,#8a5cff 78%);box-shadow:0 0 0 1px #ffffff22,0 2px 8px #4aa3ff38;animation:micglow 3.2s ease-in-out infinite}
 #mic svg{width:20px;height:20px}#mic[hidden]{display:none}
-@keyframes micglow{50%{box-shadow:0 0 0 1px #ffffff33,0 4px 24px #4aa3ff99,0 0 40px #8a5cff77}}
+@keyframes micglow{50%{box-shadow:0 0 0 1px #ffffff2a,0 2px 12px #4aa3ff55}}
 /* Voice: a full screen with the fleet (seven orbs in the logo's colours), in the manner of ChatGPT's voice mode. Every
    part keeps its own room, so a card never slides under the buttons. */
 #voice{position:fixed;inset:0;z-index:40;display:flex;flex-direction:column;align-items:center;gap:14px;background:radial-gradient(120% 90% at 50% 40%,#0f1830 0%,#05070c 70%);padding:calc(env(safe-area-inset-top) + 18px) 20px calc(env(safe-area-inset-bottom) + 26px);opacity:0;pointer-events:none;transition:opacity .25s ease}
@@ -6387,9 +6387,9 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--dim);font-size:12px;li
   .overview{display:grid;grid-template-columns:minmax(0,600px) minmax(0,1fr);gap:14px;align-items:stretch;margin-bottom:18px}
   .overview .gauges,.overview .five{margin:0}.overview .five:empty{display:none}
   .overview:has(.five:empty){grid-template-columns:minmax(0,600px)}
-  #cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(520px,1fr));gap:14px;align-items:start}
-  #cards>.card{margin-bottom:0}
-  #cards>:not(.card){grid-column:1/-1}
+  /* Masonry: the page script packs each card into the shortest column, in order, so there are no gaps. */
+  #cards.masonry{position:relative}
+  #cards.masonry>*{position:absolute;margin:0;box-sizing:border-box}
 }
 .confetti{position:absolute;inset:0;pointer-events:none;overflow:hidden}.confetti i{position:absolute;top:-10px;width:6px;height:10px;opacity:.9;animation:fall 2.6s linear infinite}
 @keyframes fall{to{transform:translateY(260px) rotate(540deg)}}
@@ -6923,6 +6923,7 @@ function apply(text, force) {
   for (const n of [...cards.children]) if (!keep.has(n)) n.remove();
   next.forEach((n, i) => { if (cards.children[i] !== n) cards.insertBefore(n, cards.children[i] || null); });
   settleLogs();
+  layoutCards();
   document.getElementById("clock").textContent = new Date(d.now).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   document.getElementById("foot").textContent = (d.hidden ? d.hidden + " idle or finished not shown · " : "") + (linkDown ? "reconnecting…" : "live");
   document.getElementById("mic").hidden = !d.voice;
@@ -7271,6 +7272,41 @@ function chooseVoice(v) {
 $("vpick").addEventListener("click", (e) => { e.stopPropagation(); showVoices($("vlist").hidden); });
 $("vlist").addEventListener("click", (e) => e.stopPropagation());
 $("voice").addEventListener("click", () => !$("vlist").hidden && showVoices(false));
+// Masonry on a wide screen: each card, in order, goes into whichever column is shortest, so the most pressing cards
+// run along the top and nothing leaves a gap. Laid out again when a card changes size (a chat opened, a reply arrived)
+// or the window does. Cards are placed with left and top, since a swipe moves them with transform.
+const wide = matchMedia("(min-width:1100px)");
+let layoutAsked = 0;
+function layoutCards() {
+  const box = $("cards"), items = [...box.children];
+  if (!wide.matches) {
+    if (box.classList.contains("masonry")) { box.classList.remove("masonry"); box.style.height = ""; for (const c of items) c.style.left = c.style.top = c.style.width = ""; }
+    return;
+  }
+  box.classList.add("masonry");
+  const W = box.clientWidth, gap = 14, n = Math.max(1, Math.floor((W + gap) / (520 + gap))), cw = (W - gap * (n - 1)) / n;
+  const tops = new Array(n).fill(0);
+  for (const c of items) {
+    if (!c.classList.contains("card")) {
+      // Anything else (a button, a note) spans the width below everything so far.
+      const y = Math.max(...tops);
+      Object.assign(c.style, { left: "0px", top: y + "px", width: W + "px" });
+      tops.fill(y + c.offsetHeight + gap);
+      continue;
+    }
+    c.style.width = cw + "px";
+    const k = tops.indexOf(Math.min(...tops));
+    c.style.left = k * (cw + gap) + "px";
+    c.style.top = tops[k] + "px";
+    tops[k] += c.offsetHeight + gap;
+  }
+  box.style.height = Math.max(0, Math.max(...tops) - gap) + "px";
+}
+const relayout = () => { if (!layoutAsked) layoutAsked = requestAnimationFrame(() => { layoutAsked = 0; layoutCards(); }); };
+const sized = new ResizeObserver(relayout);
+new MutationObserver(() => { for (const c of $("cards").children) sized.observe(c); relayout(); }).observe($("cards"), { childList: true });
+addEventListener("resize", relayout);
+wide.addEventListener("change", relayout);
 $("mic").addEventListener("click", openVoice);
 $("vend").addEventListener("click", () => closeVoice());
 $("vmute").addEventListener("click", () => {
@@ -8568,7 +8604,7 @@ export function tgSettle(waiting: Set<string>, stuck: Set<string> = new Set()) {
   for (const x of list) if (!keep.includes(x)) void tgCall(c.token, "deleteMessage", { chat_id: c.chat, message_id: x.id });
   tgStatusWrite(keep);
 }
-const tgName = (s: Session) => (s.name || path.basename(s.cwd)) + (machineOf(s) ? ` (${machineOf(s)})` : "");
+const tgName = (s: Session) => sessionTitle(s.name || path.basename(s.cwd)) + (machineOf(s) ? ` (${machineOf(s)})` : "");
 /** The session you last wrote to from Telegram, and when: plain words follow it for half an hour. */
 let tgLastTo: { sid: string; at: number } | undefined;
 const TG_TALK_MS = 30 * 60_000;
@@ -8782,7 +8818,7 @@ export function tgOverview(now = clock()): TgView {
   const rows = [...st.sessions]
     .sort((a, b) => order.indexOf(a.state) - order.indexOf(b.state))
     .slice(0, 24)
-    .map((s) => [{ text: `${STATE_EMOJI[s.state] ?? "•"} ${s.name}${machines.length > 1 ? ` · ${tg.getSessions().find((x) => x.sid === s.sid)?.remote?.host ?? selfHost()}` : ""}`.slice(0, 60), callback_data: `s:${s.sid}` }]);
+    .map((s) => [{ text: `${STATE_EMOJI[s.state] ?? "•"} ${sessionTitle(s.name)}${machines.length > 1 ? ` · ${tg.getSessions().find((x) => x.sid === s.sid)?.remote?.host ?? selfHost()}` : ""}`.slice(0, 60), callback_data: `s:${s.sid}` }]);
   rows.push([{ text: "☰ Menu", callback_data: "v:needs" }, { text: "🖼 Picture", callback_data: "P" }, { text: "📊 Usage", callback_data: "U" }, { text: "🔄", callback_data: "L" }]);
   return { text: lines.join("\n"), markup: { inline_keyboard: rows } };
 }
@@ -9313,6 +9349,14 @@ export function machinesByAccount(): Map<string, string[]> {
 /** Whether any other machine's fleet is on the screen: only then does each session say which machine it is on. */
 export const manyMachines = () => [...peers.values()].some((p) => p.sessions.length || p.at);
 /** The machine a session is on, when there is more than one to tell apart. */
+/**
+ * A session's name as people read it: hyphens and underscores as spaces, in sentence case ("rename-dynamic-workers" is
+ * "Rename dynamic workers"). Only plain capitalised words are lowered; CI, PRs, iOS, BOND and 14effdb2 stay as written.
+ */
+export function sessionTitle(name: string): string {
+  const words = name.replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim().split(" ");
+  return words.map((w, i) => (i === 0 ? w.charAt(0).toUpperCase() + w.slice(1) : /^[A-Z][a-z]+$/.test(w) ? w.toLowerCase() : w)).join(" ");
+}
 export const machineOf = (s: Session): string | undefined => (manyMachines() ? (s.remote?.host ?? selfHost()) : undefined);
 /**
  * The machine a session is on, with how busy that machine is when it is another one ("Tom's Mac Mini (cpu 6%)"):
@@ -10450,7 +10494,7 @@ export function glassesState(sessions: Session[], now: number) {
         const said = s.talk.filter((t) => t.who === "claude").at(-1);
         return {
           sid: s.sid,
-          name: glassesSafe(s.name),
+          name: glassesSafe(sessionTitle(s.name)),
           host: full ? machineOf(full) : undefined,
           state: s.state,
           mark: GLASSES_MARK[s.state] ?? "○",

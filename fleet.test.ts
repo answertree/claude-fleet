@@ -2856,12 +2856,12 @@ describe("the detail view", () => {
       expect(p.blocks.map((b) => b.folded)).toEqual([false, false, false, true, true, true]);
       const rows = draw(six(NOW), 150, 9);
       expect(rows.length).toBe(9);
-      expect(rows[8]).toBe(" … 3 more: billing export, upgrade tooling, onboarding emails");
+      expect(rows[8]).toBe(" … 3 more: Billing export, Upgrade tooling, Onboarding emails");
       expect(rows.slice(4, 8).map((r) => r.slice(0, 4))).toEqual([" ██ ", " ██ ", " ██ ", " ██ "]); // what is left of the working ones: title and subheading, a small far card
       // Before a session folds it has given up everything but its two head rows.
       expect(plan(six(NOW), 150, 14).heights).toEqual([4, 2, 2, 2, 2, 2]);
       // Too small even for the ladder: the waiting session is the last to go, and is still named.
-      expect(draw(six(NOW), 150, 1)).toEqual([" … 6 more: ▲ checkout flow redesign, flaky test hunt, search reindex, billing export, upgrade tooling, onboarding emails"]);
+      expect(draw(six(NOW), 150, 1)).toEqual([" … 6 more: ▲ Checkout flow redesign, Flaky test hunt, Search reindex, Billing export, Upgrade tooling, Onboarding emails"]);
       expect(draw(six(NOW), 150, 0)).toEqual([]);
     });
   });
@@ -5519,7 +5519,7 @@ describe("key t: Telegram", () => {
       const promptId = 103;
       await F.tgHandle({ message: { message_id: 9, text: "yes, drop it", chat: { id: 42 }, from: { id: 7 }, reply_to_message: { message_id: promptId } } });
       expect(sent).toEqual([["s1", "yes, drop it"]]);
-      expect(calls.at(-1)![1].text).toBe("✓ sent to checkout flow");
+      expect(calls.at(-1)![1].text).toBe("✓ sent to Checkout flow");
       // A second message: plain words follow the session just written to; a reply to the receipt, or to your own message, reaches it too.
       const ackId = 100 + calls.length;
       await F.tgHandle({ message: { message_id: 11, text: "and keep the old column for a week", chat: { id: 42 }, from: { id: 7 } } });
@@ -5633,7 +5633,7 @@ describe("key t: Telegram", () => {
       calls.length = 0;
       await F.tgHandle({ callback_query: { id: "q4", data: "k:s1:1", from: { id: 7 }, message: { message_id: 90, chat: { id: 42 } } } });
       expect(pressed).toEqual([["s1", "1"]]);
-      expect(calls.find(([m]) => m === "answerCallbackQuery")![1].text).toBe("✓ pressed 1 in checkout flow");
+      expect(calls.find(([m]) => m === "answerCallbackQuery")![1].text).toBe("✓ pressed 1 in Checkout flow");
       calls.length = 0;
       await F.tgHandle({ message: { message_id: 91, text: "/new fix the refund test", chat: { id: 42 }, from: { id: 7 } } });
       const picker = calls.find(([m]) => m === "sendMessage")![1];
@@ -5718,7 +5718,7 @@ describe("key t: Telegram", () => {
     expect(words()).toEqual([]); // …and it is as it was: nothing to say
     F.prState.set(key, { at: Date.now(), state: { state: "OPEN", draft: false, pass: 4, fail: 0, pending: 0 } });
     const [[text, , , told]] = F.tgEvents([s], [], []);
-    expect(text).toBe("✅ checkout flow: #4 CI green");
+    expect(text).toBe("✅ Checkout flow: #4 CI green");
     // Said once; asked to say it again (another restart, another machine), it does not.
     expect([F.tgToldBefore(told), F.tgToldBefore(told)]).toEqual([false, true]);
     F.prState.delete(key);
@@ -5948,7 +5948,7 @@ describe("on your glasses", () => {
       expect([sdk.status, sdk.headers.get("content-type")]).toEqual([200, "text/javascript; charset=utf-8"]);
       expect(await sdk.text()).toContain("waitForEvenAppBridge");
       const data: any = await (await fetch(`${base}/api/glasses?t=${token}`)).json();
-      expect(data.sessions.map((s: any) => [s.mark, s.name, s.needs])).toEqual([["▲", "tea time", "answer: Tea or coffee?"]]);
+      expect(data.sessions.map((s: any) => [s.mark, s.name, s.needs])).toEqual([["▲", "Tea time", "answer: Tea or coffee?"]]);
       // The answer screen: the choices on the session's screen, and a tap pressing one there.
       const post = (p: string, body: unknown) => fetch(`${base}${p}?t=${token}`, { method: "POST", headers: { "content-type": "application/json", origin: base }, body: JSON.stringify(body) });
       expect(await (await post("/api/choices", { sid: "s1" })).json()).toEqual({ ok: true, options: [{ key: "1", label: "Tea" }, { key: "2", label: "Coffee" }] });
@@ -6125,6 +6125,17 @@ describe("answering a session on another machine from the terminal", () => {
     const none = await run("");
     expect([none.did, none.said]).toEqual([[], "nothing sent to far on mini"]);
     expect((await run("7", "no choices here")).did).toEqual(["send 7"]); // a number with no such choice is a message
+  });
+});
+
+describe("session titles", () => {
+  test("hyphens and underscores as spaces, in sentence case, with capitals that mean something kept", () => {
+    expect(F.sessionTitle("rename-dynamic-workers-to-code-mode")).toBe("Rename dynamic workers to code mode");
+    expect(F.sessionTitle("workflow-triggers cron watchers")).toBe("Workflow triggers cron watchers");
+    expect(F.sessionTitle("Dev and App Velocity")).toBe("Dev and app velocity");
+    expect(F.sessionTitle("fix CI for iOS PRs")).toBe("Fix CI for iOS PRs");
+    expect(F.sessionTitle("14effdb2")).toBe("14effdb2");
+    expect(F.sessionTitle("my__odd--name ")).toBe("My odd name");
   });
 });
 
