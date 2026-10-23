@@ -7689,10 +7689,11 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
           // The icon is the only thing served without the secret: phones fetch it without the link's query.
           // Even's SDK for the glasses page: public code (MIT), so it needs no secret.
           // The orbit view's code: three.js (vendor/, MIT) and the view itself (web/orbit.js). Code, not data: no secret.
-          if (url.pathname === "/three.js" || url.pathname === "/orbit.js") {
-            const file = url.pathname === "/three.js" ? path.join(import.meta.dir, "vendor", "three.module.min.js") : path.join(import.meta.dir, "web", "orbit.js");
+          const addon = /^\/three-addons\/([A-Za-z]+\.js)$/.exec(url.pathname); // three.js's bloom and the passes it needs (vendor/three-addons, MIT)
+          if (url.pathname === "/three.js" || url.pathname === "/orbit.js" || addon) {
+            const file = addon ? path.join(import.meta.dir, "vendor", "three-addons", addon[1]) : url.pathname === "/three.js" ? path.join(import.meta.dir, "vendor", "three.module.min.js") : path.join(import.meta.dir, "web", "orbit.js");
             try {
-              return new Response(fs.readFileSync(file), { headers: { ...headers, "content-type": "text/javascript; charset=utf-8", "cache-control": url.pathname === "/three.js" ? "max-age=86400" : "no-store" } });
+              return new Response(fs.readFileSync(file), { headers: { ...headers, "content-type": "text/javascript; charset=utf-8", "cache-control": url.pathname === "/three.js" || addon ? "max-age=86400" : "no-store" } });
             } catch {
               return new Response("not found", { status: 404, headers });
             }

@@ -1,24 +1,34 @@
-// The orbit view: the whole fleet as a lit, solid scene, on three.js (vendor/three.module.min.js, served at /three.js).
+// The orbit view: the whole fleet as a lit, glowing scene in Fleet's own colours, on three.js (vendor/, served at
+// /three.js) with its bloom (vendor/three-addons, at /three-addons/).
 //
-// At the centre, a monument to the five-hour limit: Claude's starburst in coral, extruded and standing, ringed by two
-// solid gauges on the floor (the five hours thick, the week thin). Round it, every session is a system of its own on a
-// pedestal: its own starburst (in its state's colour, its rays the bars of its recent activity, so it breathes as it
-// works), its context as a ring, its activity as a 3D bar chart round the rim (the newest brightest), its tasks as a
-// tower of blocks (done in sage, under way lit, to do dark), each workflow a prism with its phases as beads and its
-// agents wired to it, and the main thread and the other agents wired to the core. Inside a system its parts push each
-// other apart and spring back to what they belong to; the pedestals grow to hold them and push each other apart, those
-// waiting on you drawn in to the centre, the finished drifting out. Tool calls run along arcs into the monument as
-// pellets: you watch who is eating the five hours. Hover anything to see what it is; click a session to open it; drag
-// to turn, scroll or pinch to come closer. Motion is springs, never jumps; less of it for those who ask.
+// A navy night, a glossy floor with faint lanes and drifting dust. At the centre, a monument to the five-hour limit:
+// Fleet's starburst, each ray a step along the logo's cyan, blue and violet, standing on a plinth, ringed by glowing
+// gauges for the five hours and the week, with holographic rings turning round it. Round it, every session is a system
+// of its own on a pedestal, in its state's colour (amber waiting, red stalled, green at work, blue your turn): a pool of
+// that light under it, a ring of light turning over it; its own starburst, its rays the bars of its recent activity, so
+// it breathes as it works; its context as a ring; its activity as a 3D bar chart round the rim, graded cyan to violet by
+// height; its tasks as a tower of blocks; each workflow a violet prism with its phases as beads and its agents wired
+// to it, light running down the wires while they work. A session waiting on you lifts, beats, and sends a beacon of
+// light up into the sky. Physics keeps it all apart: a system's parts push each other off and spring back to what
+// they belong to; the pedestals grow to hold them and push each other off, those waiting on you drawn to the centre.
+// Tool calls fly into the monument as comets with tails; it flares as they land. Hover anything to see what it is;
+// click a session to open it; drag to turn, scroll or pinch to come closer. Motion is springs; less for those who ask.
 import * as THREE from "/three.js";
+import { EffectComposer } from "/three-addons/EffectComposer.js";
+import { RenderPass } from "/three-addons/RenderPass.js";
+import { UnrealBloomPass } from "/three-addons/UnrealBloomPass.js";
+import { OutputPass } from "/three-addons/OutputPass.js";
 
-// Claude's palette: warm charcoal and ivory, coral and clay; honey for waiting, rust for stalled, sage for at work.
-const P = { bg: "#1a1816", floor: "#24211e", ink: "#3a3631", ivory: "#f0eee6", oat: "#e3dacc", coral: "#d97757", clay: "#cc785c", kraft: "#d4a27f", sage: "#86b38d", honey: "#e8b04b", rust: "#e0614f", sky: "#7aa7d8", lilac: "#a99ce0", stone: "#8a867d" };
-const STATE_COLOUR = { needs: P.honey, stalled: P.rust, working: P.sage, justDone: P.sage, yourTurn: P.sky, idle: P.stone, finished: P.stone };
+// Fleet's colours: the page's navy and panels, its state colours, and the logo's gradient (cyan, blue, violet).
+const P = { bg: "#070a10", floor: "#0a0f17", panel: "#151b23", line: "#262d37", text: "#c6cdd7", white: "#f5f7fa", dim: "#6b7380", cyan: "#56cdd6", blue: "#61aaff", violet: "#be94ff", green: "#50c878", amber: "#e5b544", red: "#f0625c", done: "#3e805c", g1: "#25d8fc", g2: "#0075fc", g3: "#6c28fa" };
+const STATE_COLOUR = { needs: P.amber, stalled: P.red, working: P.green, justDone: P.green, yourTurn: P.blue, idle: P.dim, finished: P.done };
 const PULL = { needs: 1, stalled: 0.7, working: 0.55, justDone: 0.4, yourTurn: 0.35, idle: 0.14, finished: 0.1 }; // how hard each is drawn to the centre
-const AGENT_COLOUR = { active: P.sage, tool: P.ivory, quiet: P.stone, done: "#5b5852", stalled: P.rust };
+const AGENT_COLOUR = { active: P.cyan, tool: P.white, quiet: "#3d6f78", done: "#2b4a52", stalled: P.red };
+// The logo's gradient, at f from 0 to 1: cyan, blue, violet.
+const GRAD = [new THREE.Color(P.g1), new THREE.Color(P.g2), new THREE.Color(P.g3)];
+const brand = (f, out = new THREE.Color()) => (f < 0.5 ? out.copy(GRAD[0]).lerp(GRAD[1], f * 2) : out.copy(GRAD[1]).lerp(GRAD[2], (f - 0.5) * 2));
 const RAYS = 12, BARS = 24, MONUMENT = 5.2; // rays a burst, bars round a rim, the room the monument keeps
-const MAX = { rays: 12 * 64, bars: 24 * 64, tiles: 20 * 64, agents: 600, beads: 400, prisms: 160, pellets: 500, links: 1600 };
+const MAX = { rays: 12 * 64, bars: 24 * 64, tiles: 20 * 64, agents: 600, beads: 400, prisms: 160, pellets: 300, trail: 5, links: 1600, flow: 1200, hud: 14 * 64, dust: 700 };
 const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const motion = () => (still || document.body.classList.contains("calm") ? 0.3 : 1);
 const spring = (now, to, k, dt) => now + (to - now) * (1 - Math.exp(-k * dt));
@@ -37,11 +47,41 @@ function instanced(geo, mat, max, { shadow = true } = {}) {
   S.scene.add(m);
   return m;
 }
-const solid = (extra = {}) => new THREE.MeshStandardMaterial({ roughness: 0.55, metalness: 0.04, ...extra });
+const solid = (extra = {}) => new THREE.MeshStandardMaterial({ roughness: 0.45, metalness: 0.15, ...extra });
+// A material that glows in each instance's own colour (a material's emissive is one colour for all; this adds the
+// instance's), by `amount`: what the bloom then lifts into light.
+function glowing(mat, amount) {
+  mat.onBeforeCompile = (sh) => { sh.fragmentShader = sh.fragmentShader.replace("#include <emissivemap_fragment>", "#include <emissivemap_fragment>\n#if defined( USE_INSTANCING_COLOR ) || defined( USE_COLOR )\ntotalEmissiveRadiance += vColor.rgb * " + amount.toFixed(3) + ";\n#endif"); };
+  mat.customProgramCacheKey = () => "glow" + amount;
+  return mat;
+}
+// A soft round light, white, for pools of light and dust to tint; and a vertical fade, for the beacons.
+function radialTexture() {
+  const c = document.createElement("canvas"); c.width = c.height = 128;
+  const g = c.getContext("2d"), r = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  r.addColorStop(0, "rgba(255,255,255,1)"); r.addColorStop(0.35, "rgba(255,255,255,.45)"); r.addColorStop(1, "rgba(255,255,255,0)");
+  g.fillStyle = r; g.fillRect(0, 0, 128, 128);
+  return new THREE.CanvasTexture(c);
+}
+function fadeTexture() {
+  const c = document.createElement("canvas"); c.width = 4; c.height = 256;
+  const g = c.getContext("2d"), r = g.createLinearGradient(0, 0, 0, 256);
+  r.addColorStop(0, "rgba(255,255,255,0)"); r.addColorStop(0.7, "rgba(255,255,255,.35)"); r.addColorStop(1, "rgba(255,255,255,1)");
+  g.fillStyle = r; g.fillRect(0, 0, 4, 256);
+  return new THREE.CanvasTexture(c);
+}
+// The sky: Fleet's splash, a navy glow fading to black.
+function skyTexture() {
+  const c = document.createElement("canvas"); c.width = c.height = 512;
+  const g = c.getContext("2d"), r = g.createRadialGradient(256, 200, 0, 256, 256, 420);
+  r.addColorStop(0, "#1a2540"); r.addColorStop(0.45, "#0e1526"); r.addColorStop(1, "#05070c");
+  g.fillStyle = r; g.fillRect(0, 0, 512, 512);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
 // A flat ring on the floor (or at a height): `frac` of it, solid: the gauges, the context rings, a waiting halo.
-function arc(radius, tube, frac, colour, y = 0) {
+function arc(radius, tube, frac, colour, y = 0, glow = 0) {
   const geo = new THREE.TorusGeometry(radius, tube, 10, 120, Math.max(0.0001, frac) * Math.PI * 2);
-  const m = new THREE.Mesh(geo, solid({ color: colour }));
+  const m = new THREE.Mesh(geo, solid({ color: colour, emissive: glow ? colour : "#000000", emissiveIntensity: glow }));
   m.rotation.x = -Math.PI / 2; m.rotation.z = Math.PI / 2; m.position.y = y; m.castShadow = true;
   return m;
 }
@@ -55,7 +95,7 @@ export function mount(box, hooks) {
     throw new Error("this browser has no WebGL");
   }
   renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
-  renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 1.35;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 0.95;
   renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.setClearColor(P.bg);
   box.append(renderer.domElement);
@@ -64,23 +104,42 @@ export function mount(box, hooks) {
   const tip = document.createElement("div"); tip.className = "otip"; tip.hidden = true; box.append(tip);
   const help = document.createElement("div"); help.className = "ohelp"; help.textContent = "drag to turn · scroll to come closer · hover for detail · click a session to open it"; box.append(help);
   const scene = new THREE.Scene();
-  scene.fog = new THREE.Fog(P.bg, 60, 160);
+  scene.background = skyTexture();
+  scene.fog = new THREE.Fog("#0a0f1a", 70, 180);
   const camera = new THREE.PerspectiveCamera(40, box.clientWidth && box.clientHeight ? box.clientWidth / box.clientHeight : 1, 0.1, 600); // its shape from the start: the first state is laid out for it
   S = { box, hooks, renderer, scene, camera, labels, core, tip, sessions: new Map(), t: 0, last: performance.now(), raf: 0, maxAct: 1, limit: [-1, -1], pellets: [], flare: 0,
-    view: { theta: 0.7, phi: 0.92, phiTo: 0.92, r: 40, fit: 40, zoom: 1, dragging: false, idleSince: 0, tilted: false, framed: false }, extent: 12, layoutAt: 0, portrait: camera.aspect < 0.8 };
+    view: { theta: 0.7, phi: 0.92, phiTo: 0.92, r: 40, fit: 40, zoom: 1, dragging: false, idleSince: 0, tilted: false, framed: false }, extent: 12, layoutAt: 0, portrait: camera.aspect < 0.8, beacons: new Map() };
+  // Bloom: what glows, glows; the shapes stay solid.
+  S.composer = new EffectComposer(renderer);
+  S.composer.addPass(new RenderPass(scene, camera));
+  S.bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.6, 0.45, 0.62);
+  S.composer.addPass(S.bloom);
+  S.composer.addPass(new OutputPass());
 
-  // Light: a warm key from high up that casts soft shadows, a sky and ground fill, a cool rim from behind.
-  scene.add(new THREE.HemisphereLight(P.ivory, "#3a342d", 1.6));
-  const key = new THREE.DirectionalLight("#fff1e0", 3.2);
+  // Light: a cool key from high up that casts soft shadows, a navy fill, a violet rim from behind, and the monument's
+  // own cyan light on everything near it.
+  scene.add(new THREE.HemisphereLight("#9fc7ff", "#0b111a", 0.75));
+  const key = new THREE.DirectionalLight("#e3ecff", 2.4);
   key.position.set(18, 34, 12); key.castShadow = true; key.shadow.mapSize.set(2048, 2048); key.shadow.radius = 5; key.shadow.bias = -0.0004;
   scene.add(key); scene.add(key.target); S.key = key;
-  const rim = new THREE.DirectionalLight(P.sky, 0.8); rim.position.set(-20, 12, -24); scene.add(rim);
-  // The floor: warm, matte, taking the shadows; a fine dot grid on it, fading with the fog.
-  const floor = new THREE.Mesh(new THREE.PlaneGeometry(600, 600), new THREE.MeshStandardMaterial({ color: P.floor, roughness: 1, metalness: 0 }));
+  const rim = new THREE.DirectionalLight(P.g3, 0.6); rim.position.set(-20, 12, -24); scene.add(rim);
+  S.monoLight = new THREE.PointLight(P.g1, 14, 22, 2); S.monoLight.position.set(0, 4, 0); scene.add(S.monoLight);
+  // The floor: deep navy, glossy, taking the shadows; a faint grid, and the lanes round the centre glowing a little.
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(600, 600), new THREE.MeshStandardMaterial({ color: P.floor, roughness: 0.62, metalness: 0.25 }));
   floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; scene.add(floor);
-  const dots = []; for (let x = -60; x <= 60; x += 2) for (let z = -60; z <= 60; z += 2) dots.push(x, 0.01, z);
-  const dg = new THREE.BufferGeometry(); dg.setAttribute("position", new THREE.Float32BufferAttribute(dots, 3));
-  scene.add(new THREE.Points(dg, new THREE.PointsMaterial({ color: "#3a3631", size: 0.09, sizeAttenuation: true })));
+  const grid = [];
+  for (let v = -80; v <= 80; v += 4) grid.push(-80, 0.01, v, 80, 0.01, v, v, 0.01, -80, v, 0.01, 80);
+  const gg = new THREE.BufferGeometry(); gg.setAttribute("position", new THREE.Float32BufferAttribute(grid, 3));
+  scene.add(new THREE.LineSegments(gg, new THREE.LineBasicMaterial({ color: "#132238", transparent: true, opacity: 0.55 })));
+  for (const [r, c] of [[MONUMENT + 2.5, P.g1], [MONUMENT + 9, P.g2], [MONUMENT + 16, P.g3]]) {
+    const lane = arc(r, 0.022, 1, c, 0.02, 0.5); lane.castShadow = false; lane.material.transparent = true; lane.material.opacity = 0.3; scene.add(lane);
+  }
+  // Dust: motes in the logo's colours, drifting up and round.
+  const dn = MAX.dust, dp = new Float32Array(dn * 3), dc = new Float32Array(dn * 3), dtmp = new THREE.Color();
+  for (let i = 0; i < dn; i++) { const a = Math.random() * Math.PI * 2, r = 3 + Math.random() * 40; dp.set([Math.cos(a) * r, Math.random() * 14, Math.sin(a) * r], i * 3); brand(Math.random(), dtmp); dc.set([dtmp.r, dtmp.g, dtmp.b], i * 3); }
+  const dgeo = new THREE.BufferGeometry(); dgeo.setAttribute("position", new THREE.BufferAttribute(dp, 3)); dgeo.setAttribute("color", new THREE.BufferAttribute(dc, 3));
+  S.dust = new THREE.Points(dgeo, new THREE.PointsMaterial({ size: 0.16, map: radialTexture(), vertexColors: true, transparent: true, opacity: 0.8, depthWrite: false, blending: THREE.AdditiveBlending }));
+  scene.add(S.dust);
 
   // Shared shapes.
   const rayGeo = new THREE.ExtrudeGeometry(rayShape(), { depth: 0.14, bevelEnabled: true, bevelThickness: 0.03, bevelSize: 0.025, bevelSegments: 2, curveSegments: 12 });
@@ -90,29 +149,49 @@ export function mount(box, hooks) {
   const prism = new THREE.CylinderGeometry(1, 1, 1, 6); prism.translate(0, 0.5, 0);
   const disc = new THREE.CylinderGeometry(1, 1, 1, 72); disc.translate(0, 0.5, 0);
   const rimGeo = new THREE.TorusGeometry(1, 0.025, 8, 120); rimGeo.rotateX(Math.PI / 2);
-  S.geos = [rayGeo, unitBox, ball, prism, disc, rimGeo];
-  S.rays = instanced(rayGeo, solid({ roughness: 0.42 }), MAX.rays);
-  S.bars = instanced(unitBox, solid({ roughness: 0.5 }), MAX.bars);
-  S.tiles = instanced(unitBox, solid({ roughness: 0.6 }), MAX.tiles);
-  S.agents = instanced(ball, solid({ roughness: 0.35 }), MAX.agents);
-  S.beads = instanced(ball, solid({ roughness: 0.4 }), MAX.beads, { shadow: false });
-  S.prisms = instanced(prism, solid({ roughness: 0.5 }), MAX.prisms);
-  S.pedestals = instanced(disc, solid({ roughness: 0.8 }), 64);
-  S.rims = instanced(rimGeo, solid({ roughness: 0.35 }), 64, { shadow: false });
-  S.pelletMesh = instanced(ball, new THREE.MeshStandardMaterial({ roughness: 0.3, emissive: P.coral, emissiveIntensity: 0.6 }), MAX.pellets, { shadow: false });
+  const pool = new THREE.PlaneGeometry(1, 1); pool.rotateX(-Math.PI / 2);
+  const seg = new THREE.TorusGeometry(1, 0.022, 6, 16, 0.32); seg.rotateX(Math.PI / 2); // a segment of a turning ring of light
+  const dash = new THREE.TorusGeometry(1, 0.0045, 6, 12, 0.14); dash.rotateX(Math.PI / 2); // a fine dash, for the monument's rings
+  S.geos = [rayGeo, unitBox, ball, prism, disc, rimGeo, pool, seg, dash];
+  S.rays = instanced(rayGeo, glowing(solid({ roughness: 0.35 }), 0.32), MAX.rays);
+  S.bars = instanced(unitBox, glowing(solid({ roughness: 0.4 }), 0.28), MAX.bars);
+  S.tiles = instanced(unitBox, glowing(solid({ roughness: 0.5 }), 0.22), MAX.tiles);
+  S.agents = instanced(ball, glowing(solid({ roughness: 0.3 }), 0.75), MAX.agents);
+  S.beads = instanced(ball, glowing(solid({ roughness: 0.4 }), 0.85), MAX.beads, { shadow: false });
+  S.prisms = instanced(prism, glowing(solid({ roughness: 0.25, metalness: 0.3 }), 0.28), MAX.prisms);
+  S.pedestals = instanced(disc, solid({ roughness: 0.3, metalness: 0.5 }), 64);
+  S.rims = instanced(rimGeo, glowing(solid({ roughness: 0.3 }), 0.9), 64, { shadow: false });
+  S.pools = instanced(pool, new THREE.MeshBasicMaterial({ map: radialTexture(), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }), 64, { shadow: false });
+  S.pools.receiveShadow = false;
+  S.hud = instanced(seg, glowing(solid({ roughness: 0.3 }), 0.7), MAX.hud, { shadow: false });
+  S.flow = instanced(ball, glowing(solid({ roughness: 0.3 }), 1.1), MAX.flow, { shadow: false });
+  S.pelletMesh = instanced(ball, glowing(solid({ roughness: 0.3 }), 1.1), MAX.pellets * MAX.trail, { shadow: false });
+  S.beamTex = fadeTexture();
   // The wiring: a line from each part to what it belongs to.
   S.linkPos = new Float32Array(MAX.links * 6); S.linkCol = new Float32Array(MAX.links * 6);
   const lg = new THREE.BufferGeometry(); lg.setAttribute("position", new THREE.BufferAttribute(S.linkPos, 3)); lg.setAttribute("color", new THREE.BufferAttribute(S.linkCol, 3));
-  S.links = new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.75 })); S.links.frustumCulled = false; scene.add(S.links);
+  S.links = new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false })); S.links.frustumCulled = false; scene.add(S.links);
 
-  // The monument: a coral starburst on a plinth, the gauges on the floor round it.
+  // The monument: Fleet's starburst on a plinth, each ray a step along the logo's gradient, glowing; the gauges on the
+  // floor round it, and two holographic rings turning, tilted, about it.
   S.mono = new THREE.Group(); scene.add(S.mono);
-  const plinth = new THREE.Mesh(disc, solid({ color: P.ink, roughness: 0.85 })); plinth.scale.set(2.6, 0.35, 2.6); plinth.castShadow = plinth.receiveShadow = true; S.mono.add(plinth);
-  S.monoRays = [];
-  S.coralMat = solid({ color: P.coral, roughness: 0.38, emissive: P.coral, emissiveIntensity: 0.08 });
+  const plinth = new THREE.Mesh(disc, solid({ color: P.panel, roughness: 0.25, metalness: 0.6 })); plinth.scale.set(2.6, 0.35, 2.6); plinth.castShadow = plinth.receiveShadow = true; S.mono.add(plinth);
+  const plinthRim = arc(2.6, 0.05, 1, P.g1, 0.36, 0.9); plinthRim.castShadow = false; S.mono.add(plinthRim);
+  S.monoRays = []; S.monoMats = [];
   S.monoSpark = new THREE.Group(); S.monoSpark.position.y = 2.9; S.mono.add(S.monoSpark);
-  for (let i = 0; i < RAYS; i++) { const m = new THREE.Mesh(rayGeo, S.coralMat); m.rotation.z = (i / RAYS) * Math.PI * 2; m.castShadow = true; m.scale.set(1.8, 2.1, 1.8); S.monoSpark.add(m); S.monoRays.push(m); }
-  S.mono.add(arc(3.7, 0.16, 1, P.ink, 0.17), arc(4.35, 0.07, 1, P.ink, 0.08));
+  for (let i = 0; i < RAYS; i++) {
+    const c = brand(i / (RAYS - 1)), mat = solid({ color: c, roughness: 0.3, emissive: c, emissiveIntensity: 0.3 });
+    const m = new THREE.Mesh(rayGeo, mat); m.rotation.z = (i / RAYS) * Math.PI * 2; m.castShadow = true; m.scale.set(1.8, 2.1, 1.8); S.monoSpark.add(m); S.monoRays.push(m); S.monoMats.push(mat);
+  }
+  const heart = new THREE.Mesh(ball, solid({ color: P.white, emissive: P.white, emissiveIntensity: 1.0 })); heart.scale.setScalar(0.26); S.monoSpark.add(heart);
+  S.mono.add(arc(3.7, 0.16, 1, P.line, 0.17), arc(4.35, 0.07, 1, P.line, 0.08));
+  S.holo = [];
+  for (const [r, c, tilt] of [[5.6, P.g1, 0.35], [6.3, P.g3, -0.25]]) {
+    const ring = new THREE.Group();
+    const mat = solid({ color: c, emissive: c, emissiveIntensity: 0.9 });
+    for (let k = 0; k < 30; k++) { const m = new THREE.Mesh(dash, mat); m.scale.setScalar(r); m.rotation.y = (k / 30) * Math.PI * 2; ring.add(m); }
+    ring.rotation.x = tilt; ring.position.y = 2.6; S.mono.add(ring); S.holo.push(ring);
+  }
 
   // Turning, coming closer, hovering, clicking.
   const el = renderer.domElement, pointers = new Map(), ray = new THREE.Raycaster(), ndc = new THREE.Vector2();
@@ -156,7 +235,7 @@ export function mount(box, hooks) {
     tip.style.top = Math.max(8, Math.min(r.height - tip.offsetHeight - 8, e.clientY - r.top + 14)) + "px";
     el.style.cursor = h.sid ? "pointer" : "default";
   }
-  S.ro = new ResizeObserver(() => { const w = box.clientWidth, h = box.clientHeight; if (!w || !h) return; renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix(); refit(); });
+  S.ro = new ResizeObserver(() => { const w = box.clientWidth, h = box.clientHeight; if (!w || !h) return; renderer.setSize(w, h, false); S.composer.setPixelRatio(renderer.getPixelRatio()); S.composer.setSize(w, h); camera.aspect = w / h; camera.updateProjectionMatrix(); refit(); });
   S.ro.observe(box);
   S.raf = requestAnimationFrame(frame);
 }
@@ -184,7 +263,7 @@ export function unmount() {
   cancelAnimationFrame(S.raf); S.ro.disconnect();
   S.scene.traverse((o) => { if (o.geometry && !S.geos.includes(o.geometry)) o.geometry.dispose(); if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => m.dispose()); });
   for (const g of S.geos) g.dispose();
-  S.renderer.dispose(); S.renderer.forceContextLoss(); S.box.replaceChildren();
+  S.composer.dispose(); S.renderer.dispose(); S.renderer.forceContextLoss(); S.box.replaceChildren();
   S = null;
 }
 
@@ -222,7 +301,7 @@ export function update(d) {
       S.sessions.set(s.sid, x); fresh = true;
     }
     x.s = s;
-    x.colour = new THREE.Color(STATE_COLOUR[s.state] || P.stone);
+    x.colour = new THREE.Color(STATE_COLOUR[s.state] || P.dim);
     const t = s.timeline;
     if (t) {
       x.act = t.tools.slice(-BARS).map((v) => v / max);
@@ -246,16 +325,21 @@ export function update(d) {
     if (ctxKey !== x.ctxKey) {
       if (x.ctx) { x.group.remove(x.ctx); x.ctx.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); }); }
       x.ctx = new THREE.Group();
-      x.ctx.add(arc(1.85, 0.05, 1, P.ink));
+      x.ctx.add(arc(1.85, 0.05, 1, P.line));
       if (s.ctx) {
-        const split = s.ctx.split.length ? s.ctx.split : [{ tokens: 1, color: P.ivory }], total = split.reduce((n, p) => n + p.tokens, 0) || 1;
+        const split = s.ctx.split.length ? s.ctx.split : [{ tokens: 1, color: P.white }], total = split.reduce((n, p) => n + p.tokens, 0) || 1;
         let from = 0;
-        for (const p of split) { const frac = (p.tokens / total) * (s.ctx.pct / 100), m = arc(1.85, 0.07, frac, p.color); m.rotation.z = Math.PI / 2 - from * Math.PI * 2; from += frac; x.ctx.add(m); }
+        for (const p of split) { const frac = (p.tokens / total) * (s.ctx.pct / 100), m = arc(1.85, 0.07, frac, p.color, 0, 0.9); m.rotation.z = Math.PI / 2 - from * Math.PI * 2; from += frac; x.ctx.add(m); }
       }
       x.group.add(x.ctx); x.ctxKey = ctxKey;
     }
     // A waiting session's halo, beating.
-    if (!x.halo) { x.halo = arc(1, 0.05, 1, P.honey); x.halo.material.emissive = new THREE.Color(P.honey); x.group.add(x.halo); }
+    if (!x.halo) { x.halo = arc(1, 0.05, 1, P.amber, 0, 1); x.group.add(x.halo); }
+    // A beacon for a session waiting on you: a column of amber light up into the sky.
+    if (s.state === "needs" && !S.beacons.has(s.sid)) {
+      const b = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.7, 26, 32, 1, true), new THREE.MeshBasicMaterial({ color: P.amber, map: S.beamTex, transparent: true, opacity: 0.22, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending }));
+      b.position.y = 13; x.group.add(b); S.beacons.set(s.sid, b);
+    } else if (s.state !== "needs" && S.beacons.has(s.sid)) { const b = S.beacons.get(s.sid); x.group.remove(b); b.geometry.dispose(); b.material.dispose(); S.beacons.delete(s.sid); }
     // Its label: name, state, and what it is doing, or its question.
     const text = (s.sub && s.sub.text) || "", lk = s.name + "|" + s.word + "|" + (s.time || "") + "|" + text;
     if (lk !== x.lk) {
@@ -264,21 +348,21 @@ export function update(d) {
       const sm = document.createElement("small"); sm.textContent = (s.glyph ? s.glyph + " " : "") + s.word + (s.time ? " · " + s.time : "");
       const i2 = document.createElement("i"); i2.textContent = text;
       x.label.append(b, sm, i2); x.label.className = "ol" + (s.state === "needs" ? " needs" : "");
-      x.label.style.setProperty("--c", STATE_COLOUR[s.state] || P.stone); x.lk = lk;
+      x.label.style.setProperty("--c", STATE_COLOUR[s.state] || P.dim); x.lk = lk;
     }
   }
   // Newcomers: let everything settle before it is seen, so the scene opens arranged, not flying into place.
   if (fresh) { for (let k = 0; k < 360; k++) physics(1 / 60); for (const x of S.sessions.values()) { x.R = x.Rto; for (const p of x.parts.values()) p.v.set(0, 0); x.vel.set(0, 0); } S.extent = 0; S.across = 0; S.deep = 0; physics(1 / 60); if (!S.settled) { S.view.r = S.view.fit; S.settled = true; } }
-  for (const [sid, x] of S.sessions) if (!seen.has(sid)) { S.scene.remove(x.group); x.group.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); }); x.label.remove(); S.sessions.delete(sid); }
+  for (const [sid, x] of S.sessions) if (!seen.has(sid)) { S.scene.remove(x.group); x.group.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); }); x.label.remove(); S.beacons.delete(sid); S.sessions.delete(sid); }
   // The monument's gauges: the five hours (thick) and the week (thin), rebuilt when they move.
   const lim = (re) => (d.account && d.account.limits ? d.account.limits.find((l) => re.test(l.label)) : undefined);
   const five = lim(/5/), week = lim(/7|week/i), pct = [five ? five.pct : -1, week ? week.pct : -1];
   if (pct[0] !== S.limit[0] || pct[1] !== S.limit[1]) {
     for (const g of S.gauges || []) { S.mono.remove(g); g.geometry.dispose(); g.material.dispose(); }
-    const tone = (v) => (v >= 80 ? P.rust : v >= 60 ? P.ivory : P.coral);
+    const tone = (v) => (v >= 80 ? P.red : v >= 60 ? P.white : P.cyan); // as the page's rings
     S.gauges = [];
-    if (pct[0] >= 0) S.gauges.push(arc(3.7, 0.2, pct[0] / 100, tone(pct[0]), 0.22));
-    if (pct[1] >= 0) S.gauges.push(arc(4.35, 0.09, pct[1] / 100, P.kraft, 0.1));
+    if (pct[0] >= 0) S.gauges.push(arc(3.7, 0.2, pct[0] / 100, tone(pct[0]), 0.22, 1.1));
+    if (pct[1] >= 0) S.gauges.push(arc(4.35, 0.09, pct[1] / 100, P.violet, 0.1, 1.1));
     for (const g of S.gauges) S.mono.add(g);
     S.limit = pct;
   }
@@ -346,7 +430,7 @@ function physics(dt) {
 // ── each frame ──
 const M = new THREE.Matrix4(), Q = new THREE.Quaternion(), V = new THREE.Vector3(), SC = new THREE.Vector3(), E = new THREE.Euler(0, 0, 0, "YZX"), C = new THREE.Color(), C2 = new THREE.Color();
 const put = (mesh, i, x, y, z, sx, sy, sz, ry = 0, rz = 0) => { E.set(0, ry, rz, "YZX"); Q.setFromEuler(E); M.compose(V.set(x, y, z), Q, SC.set(sx, sy, sz)); mesh.setMatrixAt(i, M); };
-const STONE = new THREE.Color(P.stone), IVORY = new THREE.Color(P.ivory), INK = new THREE.Color(P.ink), LILAC = new THREE.Color(P.lilac), SAGE = new THREE.Color(P.sage), CORAL = new THREE.Color(P.coral);
+const DIM = new THREE.Color(P.dim), WHITE = new THREE.Color(P.white), PANEL = new THREE.Color(P.panel), VIOLET = new THREE.Color(P.violet), GREEN = new THREE.Color(P.green), CYAN = new THREE.Color(P.g1), NAVY = new THREE.Color("#1b2433");
 function frame(nowMs) {
   if (!S) return;
   S.raf = requestAnimationFrame(frame);
@@ -361,13 +445,25 @@ function frame(nowMs) {
   // The monument breathes with the fleet's work, and warms as tool calls land in it.
   let fleet = 0; for (const x of S.sessions.values()) fleet += x.act.reduce((a, b) => a + b, 0) / BARS;
   S.monoSpark.rotation.y = Math.atan2(camera.position.x, camera.position.z) + Math.sin(t * 0.3) * 0.35;
+  S.monoSpark.rotation.z = t * 0.12; // the gradient goes round
   S.monoRays.forEach((m, i) => { const len = 2.0 + 0.4 * Math.min(1, fleet / 2) + 0.1 * Math.sin(t * 1.4 + i); m.scale.y = spring(m.scale.y, len, 3, raw); });
   S.flare = Math.max(0, S.flare - raw * 0.8);
-  S.coralMat.emissiveIntensity = 0.08 + S.flare * 0.5;
+  for (const m of S.monoMats) m.emissiveIntensity = 0.3 + S.flare * 0.6;
+  S.monoLight.intensity = 12 + S.flare * 16 + 2 * Math.sin(t * 1.3);
+  S.holo[0].rotation.y = t * 0.35; S.holo[1].rotation.y = -t * 0.22;
+  // The dust drifts up and round, and comes back in at the floor.
+  const dpos = S.dust.geometry.attributes.position;
+  for (let i = 0; i < dpos.count; i++) { let y = dpos.getY(i) + dt * 0.35; if (y > 14) y = 0; dpos.setY(i, y); }
+  dpos.needsUpdate = true; S.dust.rotation.y = t * 0.01;
 
-  let nr = 0, nb = 0, nt = 0, na = 0, nbd = 0, np = 0, nl = 0, ns = 0;
+  let nr = 0, nb = 0, nt = 0, na = 0, nbd = 0, np = 0, nl = 0, ns = 0, nh = 0, nf = 0;
   const of = { rays: [], bars: [], tiles: [], agents: [], prisms: [], pedestals: [] };
-  const link = (ax, ay, az, bx, by, bz, col) => { if (nl >= MAX.links) return; S.linkPos.set([ax, ay, az, bx, by, bz], nl * 6); S.linkCol.set([col.r, col.g, col.b, col.r, col.g, col.b], nl * 6); nl++; };
+  const link = (ax, ay, az, bx, by, bz, col, live = false) => {
+    if (nl >= MAX.links) return;
+    S.linkPos.set([ax, ay, az, bx, by, bz], nl * 6); S.linkCol.set([col.r, col.g, col.b, col.r, col.g, col.b], nl * 6); nl++;
+    // Light running down a live wire, out from the core to the agent.
+    if (live) for (let k = 0; k < 3 && nf < MAX.flow; k++) { const f = (t * 0.9 + k / 3 + (ax + bz) * 0.1) % 1; put(S.flow, nf, ax + (bx - ax) * f, ay + (by - ay) * f, az + (bz - az) * f, 0.07, 0.07, 0.07); S.flow.setColorAt(nf, col); nf++; }
+  };
   for (const x of S.sessions.values()) {
     const s = x.s, needs = s.state === "needs", stalled = s.state === "stalled", receded = s.state === "idle" || s.state === "finished" || s.state === "yourTurn";
     const info = { sid: s.sid, title: s.name, lines: [(s.glyph ? s.glyph + " " : "") + s.word + (s.time ? " · " + s.time : ""), (s.sub && s.sub.text) || "", s.ctx ? "context " + s.ctx.pct + "% of " + s.ctx.max : ""].filter(Boolean) };
@@ -377,12 +473,20 @@ function frame(nowMs) {
     x.group.position.set(px, 0, pz);
     // The pedestal, its rim in the state's colour; a waiting session's halo beating round it.
     if (ns < 64) {
-      put(S.pedestals, ns, px, 0, pz, R, 0.22, R); S.pedestals.setColorAt(ns, C.copy(INK).lerp(x.colour, 0.03)); of.pedestals[ns] = info;
-      put(S.rims, ns, px, 0.23, pz, R, 2.2, R); S.rims.setColorAt(ns, C.copy(x.colour).multiplyScalar(receded ? 0.55 : 1));
+      put(S.pedestals, ns, px, 0, pz, R, 0.22, R); S.pedestals.setColorAt(ns, C.copy(PANEL).lerp(x.colour, 0.06)); of.pedestals[ns] = info;
+      put(S.rims, ns, px, 0.23, pz, R, 2.2, R); S.rims.setColorAt(ns, C.copy(x.colour).multiplyScalar(receded ? 0.4 : 1));
+      // A pool of its light on the floor round it.
+      put(S.pools, ns, px, 0.015, pz, R * 3.2, 1, R * 3.2); S.pools.setColorAt(ns, C.copy(x.colour).multiplyScalar(receded ? 0.08 : 0.24));
       ns++;
     }
+    // A ring of light over it, turning: segments in its colour, more of them lit the busier it is.
+    { const lit = receded ? 4 : 6 + Math.round(8 * Math.min(1, x.act.reduce((a, b) => a + b, 0) / BARS * 3));
+      for (let k = 0; k < 14 && nh < MAX.hud; k++) { if (k >= lit) continue; put(S.hud, nh, px, 0.7 + (x.lift || 0) * 0.3, pz, R + 0.3, R + 0.3, R + 0.3, (k / 14) * Math.PI * 2 + t * (receded ? 0.1 : 0.5)); S.hud.setColorAt(nh, C.copy(x.colour).multiplyScalar(receded ? 0.4 : 1)); nh++; } }
+    if (S.beacons.has(s.sid)) { const b = S.beacons.get(s.sid); b.material.opacity = 0.14 + 0.16 * Math.max(0, Math.sin(t * 4.2)) ** 4; }
+    {
+    }
     const beat = needs ? Math.max(0, Math.sin(t * 4.2)) ** 6 : 0;
-    x.halo.visible = needs; x.halo.scale.setScalar(R + 0.35 + beat * 0.4); x.halo.position.y = 0.1; x.halo.material.emissiveIntensity = 0.3 + beat;
+    x.halo.visible = needs; x.halo.scale.setScalar(R + 0.35 + beat * 0.4); x.halo.position.y = 0.1; x.halo.material.emissiveIntensity = 0.6 + beat * 1.2;
     // The burst: standing over its pedestal, turning; lifted while it waits; each ray a bar of recent activity.
     x.lift = spring(x.lift, needs ? 0.7 : 0, 3, raw);
     const cy = 2.5 + x.lift + 0.12 * Math.sin(t * 0.9 + x.seed);
@@ -394,14 +498,15 @@ function frame(nowMs) {
       const to = receded ? 0.35 : 0.55 + 0.75 * Math.sqrt(a) + (needs ? 0.25 + beat * 0.25 : 0);
       x.rayLen[i] = spring(x.rayLen[i], to * (0.9 + 0.12 * Math.sin(t * 2 + i * 1.7)), 5, raw);
       put(S.rays, nr, px, cy, pz, 1.3 * x.grow, 1.35 * x.rayLen[i] * x.grow, 1.3 * x.grow, x.spin, (i / RAYS) * Math.PI * 2 + wob);
-      S.rays.setColorAt(nr, C.copy(x.colour).multiplyScalar(receded ? 0.6 : 1)); of.rays[nr] = info; nr++;
+      S.rays.setColorAt(nr, C.copy(x.colour).multiplyScalar(receded ? 0.45 : 1)); of.rays[nr] = info; nr++;
     }
     x.ctx.position.set(0, cy, 0); x.ctx.rotation.y = t * 0.15; x.ctx.scale.setScalar(x.grow);
     // The activity, as a ring of 3D bars round the rim: oldest to newest, the newest brightest.
     for (let i = 0; i < BARS && nb < MAX.bars; i++) {
       const a = x.act[i] || 0, ang = (i / BARS) * Math.PI * 1.7 + Math.PI * 0.65, h = 0.06 + 1.3 * Math.sqrt(a) * x.grow;
       put(S.bars, nb, px + Math.cos(ang) * (R - 0.32), 0.22, pz + Math.sin(ang) * (R - 0.32), 0.17, h, 0.17, -ang);
-      S.bars.setColorAt(nb, C.copy(x.colour).lerp(IVORY, (i / BARS) * 0.35).multiplyScalar(0.55 + 0.45 * (i / BARS)));
+      brand(Math.min(1, Math.sqrt(a)), C).multiplyScalar((receded ? 0.35 : 0.6) + 0.4 * (i / BARS)); // cyan low, violet high, the newest brightest
+      S.bars.setColorAt(nb, C);
       of.bars[nb] = { sid: s.sid, title: s.name + " · activity", lines: ["tool calls across the window, a bar each, round the rim to the newest"] }; nb++;
     }
     // Its parts.
@@ -412,7 +517,7 @@ function frame(nowMs) {
       if (p.kind === "wf" && np < MAX.prisms) {
         const live = p.w.outcome === "running";
         put(S.prisms, np, wx, 0.22, wz, 0.62 * sc, 0.42 * sc, 0.62 * sc, t * 0.2);
-        S.prisms.setColorAt(np, C.copy(LILAC).multiplyScalar(live ? 1 : 0.55)); of.prisms[np] = { title: p.title, lines: p.lines }; np++;
+        S.prisms.setColorAt(np, C.copy(VIOLET).multiplyScalar(live ? 1 : 0.45)); of.prisms[np] = { title: p.title, lines: p.lines }; np++;
         // Its phases: beads in an arc over it, done in lilac, the one under way lit and beating, the rest dark.
         const ph = (p.w.phases || []).slice(0, 10);
         ph.forEach((q, k) => {
@@ -420,25 +525,26 @@ function frame(nowMs) {
           const ang = (k / Math.max(1, ph.length - 1) - 0.5) * 2.2;
           const lit = q.state === "now" ? 0.14 + 0.05 * Math.sin(t * 6) : 0.11;
           put(S.beads, nbd, wx + Math.sin(ang) * 0.75 * sc, 0.95 + Math.cos(ang) * 0.35, wz, lit * sc, lit * sc, lit * sc);
-          S.beads.setColorAt(nbd, C.set(q.state === "done" ? P.lilac : q.state === "now" ? P.ivory : "#4a4458")); nbd++;
+          S.beads.setColorAt(nbd, C.set(q.state === "done" ? P.violet : q.state === "now" ? P.white : "#2c2845")); nbd++;
         });
-        link(px, cy - 0.6, pz, wx, 0.64 * sc + 0.22, wz, C2.copy(LILAC).multiplyScalar(0.7));
+        link(px, cy - 0.6, pz, wx, 0.64 * sc + 0.22, wz, C2.copy(VIOLET).multiplyScalar(0.8), live);
       } else if (p.kind === "agent" && na < MAX.agents) {
         const st = p.a.state, r = (st === "done" ? 0.2 : 0.3) * sc;
         const bob = st === "active" ? Math.abs(Math.sin(t * 3 + p.key.length)) * 0.18 : 0, ay = 0.22 + r + 0.15 + bob;
         put(S.agents, na, wx, ay, wz, r, r, r);
-        S.agents.setColorAt(na, C.set(AGENT_COLOUR[st] || P.stone)); of.agents[na] = { title: (st === "active" ? "● " : st === "tool" ? "◐ " : st === "done" ? "✓ " : "○ ") + p.title, lines: p.lines }; na++;
-        if (parent) link(px + parent.p.x, 0.5, pz + parent.p.y, wx, ay, wz, C2.set(AGENT_COLOUR[st] || P.stone).multiplyScalar(0.6));
-        else link(px, cy - 0.6, pz, wx, ay, wz, C2.set(AGENT_COLOUR[st] || P.stone).multiplyScalar(0.6));
+        S.agents.setColorAt(na, C.set(AGENT_COLOUR[st] || P.dim)); of.agents[na] = { title: (st === "active" ? "● " : st === "tool" ? "◐ " : st === "done" ? "✓ " : "○ ") + p.title, lines: p.lines }; na++;
+        const wire = C2.set(AGENT_COLOUR[st] || P.dim).multiplyScalar(0.8), live = st === "active" || st === "tool";
+        if (parent) link(px + parent.p.x, 0.5, pz + parent.p.y, wx, ay, wz, wire, live);
+        else link(px, cy - 0.6, pz, wx, ay, wz, wire, live);
       } else if (p.kind === "tasks") {
         // A tower of blocks, a task each (twenty at most): done in sage, under way lit and beating, to do dark.
         const T = p.t, n = Math.min(20, T.total), doing = T.open.filter((q) => q.status === "in_progress").length;
         const dn = Math.round((T.done / T.total) * n), dg = Math.min(n - dn, Math.ceil((doing / T.total) * n));
         for (let k = 0; k < n && nt < MAX.tiles; k++) {
           put(S.tiles, nt, wx, 0.22 + k * 0.16 * sc, wz, 0.62 * sc, 0.13 * sc, 0.62 * sc, 0.4);
-          S.tiles.setColorAt(nt, k < dn ? SAGE : k < dn + dg ? C2.copy(IVORY).multiplyScalar(0.75 + 0.25 * Math.sin(t * 5)) : C2.copy(INK).lerp(STONE, 0.18)); of.tiles[nt] = { title: p.title, lines: p.lines }; nt++;
+          S.tiles.setColorAt(nt, k < dn ? GREEN : k < dn + dg ? C2.copy(WHITE).multiplyScalar(0.75 + 0.25 * Math.sin(t * 5)) : NAVY); of.tiles[nt] = { title: p.title, lines: p.lines }; nt++;
         }
-        link(px, cy - 0.6, pz, wx, 0.22 + n * 0.16 * sc, wz, C2.copy(SAGE).multiplyScalar(0.6));
+        link(px, cy - 0.6, pz, wx, 0.22 + n * 0.16 * sc, wz, C2.copy(GREEN).multiplyScalar(0.7));
       }
     }
     // Pellets, now and then, as often as it is busy, between those each new state brings.
@@ -451,18 +557,21 @@ function frame(nowMs) {
     if (q.p >= 1) { S.flare = Math.min(1, S.flare + 0.04); return false; }
     return q.p < 0 || S.sessions.has(q.x.sid);
   }).slice(-MAX.pellets);
+  // Comets: a head and a tail that thins and fades, from its colour to the monument's cyan as it lands.
   let npl = 0;
   for (const q of S.pellets) {
     if (q.p < 0) continue;
-    const a = q.x.pos, e = Math.sin(Math.PI * q.p), u = 1 - q.p;
-    put(S.pelletMesh, npl, a.x * u, (2.1 + q.x.lift) * u + 3.4 * q.p + e * (2 + q.x.R * 0.4), a.y * u, 0.11, 0.11, 0.11);
-    S.pelletMesh.setColorAt(npl, C.copy(q.x.colour).lerp(CORAL, q.p)); npl++;
+    for (let k = 0; k < MAX.trail && npl < MAX.pellets * MAX.trail; k++) {
+      const p = Math.max(0, q.p - k * 0.025), a = q.x.pos, e = Math.sin(Math.PI * p), u = 1 - p, sz = 0.13 * (1 - k / MAX.trail);
+      put(S.pelletMesh, npl, a.x * u, (2.5 + q.x.lift) * u + 3 * p + e * (2.5 + q.x.R * 0.4), a.y * u, sz, sz, sz);
+      S.pelletMesh.setColorAt(npl, C.copy(q.x.colour).lerp(CYAN, p).multiplyScalar(1 - k / (MAX.trail + 1))); npl++;
+    }
   }
   const done = (mesh, n, ofs) => { mesh.count = n; mesh.instanceMatrix.needsUpdate = true; if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true; if (ofs) mesh.userData.of = ofs; };
-  done(S.rays, nr, of.rays); done(S.bars, nb, of.bars); done(S.tiles, nt, of.tiles); done(S.agents, na, of.agents); done(S.beads, nbd); done(S.prisms, np, of.prisms); done(S.pedestals, ns, of.pedestals); done(S.rims, ns); done(S.pelletMesh, npl);
+  done(S.rays, nr, of.rays); done(S.bars, nb, of.bars); done(S.tiles, nt, of.tiles); done(S.agents, na, of.agents); done(S.beads, nbd); done(S.prisms, np, of.prisms); done(S.pedestals, ns, of.pedestals); done(S.rims, ns); done(S.pools, ns); done(S.hud, nh); done(S.flow, nf); done(S.pelletMesh, npl);
   S.links.geometry.setDrawRange(0, nl * 2); S.links.geometry.attributes.position.needsUpdate = true; S.links.geometry.attributes.color.needsUpdate = true;
 
-  S.renderer.render(S.scene, camera);
+  S.composer.render();
   labelsFrame(nowMs);
 }
 
