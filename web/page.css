@@ -262,21 +262,23 @@ body.onescreen .burn .bleg{flex-wrap:nowrap;overflow:hidden}
 @media (max-width:600px){.menu{top:auto;bottom:0;left:0;right:0;width:auto;border-radius:18px 18px 0 0;padding-bottom:calc(10px + env(safe-area-inset-bottom))}}
 @media (max-width:440px){#newbtn{display:none}} /* on a phone the menu starts a session */
 
-/* Orbit: the fleet in 3D, the rest of the page out of its way. */
+/* Orbit: the fleet as a lit, solid scene, in Claude's warm palette; the rest of the page out of its way. */
 body.orbit .overview,body.orbit .burn,body.orbit .usage{display:none}
-.orbit{position:relative;width:100%;height:100%;border-radius:18px;overflow:hidden;background:radial-gradient(120% 90% at 50% 45%,#0f1626 0%,#05070c 75%);touch-action:none}
+.orbit{position:relative;width:100%;height:100%;border-radius:18px;overflow:hidden;background:#191817;touch-action:none;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif}
 .orbit canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
-.orbit-note{position:absolute;inset:0;display:grid;place-items:center;color:var(--dim);font-size:14px}
+.orbit-note{position:absolute;inset:0;display:grid;place-items:center;color:#8a867d;font-size:14px}
 .orbit .olabels{position:absolute;inset:0;pointer-events:none;overflow:hidden}
-.orbit .ol{position:absolute;left:0;top:0;transform:translate(-50%,0);pointer-events:auto;cursor:pointer;text-align:center;white-space:nowrap;text-shadow:0 1px 3px #000,0 0 10px #000;will-change:transform}
-.orbit .ol b{display:block;color:#f5f7fa;font-size:12.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase}
-.orbit .ol small{display:block;color:var(--c);font-size:10.5px;font-weight:700;letter-spacing:.12em}
-.orbit .ol i{display:block;font-style:normal;color:#c6cdd7;font-size:11px;max-width:240px;overflow:hidden;text-overflow:ellipsis;margin:1px auto 0}
-.orbit .ol.needs i{color:#ffd98a;font-weight:600;white-space:normal;max-width:280px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
-.orbit .ol.far{opacity:.55}.orbit .ol.far i{display:none}
-.orbit .ocore{position:absolute;left:50%;transform:translate(-50%,0);pointer-events:none;text-align:center;color:#f2c6b2;text-shadow:0 1px 4px #000}
-.orbit .ocore b{display:block;font-size:13px;letter-spacing:.14em}.orbit .ocore span{font-size:11.5px;color:#d6dbe3}
-.orbit .ohelp{position:absolute;right:14px;bottom:10px;color:#6b7380;font-size:11px;pointer-events:none}
+.orbit .ol{position:absolute;left:0;top:0;pointer-events:auto;cursor:pointer;text-align:center;white-space:nowrap;will-change:transform;padding:2px 6px;text-shadow:0 1px 2px #000c,0 0 8px #000a}
+.orbit .ol b{display:block;color:#f0eee6;font-size:12px;font-weight:650;letter-spacing:.01em}
+.orbit .ol small{display:block;color:var(--c);font-size:9.5px;font-weight:700;letter-spacing:.12em}
+.orbit .ol i{display:block;font-style:normal;color:#c9c4b8;font-size:11px;max-width:240px;overflow:hidden;text-overflow:ellipsis;margin:2px auto 0}
+.orbit .ol.needs{padding:6px 11px 7px;border-radius:10px;border:1px solid #e8b04b;background:#2c2416eb;box-shadow:0 0 0 1px #e8b04b44,0 8px 26px #000a;text-shadow:none}
+.orbit .ol.needs i{color:#f3d396;font-weight:600;white-space:normal;max-width:260px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.orbit .ol.far i{display:none}
+.orbit .ocore{position:absolute;transform:translate(-50%,0);pointer-events:none;text-align:center;white-space:nowrap}
+.orbit .ocore b{display:block;color:#d97757;font-size:12.5px;font-weight:750;letter-spacing:.16em}.orbit .ocore span{font-size:11.5px;color:#c9c4b8}
+.orbit .otip{position:absolute;z-index:3;max-width:320px;pointer-events:none;background:#f0eee6;color:#2b2825;border-radius:10px;padding:8px 11px;font-size:12px;line-height:1.4;box-shadow:0 10px 30px #000a}.orbit .otip b{display:block;font-size:13px;margin-bottom:2px}.orbit .otip div{color:#55504a}
+.orbit .ohelp{position:absolute;right:14px;bottom:10px;color:#6b665e;font-size:11px;pointer-events:none}
 
 /* The menu's view items carry their icons. */
 .menu .mi .mic{flex:none;width:22px;height:22px;display:grid;place-items:center;color:var(--dim)}.menu .mi .mic svg{width:18px;height:18px}.menu .mi.on .mic{color:var(--cyan)}
@@ -290,3 +292,8 @@ body.hide-quip #quip,body.hide-strip #needs,body.hide-pulse #pulse,body.hide-gau
 body.hide-pulse.hide-gauges.hide-five .overview{display:none}
 body.dim{filter:brightness(.55) saturate(.85)}
 body.calm *,body.calm *::before,body.calm *::after{animation:none!important;transition:none!important}
+
+/* In the one-screen views a waiting session is one line, so the view keeps its room. */
+body.onescreen .nrow{grid-template-columns:auto minmax(0,1fr) auto;padding:6px 12px;margin-bottom:6px}body.onescreen .nrow .nq{-webkit-line-clamp:1;font-size:14px}body.onescreen .nrow .nacts{grid-column:auto;flex-wrap:nowrap;justify-content:flex-end}body.onescreen .nrow .nsend{flex:0 1 260px}
+@media (max-width:700px){body.onescreen .nrow{grid-template-columns:auto minmax(0,1fr)}body.onescreen .nrow .nacts{grid-column:1/-1}}
+body.onescreen .nrow .nacts>button{flex:none;white-space:nowrap}
