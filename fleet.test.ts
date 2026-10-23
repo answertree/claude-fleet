@@ -6532,3 +6532,34 @@ describe("the page's own scripts", () => {
     expect(() => new Bun.Transpiler({ loader: "js" }).scan(fs.readFileSync(path.join(here, "web/orbit.js"), "utf8"))).not.toThrow();
   });
 });
+
+describe("a waiting session's choices", () => {
+  test("are read from its screen once a question, since reading a background session's screen makes it redraw", async () => {
+    let reads = 0;
+    F.web.peek = async () => (reads++, { ok: true, screen: "Approve?\n ❯ 1. Yes\n   2. No\n" });
+    const now = Date.UTC(2026, 9, 23, 12, 0, 0);
+    const s = { sid: "chc0", name: "c", cwd: "/w", mains: [], agents: [], workflows: [], job: { state: "blocked", detail: "", needs: "Approve?", since: now - 60_000 } } as any;
+    try {
+      const a = await F.choicesFor(s, now);
+      const b = await F.choicesFor(s, now + 30 * 60_000); // the same question, half an hour on: not read again
+      expect([a.options.map((o) => o.key), b.cached, reads]).toEqual([["1", "2"], true, 1]);
+      s.job = { ...s.job, needs: "Drop the column?", since: now }; // a new question: read
+      await F.choicesFor(s, now + 1000);
+      expect(reads).toBe(2);
+      F.choicesAnswered("chc0"); // answered: its next question is new, even if it reads the same
+      await F.choicesFor(s, now + 2000);
+      expect(reads).toBe(3);
+      F.web.peek = async () => (reads++, { ok: true, screen: "thinking…" }); // nothing to choose yet: asked again after a minute, not before
+      F.choicesAnswered("chc0");
+      await F.choicesFor(s, now);
+      await F.choicesFor(s, now + 30_000);
+      expect(reads).toBe(4);
+      await F.choicesFor(s, now + 61_000);
+      expect(reads).toBe(5);
+    } finally {
+      delete F.web.peek;
+      F.choicesAnswered("chc0");
+    }
+    expect(F.WEB_PAGE).not.toContain("setInterval(readFocusScreen"); // the focus view reads on change, never on a timer
+  });
+});

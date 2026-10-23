@@ -6516,13 +6516,14 @@ export async function mcpCall(name: string, args: Record<string, any>, sessions:
   const found = findSession(sessions, a.session);
   if (!found.s) return mcpError(found.error!);
   const s = found.s;
-  if (name === "read_screen" || name === "read_choices") {
+  if (name === "read_choices") {
+    const c = await choicesFor(s);
+    if (!c.ok) return mcpError(`cannot see its screen: ${c.error || "unknown"}`);
+    return mcpJson(c.options.length ? c.options.map(({ key, label }) => ({ key, label })) : "no numbered choices on its screen");
+  }
+  if (name === "read_screen") {
     const r = await (web.peek ?? peekSession)(s);
     if (!r.ok) return mcpError(`cannot see its screen: ${r.error || "unknown"}`);
-    if (name === "read_choices") {
-      const options = screenOptions(r.screen ?? "");
-      return mcpJson(options.length ? options : "no numbered choices on its screen");
-    }
     const lines = (r.screen ?? "").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").split("\n").map((l) => l.trimEnd());
     while (lines.length && !lines[lines.length - 1]) lines.pop();
     return { text: lines.slice(-Math.max(1, Math.min(200, Number(a.lines) || 80))).join("\n") || "(empty)" };
@@ -6530,12 +6531,14 @@ export async function mcpCall(name: string, args: Record<string, any>, sessions:
   if (name === "send_message") {
     if (typeof a.text !== "string" || !a.text.trim()) return mcpError("nothing to send");
     const r = await (web.send ?? sendToSession)(s, a.text);
+    if (r.ok) choicesAnswered(s.sid);
     svcLog(`MCP: ${r.ok ? "typed" : "could not type"} a message into ${sessionTitle(s.name)}`);
     return reachText(r, `sent to ${sessionTitle(s.name)}`);
   }
   if (name === "press_key") {
     const key = ({ Enter: "E", Esc: "X" } as Record<string, string>)[a.key] ?? String(a.key ?? "");
     const r = await (web.keys ?? keysToSession)(s, key);
+    if (r.ok) choicesAnswered(s.sid);
     svcLog(`MCP: ${r.ok ? "pressed" : "could not press"} ${a.key} in ${sessionTitle(s.name)}`);
     return reachText(r, `pressed ${a.key} in ${sessionTitle(s.name)}`);
   }
@@ -6965,6 +6968,26 @@ export function peekSession(s: Session): Promise<Reach> {
     return { ok: !!screen.trim(), via, screen: screen.slice(-60_000), error: screen.trim() ? undefined : "its screen was empty" };
   });
 }
+/**
+ * The numbered choices on a waiting session's screen, read once a question. Reading a background session's screen
+ * means opening it with claude attach in a hidden tmux, and while that is open the session draws itself at that
+ * window's size: read every few seconds, as the pages once did, it jumped about in your own terminal. So the answer is
+ * kept, for every page and device, until the session's question changes; a read that found nothing is tried again
+ * after a minute, one that failed after twenty seconds.
+ */
+const choiceCache = new Map<string, { key: string; at: number; r: { ok: boolean; error?: string; options: { key: string; label: string }[] } }>();
+export async function choicesFor(s: Session, now = Date.now()): Promise<{ ok: boolean; error?: string; options: { key: string; label: string }[]; cached?: boolean }> {
+  const key = factsOf(s).needs + "\0" + (s.job?.since ?? "");
+  const hit = choiceCache.get(s.sid);
+  if (hit && hit.key === key && (hit.r.options.length ? true : now - hit.at < (hit.r.ok ? 60_000 : 20_000))) return { ...hit.r, cached: true };
+  const r = await (web.peek ?? peekSession)(s);
+  const out = { ok: r.ok, error: r.error, options: r.screen ? screenOptions(r.screen).map((o) => ({ key: o.key, label: glassesSafe(o.label) })) : [] };
+  choiceCache.set(s.sid, { key, at: now, r: out });
+  if (choiceCache.size > 200) choiceCache.delete(choiceCache.keys().next().value as string);
+  return out;
+}
+/** Forget a session's choices: it has been answered (a key pressed, a message sent), so its next question is new. */
+export const choicesAnswered = (sid: string) => choiceCache.delete(sid);
 /** The numbered choices a prompt on the screen offers ("1. Yes", "❯ 2. No"), for buttons. */
 export function screenOptions(screen: string): { key: string; label: string }[] {
   const lines = screen.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").split("\n").slice(-30);
@@ -7639,6 +7662,7 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
             if (url.pathname === "/api/keys") {
               if (typeof body.key !== "string") return Response.json({ ok: false, error: "no key" }, { status: 400, headers });
               const r = await (web.keys ?? keysToSession)(target, body.key);
+              if (r.ok) choicesAnswered(target.sid);
               return Response.json(r, { status: r.ok ? 200 : 409, headers });
             }
             // The focus view: what the session's own terminal shows, as plain text.
@@ -7648,12 +7672,10 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
               while (lines.length && !lines[lines.length - 1]) lines.pop();
               return Response.json({ ok: r.ok, error: r.error, screen: lines.slice(-80).join("\n") }, { headers });
             }
-            if (url.pathname === "/api/choices") {
-              const r = await (web.peek ?? peekSession)(target);
-              return Response.json({ ok: r.ok, error: r.error, options: r.screen ? screenOptions(r.screen).map((o) => ({ key: o.key, label: glassesSafe(o.label) })) : [] }, { headers });
-            }
+            if (url.pathname === "/api/choices") return Response.json(await choicesFor(target), { headers });
             if (typeof body.text !== "string") return Response.json({ ok: false, error: "no message" }, { status: 400, headers });
             const r = await (web.send ?? sendToSession)(target, body.text);
+            if (r.ok) choicesAnswered(target.sid);
             return Response.json(r, { status: r.ok ? 200 : 409, headers });
           }
           if (req.method !== "GET") return new Response("not allowed", { status: 405, headers });
