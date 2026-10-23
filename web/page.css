@@ -109,71 +109,53 @@ body.onescreen>*{flex:none}
 body.onescreen>header,body.onescreen>#quip,body.onescreen>#pair,body.onescreen>#needs,body.onescreen>.overview,body.onescreen>.burn,body.onescreen>.usage,body.onescreen>main,body.onescreen>.foot{width:100%}
 body.onescreen #cards{flex:1 1 0;min-height:0;width:100%}
 body.onescreen .foot{margin-top:6px}
-/* Timeline: spine rows, a cross of Compact and Lanes. A Compact row a session, its middle also its lane on the one time
-   axis every row shares; one row height and one tier for the whole board (data-tier), so rows line up. */
-body.timeline #cards{display:flex;flex-direction:column;gap:4px;position:relative;overflow:hidden;--nw:220px;--tw:150px}
+/* Timeline: a row a session, with room to breathe: what it is doing, its tool calls as the Fleet pulse draws them, and
+   a line of what it has been up to. One row height for the board (--rh), so rows line up. */
+body.timeline #cards{display:flex;flex-direction:column;gap:8px;position:relative;overflow:hidden;--nw:220px;--tw:190px}
 body.timeline #cards>*{flex:none}
-@media (max-width:1099.98px){body.timeline #cards{--nw:180px;--tw:110px}}
-@media (min-width:1100px){body.timeline #cards[data-tier=roomy],body.timeline #cards[data-tier=full]{--tw:176px}}
-.srow,.sphead{display:grid;grid-template-columns:10px var(--nw) minmax(0,1fr) var(--tw);column-gap:14px;align-items:center;padding:0 12px 0 10px;border:1px solid transparent;border-left:4px solid transparent;border-radius:10px}
+@media (max-width:1099.98px){body.timeline #cards{--nw:170px;--tw:130px}}
+.srow,.sphead{display:grid;grid-template-columns:10px var(--nw) minmax(0,1fr) var(--tw);column-gap:16px;align-items:center;padding:0 14px 0 12px;border:1px solid transparent;border-left:4px solid transparent;border-radius:12px}
 .srow{height:var(--rh);overflow:hidden;background:var(--card);border-color:var(--line);border-left-color:var(--c);cursor:pointer}
 .srow:hover{border-color:#3a4658;border-left-color:var(--c)}
 .srow.needs{background:#2a2108;border-color:#5a4512;border-left-color:var(--c)}
-.srow .sdot{width:8px;height:8px;border-radius:50%;background:var(--c)}.srow.needs .sdot{animation:sdot 2s ease-in-out infinite}
+.srow .sdot{width:9px;height:9px;border-radius:50%;background:var(--c)}.srow.needs .sdot{animation:sdot 2s ease-in-out infinite}
 @keyframes sdot{50%{box-shadow:0 0 0 4px #e5b54455}}
-.srow .sname{min-width:0;display:flex;flex-direction:column;line-height:1.2}
-.srow .sname b{color:var(--white);font-size:14px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.srow.receded .sname b{color:var(--text)}
-.srow .sname small{color:var(--dim);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.srow .sag .live{color:var(--green)}.srow .sag .wf{color:var(--purple)}
-.srow .smid{min-width:0;height:100%;display:flex;flex-direction:column;justify-content:center;gap:3px;padding:4px 0}
-.srow .sdo{color:var(--text);font-size:13px;line-height:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.srow .sdo .you{color:var(--blue)}.srow .sdo .cl{color:var(--cyan)}
+.srow .sname{min-width:0;display:flex;flex-direction:column;gap:2px;line-height:1.2}
+.srow .sname b{color:var(--white);font-size:15px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.srow.receded .sname b{color:var(--text)}
+.srow .sname small{color:var(--dim);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* 2 (borders) + 20 (padding) + 19 (what it is doing) + 5 + the chart + 5 + 16 (what it has been up to): 67 and the chart. */
+.srow .smid{min-width:0;height:100%;display:flex;flex-direction:column;justify-content:center;gap:5px;padding:10px 0}
+.srow .sdo{color:var(--text);font-size:14px;line-height:19px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.srow .sdo .you{color:var(--blue)}.srow .sdo .cl{color:var(--cyan)}
 .srow.needs .sdo{color:var(--amber);font-weight:600}
-.srow .sstrip{position:relative;width:100%;flex:none;height:calc(var(--rh) - 30px)}.srow.receded .sstrip{opacity:.6}
-.srow .sstrip svg{position:absolute;inset:0;width:100%;height:100%}
-.srow .snow{position:absolute;right:0;top:0;bottom:0;width:2px;background:var(--white);opacity:.9}
-.srow .lm{position:absolute;top:50%;transform:translate(-50%,-50%);font-size:11px;font-weight:800;text-shadow:0 0 4px #0d1117,0 0 2px #0d1117;pointer-events:auto}
-.srow .stk{position:absolute;bottom:0;width:2px;height:7px;transform:translateX(-50%);pointer-events:auto}
+.srow .sstrip{position:relative;width:100%;flex:none;height:clamp(12px,calc(var(--rh) - 67px),64px)}
+.srow .sbars{position:absolute;inset:0;display:flex;align-items:flex-end;gap:1px}
+.srow .sbars i{flex:1;min-width:0;min-height:2px;border-radius:2px 2px 0 0;background:linear-gradient(180deg,#56cdd6,#2f6bff)}
+.srow .sbars i:last-child{background:linear-gradient(180deg,#bdf6ff,#56cdd6)}
+.srow.receded .sbars{opacity:.55}
 .srow .sx{position:absolute;top:-2px;bottom:-2px;width:1px;background:#f5f7fa99;left:calc(var(--hx) * 100%);display:none;pointer-events:none}#cards.sx-on .srow .sx{display:block}
 .srow .sdet{color:var(--dim);font-size:12px;line-height:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.srow .sdet b{color:var(--text);font-weight:600}.srow .sdet .wf{color:var(--purple)}.srow .sdet .tool{color:var(--cyan)}.srow .sdet .now{color:var(--white)}.srow .sdet .dn{color:var(--dim)}
-.srow .sdet .ph.done{color:var(--dim)}.srow .sdet .ph.now{color:var(--white);font-weight:700}.srow .sdet .ph.next{color:#4a515c}.srow .sdet .blk{margin-left:6px}
-.srow .stail{min-width:0;display:flex;align-items:center;justify-content:flex-end;gap:8px;text-align:right;white-space:nowrap}
-.srow .stail svg{flex:none;width:26px;height:26px}.srow .sring0{width:26px;height:26px;flex:none}
-.srow .stl{min-width:0;overflow:hidden}
-.srow .st1{font-size:11.5px;overflow:hidden;text-overflow:ellipsis}.srow .st1 .sw{color:var(--c);font-weight:700;letter-spacing:.06em}.srow .st1 .stime{color:var(--dim)}
-.srow .st2{font-size:11px;color:var(--dim);overflow:hidden;text-overflow:ellipsis}.srow .st2 b{color:var(--text)}.srow .st2 .rw{color:var(--amber)}
+.srow .sdet b{color:var(--text);font-weight:600}.srow .sdet .sep{color:#4a515c}.srow .sdet .wf{color:var(--purple)}.srow .sdet .live{color:var(--green)}.srow .sdet .tool{color:var(--cyan)}.srow .sdet .now{color:var(--white)}.srow .sdet .dn{color:var(--dim)}
+.srow .sdet .bad{color:#f3a19c}.srow .sdet .bad b{color:#f0625c}.srow .sdet .bgc{color:var(--text)}
+.srow .sdet .ph.done{color:var(--dim)}.srow .sdet .ph.now{color:var(--white);font-weight:700}.srow .sdet .ph.next{color:#4a515c}
+.srow .stail{min-width:0;display:flex;align-items:center;justify-content:flex-end;gap:10px;text-align:right;white-space:nowrap}
+.srow .stail svg{flex:none;width:30px;height:30px}.srow .sring0{width:30px;height:30px;flex:none}
+.srow .stl{min-width:0;overflow:hidden;display:flex;flex-direction:column;gap:2px}
+.srow .st1{font-size:12px;overflow:hidden;text-overflow:ellipsis}.srow .st1 .sw{color:var(--c);font-weight:700;letter-spacing:.06em}.srow .st1 .stime{color:var(--dim)}
+.srow .st2{font-size:11.5px;color:var(--dim);overflow:hidden;text-overflow:ellipsis}.srow .st2 b{color:var(--text)}.srow .st2 .rw{color:var(--amber)}
 .sphead{height:20px;color:var(--dim);font-size:11px;cursor:default}.sphead .shw{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.sphead em{font-style:normal;color:var(--amber);font-weight:650}
 .sphead .sax{position:relative;height:14px}.sphead .sax span{position:absolute;transform:translateX(-50%);white-space:nowrap}.sphead .sax span:first-child{transform:none}.sphead .sax span:last-child{transform:translateX(-100%)}
 .sphead .sht{text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .stip{position:fixed;z-index:40;pointer-events:none;background:#0d1117f0;border:1px solid var(--line);border-radius:8px;padding:3px 8px;font-size:11.5px;color:var(--text);white-space:nowrap}
 .spill{position:fixed;z-index:40;pointer-events:none;background:var(--white);color:#0d1117;font-size:10.5px;font-weight:700;border-radius:8px;padding:0 6px;white-space:nowrap}
 .stip[hidden],.spill[hidden]{display:none}
-/* The ladder: one rule a tier. Tight is one line, the lane an underline; mid adds the place and a lane with marks;
-   roomy the output line, ring and runway; full an agents line and a line of detail. */
-#cards[data-tier=tight] .srow .sname small{display:none}#cards[data-tier=tight] .srow .sname b{font-size:13.5px}
-#cards[data-tier=tight] .srow .smid{padding:0;position:relative}
-#cards[data-tier=tight] .srow .sstrip{position:absolute;left:0;right:0;bottom:3px;height:5px}
-#cards[data-tier=mid] .srow .sstrip{height:clamp(10px,calc(var(--rh) - 30px),24px)}
-@media (min-width:700px){
-  #cards[data-tier=roomy] .srow .sname b,#cards[data-tier=full] .srow .sname b{font-size:15px}
-  #cards[data-tier=roomy] .srow .sdo,#cards[data-tier=full] .srow .sdo{font-size:14px;line-height:19px}
-}
-#cards[data-tier=roomy] .srow .sstrip{height:min(calc(var(--rh) - 34px),36px)}
-#cards[data-tier=full] .srow .sstrip{height:clamp(18px,calc(var(--rh) - 56px),36px)}
-#cards[data-tier=roomy] .srow .lm,#cards[data-tier=full] .srow .lm{font-size:13px}
-/* Narrow (a phone, a tall thin monitor): the name and tail on a line, then what it is doing, then the lane, full width. */
-/* A narrow row: 2 (borders) + 8 (padding) + 17 (the name line) + 2 + 16 (what it is doing) + 3, so its lane gets the
-   height less 48; on the tallest rows, less 19 more for the line of detail. */
+/* Narrow (a phone, a tall thin monitor): the name and tail on a line, then what it is doing, the chart, and what it has
+   been up to, full width. 2 + 16 (padding) + 17 (the name line) + 3 + 16 + 4 + the chart + 4 + 16: 78 and the chart. */
 @media (max-width:699.98px){
-  .srow{grid-template-columns:8px minmax(0,1fr) auto;grid-template-areas:"dot name tail" "mid mid mid";column-gap:8px;row-gap:2px;padding:4px 10px;align-content:start}
-  .srow .sdot{grid-area:dot}.srow .sname{grid-area:name}.srow .stail{grid-area:tail}.srow .smid{grid-area:mid;height:auto;padding:0;justify-content:flex-start}
-  .srow .sname small{display:none}.srow .sdo{font-size:12.5px;line-height:16px}
-  .srow .sname b{font-size:14px;line-height:17px}
-  .srow .sstrip{height:clamp(2px,calc(var(--rh) - 48px),14px)}
-  #cards[data-tier=roomy] .srow .sstrip{height:clamp(4px,calc(var(--rh) - 48px),28px)}
-  #cards[data-tier=full] .srow .sstrip{height:clamp(4px,calc(var(--rh) - 67px),28px)}
-  #cards[data-tier=roomy] .srow .lm,#cards[data-tier=full] .srow .lm{font-size:12px}
-  .sphead{grid-template-columns:minmax(0,1fr);padding:0 10px}.sphead>span,.sphead .shw,.sphead .sht{display:none}
+  .srow{grid-template-columns:8px minmax(0,1fr) auto;grid-template-areas:"dot name tail" "mid mid mid";column-gap:8px;row-gap:3px;padding:8px 12px;align-content:start}
+  .srow .sdot{grid-area:dot}.srow .sname{grid-area:name}.srow .stail{grid-area:tail}.srow .smid{grid-area:mid;height:auto;padding:0;justify-content:flex-start;gap:4px}
+  .srow .sname small{display:none}.srow .sname b{font-size:14px;line-height:17px}.srow .sdo{font-size:12.5px;line-height:16px}
+  .srow .sstrip{height:clamp(8px,calc(var(--rh) - 78px),48px)}
+  .sphead{grid-template-columns:minmax(0,1fr);padding:0 12px}.sphead>span,.sphead .shw,.sphead .sht{display:none}
   .sphead .sax span:nth-child(2),.sphead .sax span:nth-child(3),.sphead .sax span:nth-child(5),.sphead .sax span:nth-child(6){display:none}
 }
 @media (max-width:380px){.srow .st1 .stime{display:none}}
