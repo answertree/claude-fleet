@@ -480,6 +480,9 @@ function apply(text, force) {
     yes.addEventListener("click", () => decide(true)); no.addEventListener("click", () => decide(false));
     row.append(yes, no); box.append(row); return box;
   }));
+  needsStrip(d);
+  burnPanel(d.burn);
+  badge((d.counts && d.counts.needs) || 0);
   const cards = document.getElementById("cards");
   for (const det of cards.querySelectorAll("details")) open.set(det.closest(".card")?.dataset.sid + det.className, det.open);
   if (swiping || (!force && Date.now() < touchedUntil)) return void (lastText = ""); // nor under a card being swiped, or a finger scrolling
@@ -491,19 +494,12 @@ function apply(text, force) {
   savePutAway(away);
   const shown = d.sessions.filter((s) => !away[s.sid]), gone = d.sessions.filter((s) => away[s.sid]);
   // The timeline is one screen: as many cards as fit at their least, most pressing first, and the rest named on a line.
+  // The lanes are one board, every session on one axis; the other views a card or row a session.
   const fit = view === "timeline" ? timelineFit(shown.length) : shown.length;
-  const list = shown.slice(0, fit).map(build);
-  if (fit < shown.length) {
-    // Those waiting on you first, in amber, so one never hides among the rest.
-    const rest = shown.slice(fit).sort((a, b) => (b.state === "needs") - (a.state === "needs")), waiting = rest.filter((s) => s.state === "needs").length;
-    const more = el("div", "tmore"); more.append(el("b", "", "… " + rest.length + " more"));
-    if (waiting) more.append(" · ", el("em", "", waiting + " need" + (waiting === 1 ? "s" : "") + " you"));
-    more.append(": ");
-    rest.forEach((s, i) => { if (i) more.append(", "); more.append(el("span", s.state === "needs" ? "nd" : "", s.name + " (" + s.word.toLowerCase() + ")")); });
-    list.push(more);
-  }
+  const list = view === "lanes" ? [lanesBoard(shown)] : shown.slice(0, fit).map(build);
+  if (fit < shown.length) list.push(moreLine(shown.slice(fit)));
   if (!shown.length) list.push(el("div", "empty", gone.length ? "Nothing else here: everything left has finished." : "No sessions working and nothing waiting on you."));
-  if (gone.length && view !== "timeline") {
+  if (gone.length && !ONE_SCREEN.includes(view)) {
     const b = el("button", "shelf", showGone ? "Hide completed" : "Show " + gone.length + " completed"); b.type = "button";
     b.addEventListener("click", () => { showGone = !showGone; tick(); });
     list.push(b);
@@ -534,7 +530,7 @@ function apply(text, force) {
   layoutCards();
   renderFocus();
   document.getElementById("clock").textContent = new Date(d.now).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  const awayN = view === "timeline" ? d.sessions.filter((s) => putAway()[s.sid]).length : 0; // the timeline has no shelf: it says how many
+  const awayN = ONE_SCREEN.includes(view) ? d.sessions.filter((s) => putAway()[s.sid]).length : 0; // the one-screen views have no shelf: they say how many
   document.getElementById("foot").textContent = (d.hidden ? d.hidden + " idle or finished not shown · " : "") + (awayN ? awayN + " put away (the other views can show them) · " : "") + (linkDown ? "reconnecting…" : "live");
   document.getElementById("mic").hidden = !d.voice;
   document.title = (d.counts.needs ? "▲" + d.counts.needs + " " : "") + "Claude Fleet";
@@ -1000,7 +996,8 @@ new MutationObserver(() => { for (const c of $("cards").children) sized.observe(
 addEventListener("resize", relayout);
 wide.addEventListener("change", relayout);
 // ── The view, kept on this device: cards (everything), timeline (activity across the window), compact (a line a session) ──
-const VIEWS = ["cards", "timeline", "compact"];
+const VIEWS = ["cards", "timeline", "lanes", "compact"];
+const ONE_SCREEN = ["timeline", "lanes"]; // never scroll: what does not fit is named on a line instead
 let view = "cards";
 try { const v = localStorage.getItem("fleet-view"); if (VIEWS.includes(v)) view = v; } catch {}
 // A link can name the view (&view=timeline), for a screen on the wall that should always open on it.
@@ -1009,6 +1006,7 @@ function setView(v) {
   view = v;
   try { localStorage.setItem("fleet-view", v); } catch {}
   for (const x of VIEWS) document.body.classList.toggle(x, x === v);
+  document.body.classList.toggle("onescreen", ONE_SCREEN.includes(v));
   for (const b of $("views").querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.v === v));
   if (latestText) apply(latestText, true);
 }
@@ -1040,6 +1038,7 @@ function timelineFit(n) {
   return (tlFit = fit);
 }
 new ResizeObserver(() => {
+  if (view === "lanes" && latestText) return void apply(latestText, true); // its rows are cut to the room it has
   if (view !== "timeline" || !latestText) return;
   const was = [tlFit, tlCols];
   if (timelineFit(tlCount) !== was[0] || tlCols !== was[1]) apply(latestText, true);
@@ -1128,6 +1127,128 @@ function timelineCard(s) {
   c.append(body);
   return c;
 }
+// The sessions that do not fit a one-screen view, on one line: those waiting on you first, in amber.
+function moreLine(rest) {
+  rest = [...rest].sort((a, b) => (b.state === "needs") - (a.state === "needs"));
+  const waiting = rest.filter((s) => s.state === "needs").length;
+  const more = el("div", "tmore"); more.append(el("b", "", "… " + rest.length + " more"));
+  if (waiting) more.append(" · ", el("em", "", waiting + " need" + (waiting === 1 ? "s" : "") + " you"));
+  more.append(": ");
+  rest.forEach((s, i) => { if (i) more.append(", "); more.append(el("span", s.state === "needs" ? "nd" : "", s.name + " (" + s.word.toLowerCase() + ")")); });
+  return more;
+}
+// ── Lanes: every session on one time axis, a row each, like a CI run's waterfall ──
+// A cell a bar of the window, as bright as that bar was busy (on one scale for every row), the marks of what happened
+// on it; so what ran side by side, what sat quiet and when everything stopped read at a glance. One screen: rows share
+// the height, as many as fit at their least, the rest named on a line.
+const LANE_MIN = 24;
+function lanesBoard(shown) {
+  const box = el("div", "lanes"), ax = tl.axis, min = (ax && ax.minutes) || 30;
+  const room = $("cards").clientHeight - 28;
+  const fit = !room || shown.length * LANE_MIN <= room ? shown.length : Math.max(1, Math.floor((room - 26) / LANE_MIN));
+  const head = el("div", "lrow lhead"), axis = el("div", "llane lax");
+  for (const f of [0, 1 / 6, 2 / 6, 3 / 6, 4 / 6, 5 / 6, 1]) { const a = el("span", "", f === 1 ? "now" : agoText(min * (1 - f)) + (f ? "" : " ago")); a.style.left = f * 100 + "%"; axis.append(a); }
+  head.append(el("div", "lname", shown.length + " session" + (shown.length === 1 ? "" : "s")), axis, el("div", "lfig", "tools · out"));
+  box.append(head);
+  for (const s of shown.slice(0, fit)) {
+    const r = el("div", "lrow" + (s.state === "needs" ? " needs" : "")); r.style.setProperty("--c", s.color); r.dataset.sid = s.sid;
+    r.title = "Open " + s.name;
+    r.addEventListener("click", tapped(() => openFocus(s.sid)));
+    const nm = el("div", "lname"); nm.append(el("b", "", s.name), el("small", "", (s.glyph ? s.glyph + " " : "") + s.word.toLowerCase() + (s.time ? " · " + s.time : "")));
+    const lane = el("div", "llane"), fig = el("div", "lfig");
+    if (s.timeline) {
+      const t = s.timeline, n = t.tools.length || 1;
+      const svg = svgEl("svg", { viewBox: "0 0 " + n + " 1", preserveAspectRatio: "none" });
+      t.tools.forEach((v, i) => svg.append(svgEl("rect", { x: i + 0.08, y: 0, width: 0.84, height: 1, rx: "0.15", fill: s.color, "fill-opacity": v ? (0.28 + 0.72 * Math.sqrt(v / tl.tools)).toFixed(2) : "0.06" })));
+      lane.append(svg);
+      for (const m of t.marks) { const g = el("span", "lm", m.g); g.style.left = ((m.i + 0.5) / n) * 100 + "%"; g.style.color = m.c; g.title = MARKS[m.g] || ""; lane.append(g); }
+      fig.append(el("b", "", kfmt(t.tools.reduce((a, b) => a + b, 0))), " · " + kfmt(t.out.reduce((a, b) => a + b, 0)));
+    }
+    r.append(nm, lane, fig);
+    box.append(r);
+  }
+  if (fit < shown.length) box.append(moreLine(shown.slice(fit)));
+  return box;
+}
+// ── Needs you: every session waiting on you, its question and its choices, above every view but the cards (whose
+// waiting card has them) ──
+// A choice, Esc or Enter is tapped twice, as on a card; a line typed is sent. It never re-renders under your typing.
+function needsStrip(d) {
+  const box = $("needs");
+  if (box.contains(document.activeElement) && document.activeElement.tagName === "INPUT") return;
+  const waiting = view === "cards" || !opts.strip ? [] : (d.sessions || []).filter((s) => s.state === "needs");
+  const rows = waiting.slice(0, 3).map((s) => {
+    const r = el("div", "nrow"); r.dataset.k = s.sid;
+    const nm = el("button", "nname", "▲ " + s.name); nm.type = "button"; nm.title = "Open " + s.name; nm.addEventListener("click", () => openFocus(s.sid));
+    const q = el("div", "nq", (s.sub && s.sub.text) || "waiting on you");
+    const acts = el("div", "nacts");
+    const sc = screens.get(s.sid);
+    if (!sc || (!sc.loading && Date.now() - sc.at > 8000)) void readScreen(s.sid);
+    for (const o of (sc && sc.options) || []) acts.append(armable(s, "k" + o.key, "pick", [el("span", "k", o.key), el("span", "", o.label)], o.key + ". " + o.label, { key: o.key }));
+    acts.append(armable(s, "esc", "chip key", ["Esc"], "Esc", { key: "X" }), armable(s, "enter", "chip key", ["Enter"], "Enter", { key: "E" }));
+    const f = el("form", "nsend"), inp = el("input"); inp.placeholder = "answer " + s.name + "…"; inp.value = drafts.get(s.sid) || ""; inp.dataset.k = s.sid;
+    inp.addEventListener("input", () => drafts.set(s.sid, inp.value));
+    const go = el("button", "", "Send"); go.type = "submit"; f.append(inp, go);
+    f.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const text = inp.value.trim(); if (!text) return;
+      notes.set(s.sid, { cls: "", text: "sending…" }); inp.blur(); tick();
+      const res = await post("api/send", { sid: s.sid, text });
+      if (res.ok) drafts.delete(s.sid);
+      notes.set(s.sid, res.ok ? { cls: "ok", text: (res.queued ? "queued ⏳" : "sent ✓") } : { cls: "err", text: "not sent: " + (res.error || "unknown") });
+      screens.delete(s.sid); tick();
+    });
+    acts.append(f);
+    const note = notes.get(s.sid); if (note && note.text) acts.append(el("span", "nnote " + (note.cls || ""), note.text));
+    r.append(nm, q, acts);
+    return r;
+  });
+  if (waiting.length > 3) rows.push(el("div", "nmore", "+ " + (waiting.length - 3) + " more waiting on you"));
+  const fresh = el("div", "needs-strip"); fresh.id = "needs"; fresh.append(...rows);
+  if (shapeOf(box) === shapeOf(fresh)) patch(box, fresh); else box.replaceChildren(...rows);
+}
+// ── Eating the five hours: each session's share of the output since the window began ──
+const BURN_COLOURS = ["#61aaff", "#be94ff", "#56cdd6", "#e5b544", "#50c878", "#f08c5c", "#f5a3c7", "#9fb3c8"];
+const hashOf = (text) => { let h = 0; for (const ch of text) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return h; };
+function burnPanel(b) {
+  const box = $("burn");
+  if (!b || !b.total || !opts.burn) return void box.replaceChildren();
+  const since = new Date(b.since).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const head = el("div", "bh"); head.append(el("b", "", "Eating the 5 hours"), el("span", "", kfmt(b.total) + " tokens out since " + since));
+  const bar = el("div", "bbar"), leg = el("div", "bleg"), used = new Set();
+  // A colour a session, from its id, so it keeps its colour as the order changes.
+  const colourOf = (sid) => { let i = hashOf(sid) % BURN_COLOURS.length; while (used.has(i) && used.size < BURN_COLOURS.length) i = (i + 1) % BURN_COLOURS.length; used.add(i); return BURN_COLOURS[i]; };
+  const part = (name, out, colour) => {
+    const pct = (out / b.total) * 100, seg = el("i"); seg.style.width = pct + "%"; seg.style.background = colour; seg.title = name + ": " + Math.round(pct) + "% · " + kfmt(out) + " out"; bar.append(seg);
+    const k = el("span", "bk"), dot = el("i"); dot.style.background = colour; k.append(dot, name + " ", el("b", "", (pct < 1 ? "<1" : Math.round(pct)) + "%")); leg.append(k);
+  };
+  for (const x of b.top) part(x.name, x.out, colourOf(x.sid));
+  if (b.rest) part(b.others + " other" + (b.others === 1 ? "" : "s"), b.rest, "#3a4250");
+  box.replaceChildren(head, bar, leg);
+}
+// ── Badges: how many wait on you, on the installed app's icon (where the browser can) and on the tab's icon ──
+let badgeWas = -1;
+const iconWas = new Map();
+function badge(n, force) {
+  if (!opts.badge) n = 0;
+  if (n === badgeWas && !force) return;
+  badgeWas = n;
+  try { if (navigator.setAppBadge) (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => {}); } catch {}
+  const links = [...document.querySelectorAll('link[rel="icon"]')];
+  for (const l of links) if (!iconWas.has(l)) iconWas.set(l, l.href);
+  if (!n) { for (const l of links) l.href = iconWas.get(l); return; }
+  const img = new Image();
+  img.onload = () => {
+    if (badgeWas !== n) return;
+    const c = document.createElement("canvas"); c.width = c.height = 64;
+    const g = c.getContext("2d"); g.drawImage(img, 0, 0, 64, 64);
+    g.beginPath(); g.arc(44, 20, 19, 0, Math.PI * 2); g.fillStyle = "#e5b544"; g.fill(); g.lineWidth = 3; g.strokeStyle = "#0d1117"; g.stroke();
+    g.fillStyle = "#1a1300"; g.font = "bold 26px -apple-system,system-ui,sans-serif"; g.textAlign = "center"; g.textBaseline = "middle"; g.fillText(n > 9 ? "9+" : String(n), 44, 21);
+    const url = c.toDataURL("image/png");
+    for (const l of links) l.href = url;
+  };
+  img.src = "/icon-192.png";
+}
 function compactRow(s) {
   const r = el("div", "crow" + (s.state === "needs" ? " needs" : "")); r.style.setProperty("--c", s.color);
   const n = el("div", "rn"); n.append(el("b", "", s.name), el("small", "", s.place || ""));
@@ -1143,12 +1264,13 @@ const narrow = matchMedia("(max-width:440px)");
 for (const b of $("views").querySelectorAll("button")) b.addEventListener("click", () => setView(narrow.matches ? VIEWS[(VIEWS.indexOf(view) + 1) % VIEWS.length] : b.dataset.v));
 // The CLI's keys: 1 cards (detail), 2 compact, 3 timeline. Not while you type, nor over a sheet or the focus view.
 addEventListener("keydown", (e) => {
-  const v = { 1: "cards", 2: "compact", 3: "timeline" }[e.key];
+  const v = { 1: "cards", 2: "compact", 3: "timeline", 4: "lanes" }[e.key];
   if (!v || e.metaKey || e.ctrlKey || e.altKey || /^(TEXTAREA|INPUT|SELECT)$/.test((document.activeElement || {}).tagName || "")) return;
   if (focusSid || $("newsheet").classList.contains("on") || $("voice").classList.contains("on")) return;
   setView(v);
 });
 for (const x of VIEWS) document.body.classList.toggle(x, x === view);
+document.body.classList.toggle("onescreen", ONE_SCREEN.includes(view));
 for (const b of $("views").querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.v === view));
 
 // ── The focus view: one session with everything open, and what its own terminal shows ──
@@ -1228,6 +1350,44 @@ $("newbtn").addEventListener("click", () => {
   $("newsheet").classList.add("on"); $("newsheet").setAttribute("aria-hidden", "false");
 });
 $("newx").addEventListener("click", closeNew);
+// ── The menu (⋯): the views by name, starting a session, and the options, kept on this device ──
+const OPT_DEFAULTS = { strip: true, burn: true, badge: true };
+let opts = { ...OPT_DEFAULTS };
+try { opts = { ...OPT_DEFAULTS, ...JSON.parse(localStorage.getItem("fleet-opts") || "{}") }; } catch {}
+const OPTIONS = [
+  ["strip", "Needs you strip", "The sessions waiting on you, answerable, above every view but the cards"],
+  ["burn", "Eating the 5 hours", "Each session's share of the output since the five-hour window began"],
+  ["badge", "Badge the icon", "How many wait on you, on the app's icon and the tab's"],
+];
+const VIEW_NAMES = { cards: ["Cards", "1", "everything about each session"], compact: ["Compact", "2", "a line a session"], timeline: ["Timeline", "3", "activity across the window, one screen"], lanes: ["Lanes", "4", "every session on one time axis, one screen"] };
+function setOpt(k, on) {
+  opts[k] = on;
+  try { localStorage.setItem("fleet-opts", JSON.stringify(opts)); } catch {}
+  if (k === "badge" && !on) badge(0, true);
+  if (latestText) apply(latestText, true);
+  renderMenu();
+}
+function renderMenu() {
+  const m = $("menu"), item = (cls, label, small, right, go) => {
+    const b = el("button", "mi " + cls); b.type = "button"; b.setAttribute("role", "menuitem");
+    const t = el("span", "mt"); t.append(el("b", "", label)); if (small) t.append(el("small", "", small));
+    b.append(t); if (right) b.append(right);
+    b.addEventListener("click", go); return b;
+  };
+  const views = el("div", "mg"); views.append(el("div", "mh", "View"));
+  for (const v of VIEWS) { const [name, key, about] = VIEW_NAMES[v] || [v, "", ""]; views.append(item(v === view ? "on" : "", name, about, el("kbd", "", key), () => { setView(v); closeMenu(); })); }
+  const acts = el("div", "mg"); acts.append(el("div", "mh", "Do"));
+  acts.append(item("", "Start a session", "in a folder where one already runs", el("kbd", "", "+"), () => { closeMenu(); $("newbtn").click(); }));
+  const opt = el("div", "mg"); opt.append(el("div", "mh", "Show"));
+  for (const [k, label, about] of OPTIONS) { const sw = el("span", "sw" + (opts[k] ? " on" : "")); sw.append(el("i")); opt.append(item("", label, about, sw, () => setOpt(k, !opts[k]))); }
+  m.replaceChildren(views, acts, opt);
+}
+function openMenu() { renderMenu(); $("menu").hidden = false; $("menubtn").setAttribute("aria-expanded", "true"); }
+function closeMenu() { $("menu").hidden = true; $("menubtn").setAttribute("aria-expanded", "false"); }
+$("menubtn").addEventListener("click", (e) => { e.stopPropagation(); $("menu").hidden ? openMenu() : closeMenu(); });
+$("menu").addEventListener("click", (e) => e.stopPropagation());
+addEventListener("click", () => { if (!$("menu").hidden) closeMenu(); });
+addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("menu").hidden) closeMenu(); });
 $("newsheet").addEventListener("click", (e) => { if (e.target === $("newsheet")) closeNew(); });
 $("mic").addEventListener("click", openVoice);
 $("vend").addEventListener("click", () => closeVoice());

@@ -6215,6 +6215,27 @@ export function pulseOf(sessions: Session[], now: number) {
   const bars = bucketsIn(tails.map((t) => t.tools), win);
   return { bars, tools: human(sum(bars)), out: human(tokensIn(tails, win)), bar: barLabel(win), machines: new Set(sessions.map((s) => s.remote?.host ?? selfHost())).size };
 }
+/**
+ * Who is eating the five-hour limit: each session's output tokens since the current five-hour window began (from the
+ * account's reset, or the last five hours when there is no figure), every session counted, the busiest first, the
+ * rest summed. Output tokens stand in for use: the limit's own split is not published.
+ */
+export function burnOf(sessions: Session[], now: number) {
+  const five = fiveHourLine(now);
+  const since = five.start && five.start <= now ? five.start : now - 5 * 3600_000;
+  const rows = sessions
+    .map((s) => {
+      let out = 0;
+      for (const t of tailsOf(s)) for (const [ts, n] of t.tokens.values()) if (ts >= since && ts <= now) out += n;
+      return { sid: s.sid, name: sessionTitle(s.name), out };
+    })
+    .filter((x) => x.out > 0)
+    .sort((a, b) => b.out - a.out);
+  const total = sum(rows.map((x) => x.out));
+  const top = rows.slice(0, 7);
+  const rest = sum(rows.slice(7).map((x) => x.out));
+  return { since, total, top, rest, others: Math.max(0, rows.length - 7) };
+}
 /** Bars in a timeline card's charts on the phone page: fine enough for a full browser width, a few hundred bytes a session. */
 export const TIMELINE_BARS = 120;
 /**
@@ -6306,6 +6327,7 @@ export function webState(sessions: Session[], now: number, full = true, everythi
     build: FLEET_BUILD, // which fleet.ts made this: an open page that was made by another reloads itself
     counts,
     five: fiveHourLine(now), // the five-hour limit's forecast, always said
+    burn: full ? burnOf(sessions, now) : undefined, // who is eating the five hours: output tokens by session since the window began
     pulse: full ? pulseOf(sessions, now) : undefined, // tool calls across the fleet, as the CLI's header
     timeline: full ? { start: tlWin.start, end: tlWin.end, bar: barLabel(tlWin), minutes: opt.windowMin } : undefined, // the timeline view's time axis
     places: full ? newPlaces(sessions) : undefined, // where the page may start a session: the folders sessions run in, by machine
