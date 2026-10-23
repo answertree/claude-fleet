@@ -6528,6 +6528,8 @@ describe("the page's own scripts", () => {
       const names = [...src.matchAll(/^(?:async\s+)?function\s+(\w+)\s*\(/gm)].map((m) => m[1]);
       expect(names.filter((n, i) => names.indexOf(n) !== i)).toEqual([]);
     }
+    // The orbit view is a module (it imports three.js): it parses as one.
+    expect(() => new Bun.Transpiler({ loader: "js" }).scan(fs.readFileSync(path.join(here, "web/orbit.js"), "utf8"))).not.toThrow();
   });
 });
 
