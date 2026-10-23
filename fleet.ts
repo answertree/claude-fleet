@@ -794,11 +794,18 @@ export class Row {
 export interface TaskTrace {
   started?: number;
   finished?: number;
+  deleted?: boolean; // it ended by being deleted, not done
+  past?: [number, number][]; // earlier stretches in progress, for a task reopened: the web timeline's stack counts them too
   say?: { text: string; t: number };
 }
 const TASK_TRACE_MAX = 400; // tasks remembered per transcript; the oldest is let go first
 const TASK_SAY_KEEP = 4_000; // a task's latest message, kept for its first line (a few in focus)
 
+/** A Bash command that commits: `git commit`, with any of git's own options before the verb (`git -c user.name=x commit`). */
+export const GIT_COMMIT = /(^|[;&|(]\s*|\s|["'])git(\s+-\S+(\s+[^-\s]\S*)?)*\s+commit(?=\s|$|["'])/;
+/** What git prints for a commit it made: "[main 1a2b3c4] the message", or "[main (root-commit) 1a2b3c4] …". A command that
+ *  only mentions a commit (a pull request's text, a search), or one a hook refused, prints no such line. */
+export const GIT_COMMITTED = /^\[[^\]\n]+ [0-9a-f]{7,40}\] /m;
 export interface Tail {
   path: string;
   offset: number;
@@ -829,6 +836,8 @@ export interface Tail {
   compactions: number; // times its context was compacted
   compactLog: number[]; // when, for the timeline
   askLog: number[]; // when you typed to it, for the timeline
+  commitLog: number[]; // when it committed (git said it made the commit), for the web timeline
+  commitAsked: Map<string, number>; // git commit calls not yet answered, by tool call id, with when they were made
   cwd?: string; // where it is working, from its own lines
   sayTs: number[]; // when each of its replies in the window was written, for "new since you looked"
   summary?: string; // the session's own "while you were away" summary
@@ -907,10 +916,18 @@ export function traceTask(t: Tail, input: any, ts: number) {
   }
   t.taskFocus = t.taskFocus.filter((x) => x !== id);
   if (status === "in_progress") {
+    if (e.started !== undefined && e.finished !== undefined) {
+      (e.past ??= []).push([e.started, e.finished]);
+      if (e.past.length > 8) e.past.shift();
+    }
     e.started = ts;
     e.finished = undefined;
+    e.deleted = undefined;
     t.taskFocus.push(id);
-  } else e.finished = ts;
+  } else {
+    e.finished = ts;
+    e.deleted = status === "deleted" || undefined;
+  }
 }
 export interface PrLink {
   repo: string;
@@ -950,6 +967,14 @@ function noteEdit(t: Tail, input: any, ts: number) {
 /** A tool result's text, whether it came as a string or as blocks. */
 const resultText = (c: unknown): string => (typeof c === "string" ? c : Array.isArray(c) ? c.map((x: any) => (x?.type === "text" && typeof x.text === "string" ? x.text : "")).join("\n") : "");
 /** A tool call's result: a background command's shell id, or a failure to remember. */
+/** A git commit call's result: a commit, at the time it was asked for, once git says it made it. Agents' too. */
+function noteCommit(t: Tail, item: any) {
+  const id = typeof item?.tool_use_id === "string" ? item.tool_use_id : "";
+  const asked = id ? t.commitAsked?.get(id) : undefined;
+  if (asked === undefined) return;
+  t.commitAsked.delete(id);
+  if (item?.is_error !== true && GIT_COMMITTED.test(resultText(item.content).slice(0, 4000))) t.commitLog.push(asked);
+}
 function noteResult(t: Tail, item: any, ts: number) {
   const id = typeof item?.tool_use_id === "string" ? item.tool_use_id : "";
   const asked = id ? t.bgAsked.get(id) : undefined;
@@ -1028,6 +1053,10 @@ export function ingest(t: Tail, line: string) {
       for (const item of content) {
         if (item?.type === "tool_use") {
           t.tools.push(ts);
+          if (item.name === "Bash" && typeof item.id === "string" && GIT_COMMIT.test(String(item.input?.command ?? ""))) {
+            t.commitAsked.set(item.id, ts); // a commit once git says it made one
+            capMap(t.commitAsked, 50);
+          }
           t.lastTool = { name: safeLine(capText(String(item.name ?? ""), 200)), hint: safeLine(capText(hintFor(item.name, item.input), NOTE_KEEP)), t: ts };
           if (!o.isSidechain && item.name === "TaskUpdate") traceTask(t, item.input, ts);
           if (!o.isSidechain) {
@@ -1070,7 +1099,10 @@ export function ingest(t: Tail, line: string) {
     }
   } else if (Array.isArray(content) && content.some((i: any) => i?.type === "tool_result")) {
     t.lastResultT = Math.max(t.lastResultT, ts);
-    if (!o.isSidechain) for (const item of content) if (item?.type === "tool_result") noteResult(t, item, ts);
+    for (const item of content) if (item?.type === "tool_result") {
+      noteCommit(t, item);
+      if (!o.isSidechain) noteResult(t, item, ts);
+    }
   } else if (!o.isMeta && !o.isSidechain) {
     // Something the person typed. Harness-injected turns start with a tag; skip those, though a notice that a background command ended is noted.
     const texts: string[] = typeof content === "string" ? [content] : Array.isArray(content) ? content.filter((i: any) => i?.type === "text").map((i: any) => String(i.text ?? "")) : [];
@@ -1136,6 +1168,8 @@ export function newTail(file: string, start = 0, birth = 0): Tail {
     compactions: 0,
     compactLog: [],
     askLog: [],
+    commitLog: [],
+    commitAsked: new Map(),
     sayTs: [],
     ctxLog: [],
     tokens: new Map(),
@@ -1272,6 +1306,7 @@ function prune(now: number) {
   for (const t of tails.values()) {
     if (t.tools.length && t.tools[0] < cutoff) t.tools = t.tools.filter((x) => x >= cutoff);
     if (t.sayTs.length && t.sayTs[0] < cutoff) t.sayTs = t.sayTs.filter((x) => x >= cutoff);
+    if (t.commitLog.length && t.commitLog[0] < cutoff) t.commitLog = t.commitLog.filter((x) => x >= cutoff);
     if (t.tokens.size > 5000) for (const [k, v] of t.tokens) if (v[0] < cutoff) t.tokens.delete(k);
   }
 }
@@ -5921,7 +5956,7 @@ export function marksOf(s: Session): [t: number, weight: number, glyph: string, 
   for (const m of s.mains) for (const t of m.askLog) marks.push([t, 1, ICON.you, C.blue]);
   for (const p of s.side?.prs ?? []) marks.push([p.t, 2, ICON.pr, C.text]);
   for (const w of s.workflows) marks.push([w.started, 3, ICON.workflow, C.purple]);
-  for (const m of s.mains) for (const tr of m.taskLog.values()) if (tr.finished) marks.push([tr.finished, 4, ICON.done, C.green]);
+  for (const m of s.mains) for (const tr of m.taskLog.values()) if (tr.finished && !tr.deleted) marks.push([tr.finished, 4, ICON.done, C.green]); // deleted is not done
   return marks;
 }
 
@@ -6243,6 +6278,72 @@ export const TIMELINE_BARS = 120;
  * bar each across the window, and what happened when (the weightiest mark wins a bar shared by two, as on the terminal),
  * each placed by its bar. With the CPU and memory of its processes.
  */
+/**
+ * The web timeline's stack: a session's tool calls a bar each, split by what made them. The main thread's go to the
+ * task in hand when it made them (the last started of those in progress), else to the main thread; a workflow's agents'
+ * to that workflow; an agent of the session's own to that agent. The busiest few in the window, in the order they
+ * began, and the rest summed as one.
+ */
+export const STACK_LAYERS = 5;
+export function toolStackOf(s: Session, win: Win): { key: string; name: string; kind: "main" | "task" | "workflow" | "agent" | "other"; v: number[] }[] {
+  type Layer = { key: string; name: string; kind: "main" | "task" | "workflow" | "agent"; from: number; n: number; v: number[] };
+  const layers = new Map<string, Layer>();
+  const add = (key: string, name: string, kind: Layer["kind"], ts: number) => {
+    const k = barOf(ts, win);
+    if (k < 0 || k >= win.n) return;
+    let l = layers.get(key);
+    if (!l) layers.set(key, (l = { key, name, kind, from: ts, n: 0, v: new Array(win.n).fill(0) }));
+    l.v[k]++, l.n++, (l.from = Math.min(l.from, ts));
+  };
+  const names = new Map((s.tasks?.items ?? []).map((i) => [i.id, i.activeForm || i.subject]));
+  // A tail's calls in the window, newest back to the window's start (they are in time order).
+  const inWin = (tools: number[]) => { let i = tools.length; while (i > 0 && tools[i - 1] >= win.start) i--; return tools.slice(i).filter((ts) => ts < win.end); };
+  for (const m of s.mains) {
+    const spans: { id: string; from: number; to: number }[] = [];
+    for (const [id, tr] of m.taskLog ?? []) {
+      if (!names.has(id)) continue;
+      for (const [from, to] of tr.past ?? []) spans.push({ id, from, to });
+      if (tr.started !== undefined) spans.push({ id, from: tr.started, to: tr.finished ?? Infinity });
+    }
+    const live = spans.filter((sp) => sp.from < win.end && sp.to > win.start).sort((a, b) => a.from - b.from);
+    for (const ts of inWin(m.tools)) {
+      let task: { id: string } | undefined;
+      for (const sp of live) if (sp.from <= ts && ts < sp.to) task = sp; // the last started of those in progress
+      if (task) add("task:" + task.id, names.get(task.id)!, "task", ts);
+      else add("main", "main thread", "main", ts);
+    }
+  }
+  for (const a of s.agents) for (const ts of inWin(a.tail.tools)) add("agent:" + a.id, a.label || a.type || "an agent", "agent", ts);
+  for (const w of s.workflows) for (const a of w.agents) for (const ts of inWin(a.tail.tools)) add("wf:" + w.id, w.name, "workflow", ts);
+  const all = [...layers.values()].sort((a, b) => b.n - a.n);
+  const out: ReturnType<typeof toolStackOf> = all.slice(0, STACK_LAYERS).sort((a, b) => a.from - b.from).map((l) => ({ key: l.key, name: l.name, kind: l.kind, v: l.v }));
+  const rest = all.slice(STACK_LAYERS);
+  if (rest.length) out.push({ key: "other", name: rest.length + " more", kind: "other", v: rest.reduce((acc, l) => acc.map((x, i) => x + l.v[i]), new Array(win.n).fill(0)) });
+  return out;
+}
+/**
+ * What happened when, for the web timeline's icons: you typing to it, its replies, commits, pull requests linked,
+ * workflows started, tasks finished. The weightiest in each bar.
+ */
+export function notesOf(s: Session, win: Win): { i: number; g: string; c: string }[] {
+  const at = new Map<number, [number, string, RGB]>();
+  const note = (t: number, weight: number, glyph: string, color: RGB) => {
+    const i = barOf(t, win);
+    if (i < 0 || i >= win.n) return;
+    if (!at.has(i) || at.get(i)![0] < weight) at.set(i, [weight, glyph, color]);
+  };
+  for (const m of s.mains) for (const t of m.sayTs ?? []) note(t, 1, ICON.claude, C.cyan);
+  for (const m of s.mains) for (const t of m.askLog ?? []) note(t, 2, ICON.you, C.blue);
+  for (const w of s.workflows) note(w.started, 3, ICON.workflow, C.purple);
+  for (const p of s.side?.prs ?? []) note(p.t, 4, ICON.pr, C.text);
+  for (const t of tailsOf(s)) for (const c of t.commitLog ?? []) note(c, 5, "◉", C.amber);
+  for (const m of s.mains)
+    for (const tr of m.taskLog?.values() ?? []) {
+      for (const [, end] of tr.past ?? []) note(end, 6, ICON.done, C.green); // finished, then reopened
+      if (tr.finished && !tr.deleted) note(tr.finished, 6, ICON.done, C.green); // deleted is not done
+    }
+  return [...at].sort((a, b) => a[0] - b[0]).map(([i, [, g, c]]) => ({ i, g, c: hexOf(c) }));
+}
 export function timelineOf(s: Session, win: Win) {
   const tails = tailsOf(s);
   const out = new Array(win.n).fill(0);
@@ -6262,6 +6363,8 @@ export function timelineOf(s: Session, win: Win) {
     tools: bucketsIn(tails.map((t) => t.tools), win),
     out,
     marks: [...at].sort((a, b) => a[0] - b[0]).map(([i, [, g, c]]) => ({ i, g, c: hexOf(c) })),
+    stack: toolStackOf(s, win),
+    notes: notesOf(s, win),
     cpu: Math.round(use.cpu),
     mem: use.known || use.rss ? gb(use.rss * 1024) : undefined,
   };

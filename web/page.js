@@ -1036,7 +1036,8 @@ function timelineScale(d) {
 }
 const kfmt = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e4 ? Math.round(n / 1e3) + "k" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n));
 const agoText = (min) => (min >= 120 ? Math.round(min / 60) + "h" : min >= 60 ? (min / 60).toFixed(1).replace(".0", "") + "h" : Math.round(min) + "m");
-const MARKS = { "▸": "you typed to it", "⇡": "it linked a pull request", "≡": "a workflow started", "◇": "a workflow started", "✓": "a task finished" };
+const NOTE_WEIGHT = { "◆": 1, "▸": 2, "≡": 3, "◇": 3, "⇡": 4, "◉": 5, "✓": 6 };
+const MARKS = { "▸": "you typed to it", "◆": "it replied", "◉": "it committed", "⇡": "it linked a pull request", "≡": "a workflow started", "◇": "a workflow started", "✓": "a task finished" };
 // ── Timeline: a row a session, with room to breathe ──
 // A Compact row a session (its dot, name, what it is doing or asking, state · time · context) with, under the words, a
 // bar chart of its tool calls drawn as the Fleet pulse up top draws the fleet's (a bar a minute, every row on one
@@ -1051,7 +1052,8 @@ function spGroup(a, ax) {
   const k = Math.max(1, Math.ceil(a.length / SP.BARS)), bar = ax ? (ax.end - ax.start) / a.length : 0, first = bar ? Math.round(ax.start / bar) : 0;
   const v = [], at = [];
   a.forEach((n, i) => { const g = Math.floor((first + i) / k); if (!v.length || g !== at[at.length - 1].g) { v.push(0); at.push({ g, t: ax ? ax.start + i * bar : 0 }); } v[v.length - 1] += n; });
-  return { v, at };
+  const g0 = Math.floor(first / k);
+  return { v, at, of: (i) => Math.floor((first + i) / k) - g0 }; // which of its bars bucket i is in
 }
 let spLast = { n: 0, fit: -1, h: 0, tier: "" };
 const spNarrow = () => matchMedia("(max-width:699.98px)").matches; // the same breakpoint as the narrow CSS
@@ -1093,12 +1095,74 @@ function ctxParts(s) {
 // What it has been up to, the most useful first: failures, its workflows (the one running, with its phases), its
 // agents, the task in hand, its newest pull request, what runs in the background; else what the main thread is on.
 // Never the question again: the line above has it.
+// The stack's colours: the brand's, distinct from one another, a layer each in the order they began; the rest in slate.
+const STACK_COLOURS = ["#25d8fc", "#2f6bff", "#8b5cf6", "#f472b6", "#be94ff", "#f59e5b"], STACK_OTHER = "#4a5568";
+const stackOfRow = (t) => (t.stack && t.stack.length ? t.stack : [{ key: "all", name: "tool calls", kind: "main", v: t.tools }]);
+// A layer's colour from its key, so a band keeps its colour as the window slides and the busiest five change; a key whose
+// colour another layer of the row already has takes the next free one.
+const keyHash = (k) => { let h = 7; for (const ch of String(k)) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return h; };
+function stackColours(layers) {
+  const used = new Set();
+  return layers.map((l) => {
+    if (l.kind === "other") return STACK_OTHER;
+    let i = keyHash(l.key || l.name) % STACK_COLOURS.length;
+    for (let n = 0; n < STACK_COLOURS.length && used.has(i); n++) i = (i + 1) % STACK_COLOURS.length;
+    used.add(i); return STACK_COLOURS[i];
+  });
+}
+// A smooth line through points (each corner rounded through the midpoints), the same curve read either way, so a
+// layer's top and the next layer's bottom meet exactly.
+const smoothPath = (pts) => {
+  let d = " L" + pts[0][0] + " " + pts[0][1] + " L" + (pts[0][0] + pts[1][0]) / 2 + " " + ((+pts[0][1] + +pts[1][1]) / 2).toFixed(4);
+  for (let i = 1; i < pts.length - 1; i++) d += " Q" + pts[i][0] + " " + pts[i][1] + " " + (pts[i][0] + pts[i + 1][0]) / 2 + " " + ((+pts[i][1] + +pts[i + 1][1]) / 2).toFixed(4);
+  const l = pts[pts.length - 1]; return d + " L" + l[0] + " " + l[1];
+};
+// A session's tool calls as a stacked area: what made them (the task in hand, a workflow, an agent), on the one scale
+// every row shares, with the icons of what happened along the top: you typing, its replies, commits, pull requests,
+// workflows starting, tasks finishing.
+function stackChart(t) {
+  const svg = svgEl("svg", { viewBox: "0 0 " + SP.BARS + " 1", preserveAspectRatio: "none" });
+  const layers = stackOfRow(t), cols = stackColours(layers), G = layers.map((l) => spGroup(l.v, tl.axis).v), N = G[0].length;
+  svg.setAttribute("viewBox", "0 0 " + N + " 1");
+  const y = (v) => (1 - Math.min(1, v / tl.bars) * 0.94).toFixed(4);
+  const pts = (vals) => [[0, y(vals[0])], ...vals.map((v, i) => [i + 0.5, y(v)]), [N, y(vals[N - 1])]];
+  let base = new Array(N).fill(0);
+  layers.forEach((l, li) => {
+    const top = base.map((b, i) => b + G[li][i]), c = cols[li];
+    if (G[li].some(Boolean)) {
+      const lower = pts(base).reverse();
+      svg.append(svgEl("path", { d: "M" + smoothPath(pts(top)).slice(2) + smoothPath(lower) + "Z", fill: c, "fill-opacity": ".55" }));
+      svg.append(svgEl("path", { d: "M" + smoothPath(pts(top)).slice(2), fill: "none", stroke: c, "stroke-width": "1.5", "stroke-linejoin": "round", "vector-effect": "non-scaling-stroke" }));
+    }
+    base = top;
+  });
+  svg.append(svgEl("line", { x1: 0, x2: N, y1: 1, y2: 1, stroke: "#262d37", "stroke-width": "1", "vector-effect": "non-scaling-stroke" }));
+  const box = el("div", "sstrip"); box.append(svg);
+  // Each icon in the bar the chart drew its moment in, sat on the stack there (inside the strip); two too close to read
+  // apart keep the weightier: a finished task, then a commit, a pull request, a workflow, you, a reply.
+  const g0 = spGroup(new Array(t.tools.length).fill(0), tl.axis), kept = [];
+  for (const m of t.notes || t.marks || []) {
+    const gi = Math.max(0, Math.min(N - 1, g0.of(m.i))), at = ((gi + 0.5) / N) * 100, w = NOTE_WEIGHT[m.g] || 0;
+    const near = kept.find((k) => Math.abs(k.at - at) < 1.4);
+    if (near) { if (near.w >= w) continue; kept.splice(kept.indexOf(near), 1); }
+    kept.push({ m, gi, at, w });
+  }
+  for (const { m, gi, at } of kept) {
+    const h = Math.min(1, base[gi] / tl.bars) * 94;
+    const g = el("span", "lm", m.g); g.style.left = at + "%"; g.style.bottom = "min(calc(" + h.toFixed(1) + "% + 2px), calc(100% - 12px))"; g.style.color = m.c; g.title = MARKS[m.g] || ""; box.append(g);
+  }
+  box.append(el("i", "sx"));
+  return box;
+}
+// The colour a name has in a session's stack, to tie the line of what it is up to to its chart: of two layers with the
+// one name (a workflow run twice), the later, which is the one still going.
+const swatchFor = (t, kind, name) => { if (!t || !name) return null; const L = stackOfRow(t), i = L.findLastIndex((l) => l.kind === kind && l.name === name); if (i < 0) return null; const sw = el("i", "ssw"); sw.style.background = stackColours(L)[i]; return sw; };
 function infoParts(s) {
   const parts = [], R = s.roster || { workflows: [] }, wfs = s.workflows || [], ags = s.agents || [];
   if (s.fails) { const f = el("span", "bad"); f.append("✗ ", el("b", "", s.fails.n + " failed"), " " + s.fails.last); parts.push(f); }
   const w = (R.workflows || []).find((x) => x.outcome === "running");
   if (w) {
-    const f = el("span"); f.append(el("b", "wf", "≡ " + w.name));
+    const f = el("span"), sw = swatchFor(s.timeline, "workflow", w.name); if (sw) f.append(sw); f.append(el("b", "wf", "≡ " + w.name));
     for (const ph of w.phases || []) f.append(" ", el("span", "ph " + ph.state, (ph.state === "done" ? "✓ " : ph.state === "now" ? "◐ " : "○ ") + ph.name));
     f.append(el("span", "dn", " " + w.done + "/" + w.total));
     if (wfs.length > 1) f.append(el("span", "wf", " +" + (wfs.length - 1) + " more"));
@@ -1110,7 +1174,7 @@ function infoParts(s) {
   }
   if (ags.length) { const live = ags.filter((a) => a.state === "tool" || a.state === "active").length, f = el("span"); f.append(el("b", live ? "live" : "", "● " + ags.length + " agent" + (ags.length === 1 ? "" : "s"))); if (live && live < ags.length) f.append(el("span", "dn", " " + live + " busy")); parts.push(f); }
   const t = s.tasks && (s.tasks.open || []).find((x) => x.status === "in_progress");
-  if (t) { const f = el("span"); f.append(el("span", "now", "◐ "), t.text, el("span", "dn", " " + s.tasks.done + "/" + s.tasks.total)); parts.push(f); }
+  if (t) { const f = el("span"), sw = swatchFor(s.timeline, "task", t.text); if (sw) f.append(sw); f.append(el("span", "now", "◐ "), t.text, el("span", "dn", " " + s.tasks.done + "/" + s.tasks.total)); parts.push(f); }
   else if (s.tasks && s.tasks.total) parts.push(el("span", "dn", "☑ " + s.tasks.done + "/" + s.tasks.total + " tasks"));
   if (s.prs && s.prs.length) { const f = el("span"); for (const seg of s.prs[0]) { const x = el("span", "", seg.t); x.style.color = seg.c; f.append(x); } parts.push(f); }
   if (s.bg && s.bg.length) parts.push(el("span", "bgc", "⧗ " + (s.bg.length === 1 ? s.bg[0].desc : s.bg.length + " in the background")));
@@ -1140,20 +1204,13 @@ function spineRow(s) {
   const mid = el("div", "smid"), dl = el("div", "sdo");
   if (s.sub && s.sub.source === "prompt") dl.append(el("span", "you", "▸ ")); else if (s.sub && s.sub.source === "reply") dl.append(el("span", "cl", "◆ "));
   dl.append((s.sub && s.sub.text) || s.word);
-  const chart = el("div", "sstrip"), t = s.timeline;
-  if (t) {
-    const bars = el("div", "sbars");
-    // A bar with nothing in it is greyed through its style, not a class, so a bar going to or from zero patches the row
-    // in place rather than replacing it.
-    for (const v of spGroup(t.tools, tl.axis).v) { const i = el("i"); i.style.height = (v ? Math.max(8, Math.round((v / tl.bars) * 100)) : 4) + "%"; if (!v) i.style.background = "#262d37"; bars.append(i); }
-    chart.append(bars, el("i", "sx"));
-  }
+  const t = s.timeline, chart = t ? stackChart(t) : el("div", "sstrip");
   const info = el("div", "sdet");
   infoParts(s).slice(0, narrow ? 2 : 5).forEach((p, i) => { if (i) info.append(el("span", "sep", "  ·  ")); info.append(p); });
   mid.append(dl, chart, info);
   // The tail: the context ring, state · time, then context · tools · output.
   const tail = el("div", "stail"), lines = el("div", "stl");
-  if (!narrow && matchMedia("(min-width:1100px)").matches) tail.append(s.ctx ? ring(30, 4, ctxParts(s), "") : el("span", "sring0"));
+  if (!narrow && s.ctx) { const rc = el("span", "sctx"); rc.append(ring(22, 3.5, ctxParts(s), "")); rc.title = "context " + s.ctx.pct + "% full"; r.append(rc); }
   const st1 = el("div", "st1"); st1.append(el("span", "sw", (s.glyph ? s.glyph + " " : "") + s.word));
   if (s.time) st1.append(el("span", "stime", " · " + s.time));
   if (narrow && s.ctx) { const pc = el("span", "", " · " + s.ctx.pct + "%"); pc.style.color = tone(s.ctx.pct); st1.append(pc); }
@@ -1186,7 +1243,9 @@ function spineHover(at) {
   const G = spGroup(data.tools, tl.axis), tools = G.v, out = spGroup(data.out, tl.axis).v, N = tools.length, i = Math.max(0, Math.min(N - 1, Math.floor(((at[0] - b.left) / b.width) * N)));
   cards.style.setProperty("--hx", ((i + 0.5) / N).toFixed(4)); cards.classList.add("sx-on");
   const barMs = (tl.axis.end - tl.axis.start) / N, when = new Date(G.at[i].t).toLocaleTimeString([], barMs < 60000 ? { hour: "2-digit", minute: "2-digit", second: "2-digit" } : { hour: "2-digit", minute: "2-digit" });
-  sTip.textContent = when + " · " + tools[i] + " tool call" + (tools[i] === 1 ? "" : "s") + " · " + kfmt(out[i]) + " out";
+  sTip.replaceChildren(el("b", "", when), " · " + tools[i] + " tool call" + (tools[i] === 1 ? "" : "s") + " · " + kfmt(out[i]) + " out");
+  const L = stackOfRow(data), cols = stackColours(L);
+  L.forEach((l, li) => { const v = spGroup(l.v, tl.axis).v[i]; if (!v || !data.stack) return; const row = el("div", "stl1"), sw = el("i", "ssw"); sw.style.background = cols[li]; row.append(sw, l.name + " ", el("b", "", String(v))); sTip.append(row); });
   const x = b.left + ((i + 0.5) / N) * b.width;
   sTip.hidden = false;
   sTip.style.left = Math.max(b.left, Math.min(b.right - sTip.offsetWidth, x - sTip.offsetWidth / 2)) + "px"; sTip.style.top = b.top - sTip.offsetHeight - 6 + "px";

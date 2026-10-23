@@ -6177,6 +6177,75 @@ describe("the phone page's pulse and accounts", () => {
   });
 });
 
+describe("the web timeline's stack and icons", () => {
+  const now = Date.UTC(2026, 9, 22, 12, 0, 30);
+  const win = F.timeWindow(now, 30 * 60_000, F.TIMELINE_BARS); // 15 s a bar
+  const tail = (tools: number[], more: object = {}) => ({ tools, tokens: new Map(), askLog: [], sayTs: [], commitLog: [], taskLog: new Map(), lastT: now, mtime: now, ...more }) as any;
+  test("tool calls are split by the task in hand, each workflow and each agent; the busiest five, the rest as one", () => {
+    const main = tail([now - 3_600_000, now - 600_000, now - 300_000, now - 299_000, now - 60_000], { // oldest first, as a transcript has them
+      taskLog: new Map([["1", { started: now - 400_000, finished: now - 100_000 }], ["2", { started: now - 350_000 }], ["9", { started: now - 500_000 }]]),
+    });
+    const agent = (id: string, label: string, tools: number[]) => ({ id, label, type: "general", tail: tail(tools) });
+    const s = {
+      sid: "a", name: "a", cwd: "/x", mains: [main],
+      tasks: { items: [{ id: "1", subject: "Fix the tests", activeForm: "Fixing the tests" }, { id: "2", subject: "Write docs", activeForm: "" }] },
+      agents: [agent("x", "Look around", [now - 30_000]), ...["p", "q", "r", "u"].map((id, i) => agent(id, "agent " + id, Array(i + 1).fill(now - 200_000)))],
+      workflows: [{ id: "w1", name: "bisect-and-fix", started: now - 900_000, agents: [agent("w", "w", [now - 800_000, now - 800_000, now - 790_000, now - 20_000])] }],
+    } as any;
+    const st = F.toolStackOf(s, win);
+    expect(st.map((l: any) => [l.kind, l.name, F.sum(l.v)])).toEqual([
+      ["workflow", "bisect-and-fix", 4],
+      ["task", "Write docs", 3], // started after task 1, so the task in hand while both are in progress, and after task 1 ends
+      ["agent", "agent u", 4],
+      ["agent", "agent r", 3],
+      ["agent", "agent q", 2],
+      ["other", "3 more", 3], // the main thread (before any named task; task 9 is not in the list), Look around, agent p
+    ]); // the busiest five, in the order they began
+    expect(st.every((l: any) => l.v.length === F.TIMELINE_BARS)).toBe(true);
+    expect(F.sum(st.flatMap((l: any) => l.v))).toBe(F.sum(F.timelineOf({ ...s, remote: undefined }, win).tools)); // every call in the window, once
+  });
+  test("its icons: you typing, replies, commits, pull requests, workflows starting and tasks finishing, the weightiest a bar", () => {
+    const main = tail([], { askLog: [now - 60_000], sayTs: [now - 60_000, now - 120_000], commitLog: [now - 300_000], taskLog: new Map([["1", { started: now - 900_000, finished: now - 300_000 }]]) });
+    const s = { sid: "a", name: "a", cwd: "/x", mains: [main], agents: [], workflows: [{ id: "w", name: "w", started: now - 600_000, agents: [] }], side: { prs: [{ t: now - 450_000 }] } } as any;
+    const notes = F.notesOf(s, win).map((n: any) => [n.i, n.g]);
+    expect(notes).toEqual([
+      [F.barOf(now - 600_000, win), F.ICON.workflow],
+      [F.barOf(now - 450_000, win), F.ICON.pr],
+      [F.barOf(now - 300_000, win), F.ICON.done], // a task finished outweighs the commit in the same bar
+      [F.barOf(now - 120_000, win), F.ICON.claude],
+      [F.barOf(now - 60_000, win), F.ICON.you], // you typing outweighs its reply in the same bar
+    ]);
+  });
+  test("a commit counts once git says it made one: not a hook's refusal, a dry run's silence, nor a commit only mentioned", () => {
+    const call = (at: number, id: string, command: string, side = false) => ({ type: "assistant", timestamp: iso(at), ...(side ? { isSidechain: true } : {}), message: { id: "m" + id, content: [{ type: "tool_use", id, name: "Bash", input: { command } }] } });
+    const res = (at: number, id: string, content: string, err = false, side = false) => ({ type: "user", timestamp: iso(at), ...(side ? { isSidechain: true } : {}), message: { content: [{ type: "tool_result", tool_use_id: id, content, ...(err ? { is_error: true } : {}) }] } });
+    const t0 = now - 600_000;
+    const t = tailOf([
+      call(t0, "a", "git commit -m 'fix'"), res(t0 + 1000, "a", "check:repo-hygiene failed\nhusky - pre-commit hook exited with code 1", true), // refused by the hook
+      call(t0 + 2000, "b", "git -c user.name=x commit -q -m 'fix'"), res(t0 + 3000, "b", "[feature/x 1a2b3c4] fix\n 2 files changed"), // made
+      call(t0 + 4000, "c", "gh pr create --body 'runs on every git commit'"), res(t0 + 5000, "c", "https://github.com/o/r/pull/9"), // only mentioned
+      call(t0 + 6000, "d", "git commit --amend --no-edit", true), res(t0 + 7000, "d", "[main (root-commit) 9f8e7d6] first", false, true), // an agent's
+    ]);
+    expect(t.commitLog).toEqual([t0 + 2000, t0 + 6000]); // when each was asked for
+    expect(t.commitAsked.size).toBe(0);
+  });
+  test("a reopened task keeps its earlier stretch in the stack, and a deleted one is never marked as finished", () => {
+    const main = tail([now - 800_000, now - 500_000, now - 200_000], { taskLog: new Map(), taskFocus: [] });
+    F.traceTask(main, { taskId: "1", status: "in_progress" }, now - 900_000);
+    F.traceTask(main, { taskId: "1", status: "completed" }, now - 600_000);
+    F.traceTask(main, { taskId: "1", status: "in_progress" }, now - 300_000);
+    F.traceTask(main, { taskId: "2", status: "in_progress" }, now - 700_000);
+    F.traceTask(main, { taskId: "2", status: "deleted" }, now - 650_000);
+    const s = { sid: "a", name: "a", cwd: "/x", mains: [main], agents: [], workflows: [], tasks: { items: [{ id: "1", subject: "Fix it", activeForm: "" }] } } as any;
+    expect(F.toolStackOf(s, win).map((l: any) => [l.key, F.sum(l.v)])).toEqual([["task:1", 2], ["main", 1]]); // −800k and −200k are task 1's; −500k fell between its stretches
+    expect(F.notesOf(s, win).map((n: any) => n.g)).toEqual([F.ICON.done]); // task 1 finishing once; task 2 was deleted
+  });
+  test("a commit is a Bash git commit, with git's own options or after another command", () => {
+    for (const c of ["git commit -m x", "git -c user.name=a -c user.email=b commit -q -F -", "cd /w && git commit --amend", "bun test; git add a && git commit -m 'y'", 'bash -c "git commit -m x"']) expect(F.GIT_COMMIT.test(c)).toBe(true);
+    for (const c of ["git log --oneline", "git commit-tree abc", "echo legit commit", "git show HEAD:commit.txt"]) expect(F.GIT_COMMIT.test(c)).toBe(false);
+  });
+});
+
 describe("starting a session from the page", () => {
   const mk = (sid: string, cwd: string, startedAt: number, remote?: any) => ({ sid, name: sid, cwd, startedAt, mains: [], agents: [], workflows: [], remote } as any);
   const mini = { host: "mini", ip: "1.2.3.4", addr: "1.2.3.4:4777", use: { cpu: 0, rss: 0, known: false } };
