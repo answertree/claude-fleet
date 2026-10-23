@@ -1314,13 +1314,17 @@ function orbitHost(d) {
   orbitData = d;
   if (!orbitBox) { orbitBox = el("div", "orbit"); orbitBox.append(el("div", "orbit-note", "Lighting up the fleet…")); }
   if (orbitMod) orbitMod.update(d);
-  else if (!orbitLoading)
+  else if (!orbitLoading) {
+    // The box it was asked for: if the view is left (or entered again) before the code arrives, that load is dropped.
+    const box = orbitBox;
     orbitLoading = import("/orbit.js").then((m) => {
-      orbitMod = m;
-      orbitBox.replaceChildren();
-      m.mount(orbitBox, { open: (sid) => openFocus(sid) });
+      if (box !== orbitBox) return;
+      box.replaceChildren();
+      m.mount(box, { open: (sid) => openFocus(sid) });
+      orbitMod = m; // only once it is mounted
       if (orbitData) m.update(orbitData);
-    }).catch((e) => { orbitLoading = null; orbitBox.replaceChildren(el("div", "orbit-note", "The orbit view could not start: " + (e && e.message ? e.message : e))); });
+    }).catch((e) => { if (box !== orbitBox) return; orbitLoading = null; box.replaceChildren(el("div", "orbit-note", "The orbit view could not start: " + (e && e.message ? e.message : e))); });
+  }
   return orbitBox;
 }
 function orbitStop() {
