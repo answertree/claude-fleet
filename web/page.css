@@ -290,3 +290,5 @@ body.hide-quip #quip,body.hide-strip #needs,body.hide-pulse #pulse,body.hide-gau
 body.hide-pulse.hide-gauges.hide-five .overview{display:none}
 body.dim{filter:brightness(.55) saturate(.85)}
 body.calm *,body.calm *::before,body.calm *::after{animation:none!important;transition:none!important}
+
+.fsr{background:none;border:1px solid var(--line);border-radius:8px;color:var(--text);font:inherit;font-size:12px;padding:1px 7px;margin-left:6px;cursor:pointer}.fsr:hover{color:var(--white);border-color:#3a4658}

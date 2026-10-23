@@ -221,11 +221,17 @@ async function post(path, body) {
     return await r.json().catch(() => ({ ok: false, error: "fleet said " + r.status }));
   } catch { return { ok: false, error: "can't reach fleet" }; }
 }
+// A waiting session's choices are read once a question, never on a timer: reading a background session's screen opens
+// it in a hidden window, and it redraws itself at that window's size while that is open, so polling made it jump about
+// in your own terminal (fleet keeps the answer too, for every page). Read again when its question changes, and when a
+// read found nothing, after a minute.
+const questionOf = (s) => (s.sub && s.sub.text) || "";
+const choicesStale = (s, sc) => !sc || (!sc.loading && (sc.q !== questionOf(s) || (!(sc.options && sc.options.length) && Date.now() - sc.at > 60000)));
 async function readScreen(sid) {
-  const was = screens.get(sid) || {};
-  screens.set(sid, { ...was, loading: true, at: Date.now() });
+  const was = screens.get(sid) || {}, s = (fleetData().sessions || []).find((x) => x.sid === sid), q = s ? questionOf(s) : "";
+  screens.set(sid, { ...was, q, loading: true, at: Date.now() });
   const r = await post("api/choices", { sid });
-  screens.set(sid, { at: Date.now(), options: r.options || [], error: r.ok ? "" : r.error || "can't see its screen" });
+  screens.set(sid, { q, at: Date.now(), options: r.options || [], error: r.ok ? "" : r.error || "can't see its screen" });
   tick();
 }
 function answerButtons(s) {
@@ -233,7 +239,7 @@ function answerButtons(s) {
   const waiting = s.state === "needs";
   if (waiting) {
     const sc = screens.get(s.sid);
-    if (!sc || (!sc.loading && Date.now() - sc.at > 8000)) void readScreen(s.sid);
+    if (choicesStale(s, sc)) void readScreen(s.sid);
     const picks = el("div", "picks");
     for (const o of (sc && sc.options) || []) picks.append(armable(s, "k" + o.key, "pick", [el("span", "k", o.key), el("span", "", o.label)], o.key + ". " + o.label, { key: o.key }));
     if (picks.childNodes.length) box.append(picks);
@@ -1185,7 +1191,7 @@ function needsStrip(d) {
     const q = el("div", "nq", (s.sub && s.sub.text) || "waiting on you");
     const acts = el("div", "nacts");
     const sc = screens.get(s.sid);
-    if (!sc || (!sc.loading && Date.now() - sc.at > 8000)) void readScreen(s.sid);
+    if (choicesStale(s, sc)) void readScreen(s.sid);
     for (const o of (sc && sc.options) || []) acts.append(armable(s, "k" + o.key, "pick", [el("span", "k", o.key), el("span", "", o.label)], o.key + ". " + o.label, { key: o.key }));
     acts.append(armable(s, "esc", "chip key", ["Esc"], "Esc", { key: "X" }), armable(s, "enter", "chip key", ["Enter"], "Enter", { key: "E" }));
     const f = el("form", "nsend"), inp = el("input"); inp.placeholder = "answer " + s.name + "…"; inp.value = drafts.get(s.sid) || ""; inp.dataset.k = s.sid;
@@ -1293,11 +1299,18 @@ for (const x of VIEWS) document.body.classList.toggle(x, x === view);
 document.body.classList.toggle("onescreen", ONE_SCREEN.includes(view));
 
 // ── The focus view: one session with everything open, and what its own terminal shows ──
-let focusSid = null, focusTimer = 0;
+let focusSid = null;
 const sessionNow = (sid) => (fleetData().sessions || []).find((x) => x.sid === sid);
+// The focus view's terminal is read when it opens, then only when the session has moved on (a message, a state), at
+// most every 15 s, or on ↻: never on a timer, since reading a background session's screen makes it redraw (see
+// readScreen).
+let focusSig = "", focusReadAt = 0;
+const focusSigOf = (s) => (s ? s.state + "|" + ((s.sub && s.sub.text) || "") + "|" + (s.talk && s.talk.length ? s.talk[s.talk.length - 1].t : "") : "");
 function renderFocus() {
   if (!focusSid) return;
   const s = sessionNow(focusSid), box = $("fcard");
+  const sig = focusSigOf(s);
+  if (s && sig !== focusSig && Date.now() - focusReadAt > 15000) { focusSig = sig; focusReadAt = Date.now(); void readFocusScreen(); }
   if (!s) { $("fname").textContent = "That session has gone"; return; }
   $("fname").textContent = s.name;
   if (box.contains(document.activeElement) && document.activeElement.tagName === "TEXTAREA") return; // never under your typing
@@ -1320,13 +1333,14 @@ function openFocus(sid) {
   $("focus").classList.add("on"); $("focus").setAttribute("aria-hidden", "false");
   $("fcard").replaceChildren(); $("fscreen").textContent = "reading its screen…";
   renderFocus(); readFocusScreen();
-  clearInterval(focusTimer); focusTimer = setInterval(readFocusScreen, 4000);
+  focusSig = focusSigOf(sessionNow(sid)); focusReadAt = Date.now();
 }
 function closeFocus() {
-  focusSid = null; clearInterval(focusTimer);
+  focusSid = null;
   $("focus").classList.remove("on"); $("focus").setAttribute("aria-hidden", "true");
 }
 $("fback").addEventListener("click", closeFocus);
+$("fsrefresh").addEventListener("click", () => { focusReadAt = Date.now(); void readFocusScreen(); });
 addEventListener("keydown", (e) => { if (e.key === "Escape") { if (focusSid) closeFocus(); else if ($("newsheet").classList.contains("on")) closeNew(); } });
 
 // ── Starting a session: which machine (asked first), which folder, what to ask ──
