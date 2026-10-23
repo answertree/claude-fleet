@@ -6495,3 +6495,38 @@ describe("the closed Accounts summary", () => {
     expect(F.WEB_PAGE).toContain('" will all" : " will") + " last to 5h"');
   });
 });
+
+describe("who is eating the five hours", () => {
+  test("each session's output since the window began, the busiest first, the eighth on summed as the rest", () => {
+    const now = Date.UTC(2026, 9, 23, 12, 0, 0);
+    const tail = (tokens: [number, number][]) => ({ tools: [], tokens: new Map(tokens.map((x, i) => ["m" + i, x])), prs: new Map(), askLog: [], taskLog: new Map(), lastT: now, mtime: now } as any);
+    const session = (sid: string, tokens: [number, number][]) => ({ sid, name: sid, cwd: "/w", mains: [tail(tokens)], agents: [], workflows: [] } as any);
+    const saved = F.opt.usage;
+    F.opt.usage = false; // no figure: the window is the last five hours
+    try {
+      const list = [
+        session("a", [[now - 60_000, 500], [now - 6 * 3600_000, 9999]]), // the old one is before the window
+        session("b", [[now - 4 * 3600_000, 1500]]),
+        ...Array.from({ length: 8 }, (_, i) => session("c" + i, [[now - 1000, 10 + i]])),
+        session("quiet", []),
+      ];
+      const b = F.burnOf(list, now);
+      expect([b.since, b.total, b.top.map((x) => x.sid).slice(0, 2), b.top.length, b.others, b.rest]).toEqual([now - 5 * 3600_000, 500 + 1500 + 8 * 10 + 28, ["b", "a"], 7, 3, 10 + 11 + 12]);
+      expect(F.webState(list, now).burn!.total).toBe(b.total);
+      expect(F.webState(list, now, false).burn).toBeUndefined();
+    } finally {
+      F.opt.usage = saved;
+    }
+  });
+});
+
+describe("the page's own scripts", () => {
+  test("they parse, and no top-level function is declared twice (the second would silently replace the first)", () => {
+    for (const file of ["web/page.js"]) {
+      const src = fs.readFileSync(path.join(here, file), "utf8");
+      expect(() => new Function(src)).not.toThrow();
+      const names = [...src.matchAll(/^(?:async\s+)?function\s+(\w+)\s*\(/gm)].map((m) => m[1]);
+      expect(names.filter((n, i) => names.indexOf(n) !== i)).toEqual([]);
+    }
+  });
+});

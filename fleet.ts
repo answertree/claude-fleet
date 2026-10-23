@@ -6215,6 +6215,27 @@ export function pulseOf(sessions: Session[], now: number) {
   const bars = bucketsIn(tails.map((t) => t.tools), win);
   return { bars, tools: human(sum(bars)), out: human(tokensIn(tails, win)), bar: barLabel(win), machines: new Set(sessions.map((s) => s.remote?.host ?? selfHost())).size };
 }
+/**
+ * Who is eating the five-hour limit: each session's output tokens since the current five-hour window began (from the
+ * account's reset, or the last five hours when there is no figure), every session counted, the busiest first, the
+ * rest summed. Output tokens stand in for use: the limit's own split is not published.
+ */
+export function burnOf(sessions: Session[], now: number) {
+  const five = fiveHourLine(now);
+  const since = five.start && five.start <= now ? five.start : now - 5 * 3600_000;
+  const rows = sessions
+    .map((s) => {
+      let out = 0;
+      for (const t of tailsOf(s)) for (const [ts, n] of t.tokens.values()) if (ts >= since && ts <= now) out += n;
+      return { sid: s.sid, name: sessionTitle(s.name), out };
+    })
+    .filter((x) => x.out > 0)
+    .sort((a, b) => b.out - a.out);
+  const total = sum(rows.map((x) => x.out));
+  const top = rows.slice(0, 7);
+  const rest = sum(rows.slice(7).map((x) => x.out));
+  return { since, total, top, rest, others: Math.max(0, rows.length - 7) };
+}
 /** Bars in a timeline card's charts on the phone page: fine enough for a full browser width, a few hundred bytes a session. */
 export const TIMELINE_BARS = 120;
 /**
@@ -6306,6 +6327,7 @@ export function webState(sessions: Session[], now: number, full = true, everythi
     build: FLEET_BUILD, // which fleet.ts made this: an open page that was made by another reloads itself
     counts,
     five: fiveHourLine(now), // the five-hour limit's forecast, always said
+    burn: full ? burnOf(sessions, now) : undefined, // who is eating the five hours: output tokens by session since the window began
     pulse: full ? pulseOf(sessions, now) : undefined, // tool calls across the fleet, as the CLI's header
     timeline: full ? { start: tlWin.start, end: tlWin.end, bar: barLabel(tlWin), minutes: opt.windowMin } : undefined, // the timeline view's time axis
     places: full ? newPlaces(sessions) : undefined, // where the page may start a session: the folders sessions run in, by machine
@@ -6567,6 +6589,8 @@ export async function mcpHandle(msg: any, sessions: () => Session[], now: () => 
   return fail(-32601, `fleet has no method ${msg.method}`);
 }
 
+/** The page's own policy: the shared one, and its own scripts (the orbit view's, /three.js and /orbit.js) besides. */
+export const PAGE_CSP = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; media-src 'self' blob: mediastream:; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 /** A page fleet serves, from web/ beside fleet.ts. */
 const webFile = (name: string) => fs.readFileSync(path.join(import.meta.dir, "web", name), "utf8");
 /** The phone page: web/page.html with its stylesheet and script (web/page.css, web/page.js) put in place, served as one document. */
@@ -7642,6 +7666,15 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
           }
           // The icon is the only thing served without the secret: phones fetch it without the link's query.
           // Even's SDK for the glasses page: public code (MIT), so it needs no secret.
+          // The orbit view's code: three.js (vendor/, MIT) and the view itself (web/orbit.js). Code, not data: no secret.
+          if (url.pathname === "/three.js" || url.pathname === "/orbit.js") {
+            const file = url.pathname === "/three.js" ? path.join(import.meta.dir, "vendor", "three.module.min.js") : path.join(import.meta.dir, "web", "orbit.js");
+            try {
+              return new Response(fs.readFileSync(file), { headers: { ...headers, "content-type": "text/javascript; charset=utf-8", "cache-control": url.pathname === "/three.js" ? "max-age=86400" : "no-store" } });
+            } catch {
+              return new Response("not found", { status: 404, headers });
+            }
+          }
           if (url.pathname === "/glasses/sdk.js") {
             const sdk = glassesSdkFile();
             return sdk ? new Response(sdk, { headers: { ...headers, "content-type": "text/javascript; charset=utf-8", "cache-control": "max-age=3600" } }) : new Response("not found", { status: 404, headers });
@@ -7651,7 +7684,7 @@ export function startWeb(getSessions: () => Session[], now: () => number = clock
           if (ICON_SIZES[url.pathname]) return new Response(appIcon(url.pathname), { headers: { ...headers, "content-type": "image/png", "cache-control": "max-age=86400" } });
           if (!sameToken(url.searchParams.get("t") ?? "", token)) return new Response("not without the link fleet showed you", { status: 403, headers });
           if (url.pathname === "/manifest.webmanifest") return Response.json(webManifest(token), { headers: { ...headers, "content-type": "application/manifest+json" } });
-          if (url.pathname === "/") return new Response(WEB_PAGE.replace("__TOKEN__", token).replace("__ICON__", splashIcon()).replaceAll("__LOGO_MASK__", logoMask()).replace("__STARTUP__", STARTUP_LINKS), { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
+          if (url.pathname === "/") return new Response(WEB_PAGE.replace("__TOKEN__", token).replace("__ICON__", splashIcon()).replaceAll("__LOGO_MASK__", logoMask()).replace("__STARTUP__", STARTUP_LINKS), { headers: { ...headers, "content-type": "text/html; charset=utf-8", "content-security-policy": PAGE_CSP } });
           // A voice saying hello, for the picker: the preview that comes with fleet, kept by the phone for a week.
           if (url.pathname === "/api/voice/sample") {
             const v = url.searchParams.get("v") ?? "";
