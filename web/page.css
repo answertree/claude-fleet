@@ -79,9 +79,6 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--dim);font-size:12px;li
 h1{white-space:nowrap;min-width:0}#clock{white-space:nowrap}
 @media (max-width:440px){h1{font-size:18px}h1 img{width:26px;height:26px}.top-right{gap:7px}.hbtn{width:34px;height:34px}.hbtn svg{width:16px;height:16px}#mic{width:38px;height:38px}#clock{font-size:18px}}
 .hbtn{width:38px;height:38px;border-radius:50%;border:1px solid var(--line);background:var(--card);color:var(--text);display:grid;place-items:center;cursor:pointer;padding:0}.hbtn svg{width:18px;height:18px}.hbtn:hover{color:var(--white);border-color:#3a4658}
-.seg{display:flex;gap:2px;padding:2px;border:1px solid var(--line);border-radius:999px;background:var(--card)}.seg button{width:34px;height:32px;border:0;border-radius:999px;padding:0;display:grid;place-items:center;background:none;color:var(--dim);cursor:pointer}.seg button svg{width:17px;height:17px}.seg button:hover{color:var(--white)}.seg button[aria-pressed="true"]{background:#26303d;color:var(--white)}
-/* On a phone the header keeps the one button it had: the view you are on, and a tap moves to the next. */
-@media (max-width:440px){.seg{padding:0;border:0;background:none}.seg button:not([aria-pressed="true"]){display:none}.seg button[aria-pressed="true"]{width:34px;height:34px;border:1px solid var(--line);background:var(--card)}.seg button svg{width:16px;height:16px}}
 /* Starting a session: which machine, which folder, what to ask. */
 .sheet{position:fixed;inset:0;z-index:35;background:#0009;display:flex;align-items:flex-end;justify-content:center;opacity:0;pointer-events:none;transition:opacity .2s}.sheet.on{opacity:1;pointer-events:auto}
 .sbox{width:100%;max-width:560px;max-height:86vh;overflow:auto;background:var(--card);border:1px solid var(--line);border-radius:18px 18px 0 0;padding:14px 16px calc(18px + env(safe-area-inset-bottom))}
@@ -261,6 +258,35 @@ body.onescreen .burn .bleg{flex-wrap:nowrap;overflow:hidden}
 .menu .mi .mt{flex:1;min-width:0;display:flex;flex-direction:column}.menu .mi b{color:var(--white);font-weight:600;font-size:14px}.menu .mi small{color:var(--dim);font-size:11.5px}
 .menu .mi.on{background:#1c2a44}.menu .mi.on b::after{content:" ✓";color:var(--cyan)}
 .menu kbd{font:600 11px ui-monospace,monospace;color:var(--dim);border:1px solid var(--line);border-radius:6px;padding:1px 6px}
-.menu .sw{flex:none;width:34px;height:20px;border-radius:999px;background:#2a313b;position:relative;transition:background .15s}.menu .sw i{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#8a95a5;transition:transform .15s,background .15s}.menu .sw.on{background:#1f6f8b}.menu .sw.on i{transform:translateX(14px);background:#fff}
+.sw{flex:none;width:34px;height:20px;border-radius:999px;background:#2a313b;position:relative;transition:background .15s}.sw i{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#8a95a5;transition:transform .15s,background .15s}.sw.on{background:#1f6f8b}.sw.on i{transform:translateX(14px);background:#fff}
 @media (max-width:600px){.menu{top:auto;bottom:0;left:0;right:0;width:auto;border-radius:18px 18px 0 0;padding-bottom:calc(10px + env(safe-area-inset-bottom))}}
 @media (max-width:440px){#newbtn{display:none}} /* on a phone the menu starts a session */
+
+/* Orbit: the fleet in 3D, the rest of the page out of its way. */
+body.orbit .overview,body.orbit .burn,body.orbit .usage{display:none}
+.orbit{position:relative;width:100%;height:100%;border-radius:18px;overflow:hidden;background:radial-gradient(120% 90% at 50% 45%,#0f1626 0%,#05070c 75%);touch-action:none}
+.orbit canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.orbit-note{position:absolute;inset:0;display:grid;place-items:center;color:var(--dim);font-size:14px}
+.orbit .olabels{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+.orbit .ol{position:absolute;left:0;top:0;transform:translate(-50%,0);pointer-events:auto;cursor:pointer;text-align:center;white-space:nowrap;text-shadow:0 1px 3px #000,0 0 10px #000;will-change:transform}
+.orbit .ol b{display:block;color:#f5f7fa;font-size:12.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase}
+.orbit .ol small{display:block;color:var(--c);font-size:10.5px;font-weight:700;letter-spacing:.12em}
+.orbit .ol i{display:block;font-style:normal;color:#c6cdd7;font-size:11px;max-width:240px;overflow:hidden;text-overflow:ellipsis;margin:1px auto 0}
+.orbit .ol.needs i{color:#ffd98a;font-weight:600;white-space:normal;max-width:280px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.orbit .ol.far{opacity:.55}.orbit .ol.far i{display:none}
+.orbit .ocore{position:absolute;left:50%;transform:translate(-50%,0);pointer-events:none;text-align:center;color:#f2c6b2;text-shadow:0 1px 4px #000}
+.orbit .ocore b{display:block;font-size:13px;letter-spacing:.14em}.orbit .ocore span{font-size:11.5px;color:#d6dbe3}
+.orbit .ohelp{position:absolute;right:14px;bottom:10px;color:#6b7380;font-size:11px;pointer-events:none}
+
+/* The menu's view items carry their icons. */
+.menu .mi .mic{flex:none;width:22px;height:22px;display:grid;place-items:center;color:var(--dim)}.menu .mi .mic svg{width:18px;height:18px}.menu .mi.on .mic{color:var(--cyan)}
+/* Options: a dialog of switches, in groups. */
+.obox{max-width:520px}.obox .og+.og{border-top:1px solid var(--line);margin-top:6px;padding-top:6px}.obox .mh{color:var(--dim);font-size:11px;letter-spacing:.08em;text-transform:uppercase;padding:6px 4px 4px}
+.oi{display:flex;align-items:center;gap:12px;width:100%;text-align:left;background:none;border:0;border-radius:10px;padding:8px 6px;color:var(--text);font:inherit;cursor:pointer}.oi:hover{background:#1c2430}
+.oi .mt{flex:1;min-width:0;display:flex;flex-direction:column}.oi b{color:var(--white);font-weight:600;font-size:14px}.oi small{color:var(--dim);font-size:12px}
+.obox .backlink{margin-top:10px}
+/* What the options hide, and the screen's. */
+body.hide-quip #quip,body.hide-strip #needs,body.hide-pulse #pulse,body.hide-gauges #gauges,body.hide-five #five,body.hide-burn #burn,body.hide-accounts #usage,body.hide-foot #foot{display:none!important}
+body.hide-pulse.hide-gauges.hide-five .overview{display:none}
+body.dim{filter:brightness(.55) saturate(.85)}
+body.calm *,body.calm *::before,body.calm *::after{animation:none!important;transition:none!important}

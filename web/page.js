@@ -480,6 +480,8 @@ function apply(text, force) {
     yes.addEventListener("click", () => decide(true)); no.addEventListener("click", () => decide(false));
     row.append(yes, no); box.append(row); return box;
   }));
+  applyOpts();
+  newlyWaiting(d);
   needsStrip(d);
   burnPanel(d.burn);
   badge((d.counts && d.counts.needs) || 0);
@@ -496,7 +498,7 @@ function apply(text, force) {
   // The timeline is one screen: as many cards as fit at their least, most pressing first, and the rest named on a line.
   // The lanes are one board, every session on one axis; the other views a card or row a session.
   const fit = view === "timeline" ? timelineFit(shown.length) : shown.length;
-  const list = view === "lanes" ? [lanesBoard(shown)] : shown.slice(0, fit).map(build);
+  const list = view === "lanes" ? [lanesBoard(shown)] : view === "orbit" ? [orbitHost(d)] : shown.slice(0, fit).map(build);
   if (fit < shown.length) list.push(moreLine(shown.slice(fit)));
   if (!shown.length) list.push(el("div", "empty", gone.length ? "Nothing else here: everything left has finished." : "No sessions working and nothing waiting on you."));
   if (gone.length && !ONE_SCREEN.includes(view)) {
@@ -996,18 +998,18 @@ new MutationObserver(() => { for (const c of $("cards").children) sized.observe(
 addEventListener("resize", relayout);
 wide.addEventListener("change", relayout);
 // ── The view, kept on this device: cards (everything), timeline (activity across the window), compact (a line a session) ──
-const VIEWS = ["cards", "timeline", "lanes", "compact"];
-const ONE_SCREEN = ["timeline", "lanes"]; // never scroll: what does not fit is named on a line instead
+const VIEWS = ["cards", "timeline", "lanes", "orbit", "compact"];
+const ONE_SCREEN = ["timeline", "lanes", "orbit"]; // never scroll: what does not fit is named on a line instead
 let view = "cards";
 try { const v = localStorage.getItem("fleet-view"); if (VIEWS.includes(v)) view = v; } catch {}
 // A link can name the view (&view=timeline), for a screen on the wall that should always open on it.
 { const v = new URLSearchParams(location.search).get("view"); if (VIEWS.includes(v)) view = v; }
 function setView(v) {
+  if (view === "orbit" && v !== "orbit") orbitStop();
   view = v;
   try { localStorage.setItem("fleet-view", v); } catch {}
   for (const x of VIEWS) document.body.classList.toggle(x, x === v);
   document.body.classList.toggle("onescreen", ONE_SCREEN.includes(v));
-  for (const b of $("views").querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.v === v));
   if (latestText) apply(latestText, true);
 }
 // ── Timeline: the CLI's timeline (key 3) on the whole browser width ──
@@ -1249,6 +1251,26 @@ function badge(n, force) {
   };
   img.src = "/icon-192.png";
 }
+// ── Orbit: the whole fleet in motion, in 3D (web/orbit.js, on three.js) ──
+// One element, kept: the scene is made once and fed each new state, never rebuilt. Its code loads the first time.
+let orbitBox = null, orbitMod = null, orbitLoading = null, orbitData = null;
+function orbitHost(d) {
+  orbitData = d;
+  if (!orbitBox) { orbitBox = el("div", "orbit"); orbitBox.append(el("div", "orbit-note", "Lighting up the fleet…")); }
+  if (orbitMod) orbitMod.update(d);
+  else if (!orbitLoading)
+    orbitLoading = import("/orbit.js").then((m) => {
+      orbitMod = m;
+      orbitBox.replaceChildren();
+      m.mount(orbitBox, { open: (sid) => openFocus(sid) });
+      if (orbitData) m.update(orbitData);
+    }).catch((e) => { orbitLoading = null; orbitBox.replaceChildren(el("div", "orbit-note", "The orbit view could not start: " + (e && e.message ? e.message : e))); });
+  return orbitBox;
+}
+function orbitStop() {
+  if (orbitMod) orbitMod.unmount();
+  orbitMod = null; orbitLoading = null; orbitBox = null;
+}
 function compactRow(s) {
   const r = el("div", "crow" + (s.state === "needs" ? " needs" : "")); r.style.setProperty("--c", s.color);
   const n = el("div", "rn"); n.append(el("b", "", s.name), el("small", "", s.place || ""));
@@ -1260,18 +1282,15 @@ function compactRow(s) {
   if (isDone(s) && !putAway()[s.sid]) { r.classList.add("done"); swipeAway(r, s.sid); }
   return r;
 }
-const narrow = matchMedia("(max-width:440px)");
-for (const b of $("views").querySelectorAll("button")) b.addEventListener("click", () => setView(narrow.matches ? VIEWS[(VIEWS.indexOf(view) + 1) % VIEWS.length] : b.dataset.v));
 // The CLI's keys: 1 cards (detail), 2 compact, 3 timeline. Not while you type, nor over a sheet or the focus view.
 addEventListener("keydown", (e) => {
-  const v = { 1: "cards", 2: "compact", 3: "timeline", 4: "lanes" }[e.key];
+  const v = { 1: "cards", 2: "compact", 3: "timeline", 4: "lanes", 5: "orbit" }[e.key];
   if (!v || e.metaKey || e.ctrlKey || e.altKey || /^(TEXTAREA|INPUT|SELECT)$/.test((document.activeElement || {}).tagName || "")) return;
   if (focusSid || $("newsheet").classList.contains("on") || $("voice").classList.contains("on")) return;
   setView(v);
 });
 for (const x of VIEWS) document.body.classList.toggle(x, x === view);
 document.body.classList.toggle("onescreen", ONE_SCREEN.includes(view));
-for (const b of $("views").querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.v === view));
 
 // ── The focus view: one session with everything open, and what its own terminal shows ──
 let focusSid = null, focusTimer = 0;
@@ -1287,7 +1306,9 @@ function renderFocus() {
   for (const d of c.querySelectorAll("details")) d.open = was.has(d.className) ? was.get(d.className) : true;
   box.replaceChildren(c);
 }
-async function readScreen() {
+// The focus view's terminal, read every few seconds. (Its own name: as readScreen, it replaced the one that reads a
+// waiting session's choices, which then never came.)
+async function readFocusScreen() {
   if (!focusSid) return;
   const r = await fleetPost("api/screen", { sid: focusSid });
   if (!focusSid) return;
@@ -1298,8 +1319,8 @@ function openFocus(sid) {
   focusSid = sid;
   $("focus").classList.add("on"); $("focus").setAttribute("aria-hidden", "false");
   $("fcard").replaceChildren(); $("fscreen").textContent = "reading its screen…";
-  renderFocus(); readScreen();
-  clearInterval(focusTimer); focusTimer = setInterval(readScreen, 4000);
+  renderFocus(); readFocusScreen();
+  clearInterval(focusTimer); focusTimer = setInterval(readFocusScreen, 4000);
 }
 function closeFocus() {
   focusSid = null; clearInterval(focusTimer);
@@ -1351,36 +1372,136 @@ $("newbtn").addEventListener("click", () => {
 });
 $("newx").addEventListener("click", closeNew);
 // ── The menu (⋯): the views by name, starting a session, and the options, kept on this device ──
-const OPT_DEFAULTS = { strip: true, burn: true, badge: true };
+// ── Options (from the menu): which parts of the page show, how it tells you something waits, and the screen ──
+// Kept on this device. The parts are hidden by a class on the page, so nothing else has to know.
+const OPT_DEFAULTS = { quip: true, strip: true, pulse: true, gauges: true, five: true, burn: true, accounts: true, foot: true, badge: true, chime: false, notify: false, awake: false, dim: false, calm: false };
 let opts = { ...OPT_DEFAULTS };
 try { opts = { ...OPT_DEFAULTS, ...JSON.parse(localStorage.getItem("fleet-opts") || "{}") }; } catch {}
-const OPTIONS = [
-  ["strip", "Needs you strip", "The sessions waiting on you, answerable, above every view but the cards"],
-  ["burn", "Eating the 5 hours", "Each session's share of the output since the five-hour window began"],
-  ["badge", "Badge the icon", "How many wait on you, on the app's icon and the tab's"],
+const OPTION_GROUPS = [
+  ["Show", [
+    ["quip", "Status line", "How the fleet is doing, in a line under the title"],
+    ["strip", "Needs you strip", "The sessions waiting on you, answerable, above every view but the cards"],
+    ["pulse", "Fleet pulse", "Tool calls across every machine, a bar a minute for the last hour"],
+    ["gauges", "Gauges", "The five-hour and weekly limits, CPU and memory, as rings"],
+    ["five", "Five-hour forecast", "When the five-hour limit runs out, or where it will be at the reset"],
+    ["burn", "Eating the 5 hours", "Each session's share of the output since the window began"],
+    ["accounts", "Accounts", "Every account's limits, and the machines on each"],
+    ["foot", "Footer", "What is hidden, and whether the page is live"],
+  ]],
+  ["Tell me", [
+    ["badge", "Badge the icon", "How many wait on you, on the app's icon and the tab's"],
+    ["chime", "Chime", "A soft two notes when a session starts waiting on you"],
+    ["notify", "Notification", "A system notification when a session starts waiting on you; a tap opens it"],
+  ]],
+  ["Screen", [
+    ["awake", "Keep the screen awake", "For a screen on the wall: it never sleeps while this page is open"],
+    ["dim", "Dim at night", "Darker from 22:00 to 07:00"],
+    ["calm", "Calm motion", "No glowing or pulsing, and the orbit view slowed"],
+  ]],
 ];
-const VIEW_NAMES = { cards: ["Cards", "1", "everything about each session"], compact: ["Compact", "2", "a line a session"], timeline: ["Timeline", "3", "activity across the window, one screen"], lanes: ["Lanes", "4", "every session on one time axis, one screen"] };
-function setOpt(k, on) {
+const SECTIONS = ["quip", "strip", "pulse", "gauges", "five", "burn", "accounts", "foot"];
+const VIEW_NAMES = { cards: ["Cards", "1", "everything about each session"], compact: ["Compact", "2", "a line a session"], timeline: ["Timeline", "3", "activity across the window, one screen"], lanes: ["Lanes", "4", "every session on one time axis, one screen"], orbit: ["Orbit", "5", "the whole fleet in motion, in 3D"] };
+function applyOpts() {
+  for (const k of SECTIONS) document.body.classList.toggle("hide-" + k, !opts[k]);
+  document.body.classList.toggle("calm", !!opts.calm);
+  const h = new Date().getHours();
+  document.body.classList.toggle("dim", !!opts.dim && (h >= 22 || h < 7));
+  keepAwake();
+}
+async function setOpt(k, on) {
+  if (k === "notify" && on && "Notification" in window && Notification.permission !== "granted") {
+    const p = await Notification.requestPermission().catch(() => "denied");
+    if (p !== "granted") { on = false; optNote = "Notifications are blocked for this page: allow them in the browser's site settings."; }
+  }
+  if (k === "notify" && on && !("Notification" in window)) { on = false; optNote = "This browser has no notifications (on an iPhone, add the page to the home screen first)."; }
+  if (k === "awake" && on && !("wakeLock" in navigator)) optNote = "This browser cannot keep the screen awake (it needs the page over HTTPS).";
   opts[k] = on;
   try { localStorage.setItem("fleet-opts", JSON.stringify(opts)); } catch {}
   if (k === "badge" && !on) badge(0, true);
+  applyOpts();
   if (latestText) apply(latestText, true);
-  renderMenu();
+  renderOptions();
 }
+// The menu: the views, with their icons and keys; starting a session; the options.
 function renderMenu() {
-  const m = $("menu"), item = (cls, label, small, right, go) => {
+  const m = $("menu"), item = (cls, icon, label, small, right, go) => {
     const b = el("button", "mi " + cls); b.type = "button"; b.setAttribute("role", "menuitem");
+    if (icon) { const ic = el("span", "mic"); ic.append(icon); b.append(ic); }
     const t = el("span", "mt"); t.append(el("b", "", label)); if (small) t.append(el("small", "", small));
     b.append(t); if (right) b.append(right);
     b.addEventListener("click", go); return b;
   };
+  const icon = (v) => { const svg = $("viewicons").content.querySelector('[data-v="' + v + '"] svg'); return svg ? svg.cloneNode(true) : null; };
   const views = el("div", "mg"); views.append(el("div", "mh", "View"));
-  for (const v of VIEWS) { const [name, key, about] = VIEW_NAMES[v] || [v, "", ""]; views.append(item(v === view ? "on" : "", name, about, el("kbd", "", key), () => { setView(v); closeMenu(); })); }
+  for (const v of VIEWS) { const [name, key, about] = VIEW_NAMES[v] || [v, "", ""]; views.append(item(v === view ? "on" : "", icon(v), name, about, el("kbd", "", key), () => { setView(v); closeMenu(); })); }
   const acts = el("div", "mg"); acts.append(el("div", "mh", "Do"));
-  acts.append(item("", "Start a session", "in a folder where one already runs", el("kbd", "", "+"), () => { closeMenu(); $("newbtn").click(); }));
-  const opt = el("div", "mg"); opt.append(el("div", "mh", "Show"));
-  for (const [k, label, about] of OPTIONS) { const sw = el("span", "sw" + (opts[k] ? " on" : "")); sw.append(el("i")); opt.append(item("", label, about, sw, () => setOpt(k, !opts[k]))); }
-  m.replaceChildren(views, acts, opt);
+  acts.append(item("", null, "Start a session", "in a folder where one already runs", el("kbd", "", "+"), () => { closeMenu(); $("newbtn").click(); }));
+  acts.append(item("", null, "Options…", "what shows, alerts, the screen", el("kbd", "", ","), () => { closeMenu(); openOptions(); }));
+  m.replaceChildren(views, acts);
+}
+// The options dialog: a switch an option, in three groups.
+let optNote = "";
+function renderOptions() {
+  const body = $("optbody"), groups = [];
+  for (const [title, list] of OPTION_GROUPS) {
+    const g = el("div", "og"); g.append(el("div", "mh", title));
+    for (const [k, label, about] of list) {
+      const b = el("button", "oi"); b.type = "button"; b.setAttribute("role", "switch"); b.setAttribute("aria-checked", String(!!opts[k]));
+      const t = el("span", "mt"); t.append(el("b", "", label), el("small", "", about));
+      const sw = el("span", "sw" + (opts[k] ? " on" : "")); sw.append(el("i"));
+      b.append(t, sw); b.addEventListener("click", () => setOpt(k, !opts[k]));
+      g.append(b);
+    }
+    groups.push(g);
+  }
+  if (optNote) groups.push(el("div", "note", optNote));
+  const reset = el("button", "backlink", "Back to the defaults"); reset.type = "button";
+  reset.addEventListener("click", () => { opts = { ...OPT_DEFAULTS }; try { localStorage.removeItem("fleet-opts"); } catch {} optNote = ""; applyOpts(); badge(badgeWas, true); if (latestText) apply(latestText, true); renderOptions(); });
+  groups.push(reset);
+  body.replaceChildren(...groups);
+}
+function openOptions() { optNote = ""; renderOptions(); $("optsheet").classList.add("on"); $("optsheet").setAttribute("aria-hidden", "false"); }
+function closeOptions() { $("optsheet").classList.remove("on"); $("optsheet").setAttribute("aria-hidden", "true"); }
+$("optx").addEventListener("click", closeOptions);
+$("optsheet").addEventListener("click", (e) => { if (e.target === $("optsheet")) closeOptions(); });
+addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && $("optsheet").classList.contains("on")) closeOptions();
+  if (e.key === "," && !e.metaKey && !e.ctrlKey && !/^(TEXTAREA|INPUT|SELECT)$/.test((document.activeElement || {}).tagName || "")) openOptions();
+});
+// Keep the screen awake while the page shows (the lock lapses when it is hidden, so it is asked for again on return).
+let screenLock = null;
+async function keepAwake() {
+  if (!opts.awake || document.hidden || !("wakeLock" in navigator)) { if (screenLock && !opts.awake) { screenLock.release().catch(() => {}); screenLock = null; } return; }
+  if (screenLock && !screenLock.released) return;
+  try { screenLock = await navigator.wakeLock.request("screen"); } catch { screenLock = null; }
+}
+document.addEventListener("visibilitychange", keepAwake);
+// When a session starts waiting on you: a chime and a notification, as asked for. Not for those waiting already when
+// the page opened.
+let waitingWas = null, audio = null;
+function newlyWaiting(d) {
+  const now = new Set((d.sessions || []).filter((s) => s.state === "needs").map((s) => s.sid));
+  const fresh = waitingWas ? [...now].filter((sid) => !waitingWas.has(sid)) : [];
+  waitingWas = now;
+  if (!fresh.length) return;
+  if (opts.chime) chime();
+  if (opts.notify && "Notification" in window && Notification.permission === "granted")
+    for (const sid of fresh) {
+      const s = d.sessions.find((x) => x.sid === sid);
+      try { const n = new Notification("▲ " + s.name + " needs you", { body: (s.sub && s.sub.text) || "", tag: "fleet-" + sid, icon: "/icon-192.png" }); n.onclick = () => { window.focus(); openFocus(sid); n.close(); }; } catch {}
+    }
+}
+function chime() {
+  try {
+    audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+    const t = audio.currentTime;
+    for (const [f, at] of [[880, 0], [1318.5, 0.16]]) {
+      const o = audio.createOscillator(), g = audio.createGain();
+      o.type = "sine"; o.frequency.value = f; o.connect(g); g.connect(audio.destination);
+      g.gain.setValueAtTime(0.0001, t + at); g.gain.exponentialRampToValueAtTime(0.18, t + at + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + at + 0.6);
+      o.start(t + at); o.stop(t + at + 0.65);
+    }
+  } catch {}
 }
 function openMenu() { renderMenu(); $("menu").hidden = false; $("menubtn").setAttribute("aria-expanded", "true"); }
 function closeMenu() { $("menu").hidden = true; $("menubtn").setAttribute("aria-expanded", "false"); }

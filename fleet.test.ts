@@ -6519,3 +6519,14 @@ describe("who is eating the five hours", () => {
     }
   });
 });
+
+describe("the page's own scripts", () => {
+  test("they parse, and no top-level function is declared twice (the second would silently replace the first)", () => {
+    for (const file of ["web/page.js"]) {
+      const src = fs.readFileSync(path.join(here, file), "utf8");
+      expect(() => new Function(src)).not.toThrow();
+      const names = [...src.matchAll(/^(?:async\s+)?function\s+(\w+)\s*\(/gm)].map((m) => m[1]);
+      expect(names.filter((n, i) => names.indexOf(n) !== i)).toEqual([]);
+    }
+  });
+});
