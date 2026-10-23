@@ -6471,7 +6471,7 @@ describe("the files fleet runs from", () => {
   test("the pages are read from web/ and put together, with nothing of their markers left", () => {
     for (const marker of ["__PAGE_CSS__", "__PAGE_JS__", "__GLASSES_JS__"]) expect(F.WEB_PAGE.includes(marker) || F.GLASSES_PAGE.includes(marker)).toBe(false);
     expect(F.WEB_PAGE).toStartWith("<!doctype html>");
-    expect(F.WEB_PAGE).toContain("function spineRow(s, tier)"); // the script, in place
+    expect(F.WEB_PAGE).toContain("function spineRow(s)"); // the script, in place
     expect(F.WEB_PAGE).toContain("body.timeline #cards{display:flex;flex-direction:column"); // the stylesheet, in place
     expect(F.GLASSES_PAGE).toContain('<script type="module">\n');
   });
