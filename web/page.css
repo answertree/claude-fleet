@@ -101,11 +101,6 @@ h1{white-space:nowrap;min-width:0}#clock{white-space:nowrap}
 .crow .rs{color:var(--text);font-size:13px;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.crow.needs .rs{color:var(--amber);font-weight:600}.crow .rt{color:var(--dim);font-size:12px;white-space:nowrap;text-align:right}
 @media (max-width:700px){.crow{grid-template-columns:10px minmax(0,1fr) auto}.crow .rs{grid-column:2/4;grid-row:2}}
 @media (min-width:1100px){body.compact #cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(640px,1fr));gap:0 12px}body.compact #cards>:not(.crow){grid-column:1/-1}}
-/* Timeline: the CLI's timeline (key 3) on exactly one screen, the whole browser. Big cards where colour carries the
-   state share the height left under the header, each with its tool calls (bars) and output tokens (the line) on one
-   scale for every card, what happened when under them, and its figures beside (under, on a narrow card). The chart
-   takes whatever height its card has; a card too short for everything gives things up in a fixed order (the ladder
-   below), and sessions that do not fit at all, even so, are named on one line at the bottom. */
 /* The one-screen views (timeline, lanes): the window's height, never a scroll, the whole browser's width. */
 body.onescreen main,body.onescreen header,body.onescreen #quip,body.onescreen #pair,body.onescreen #needs,body.onescreen .overview,body.onescreen .burn,body.onescreen .usage,body.onescreen .foot{max-width:none}
 body.onescreen{height:100vh;height:100dvh;overflow:hidden;display:flex;flex-direction:column;padding-bottom:calc(8px + env(safe-area-inset-bottom))}
@@ -113,57 +108,78 @@ body.onescreen>*{flex:none}
 /* A column of flex items with auto side margins shrinks each to its content: in one screen, the panels span the page. */
 body.onescreen>header,body.onescreen>#quip,body.onescreen>#pair,body.onescreen>#needs,body.onescreen>.overview,body.onescreen>.burn,body.onescreen>.usage,body.onescreen>main,body.onescreen>.foot{width:100%}
 body.onescreen #cards{flex:1 1 0;min-height:0;width:100%}
-body.timeline #cards{display:grid;grid-template-columns:repeat(var(--cols,1),minmax(0,1fr));gap:10px}body.timeline #cards>:not(.tcard){grid-column:1/-1}
 body.onescreen .foot{margin-top:6px}
-.tcard{min-height:0;container-type:size;position:relative;display:flex;flex-direction:column;overflow:hidden;background:var(--card);border:1px solid var(--line);border-left:6px solid var(--c);border-radius:16px;padding:12px 18px 8px;cursor:pointer}
-.tcard:hover{border-color:#3a4658;border-left-color:var(--c)}
-.tcard.needs{background:#2a2108;border-color:#5a4512;border-left-color:var(--c);box-shadow:0 0 0 1px #5a4512,0 0 24px #e5b54433;animation:glow 2s ease-in-out infinite}
-.tcard.receded .tn{color:var(--text)}.tcard.receded .tch{opacity:.7}
-.tcard .thead{flex:none;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:0 16px;align-items:start}.tcard .thl{min-width:0}
-.tcard .tring{text-align:center;color:var(--dim);font-size:10.5px;line-height:1.2}.tcard .tring svg{display:block;width:52px;height:52px;margin:0 auto 2px}.tcard .tring .rw{color:var(--amber);font-weight:650}
-.tcard .th{display:flex;justify-content:space-between;align-items:baseline;gap:14px}
-.tcard .tn{color:var(--white);font-size:19px;font-weight:700;letter-spacing:.16em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.tcard .tst{color:var(--c);font-size:13px;font-weight:700;letter-spacing:.14em;white-space:nowrap}.tcard .tst small{color:var(--dim);font-size:12px;font-weight:500;letter-spacing:0;margin-left:8px}
-.tcard .tpl{color:var(--dim);font-size:12px;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.tcard .tsub{color:var(--white);font-size:15px;margin:6px 0 8px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}.tcard.needs .tsub{font-weight:600}.tcard .tsub .you{color:var(--blue)}.tcard .tsub .cl{color:var(--cyan)}
-.tcard .tbody{flex:none;display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:6px 26px;align-items:start}
-.tcard .tchart{display:flex;flex-direction:column;min-height:0}
-.tcard .twrap{position:relative;height:64px}
-.tcard .tch{position:absolute;inset:0;display:block;width:100%;height:100%}
-.tcard .tleg{position:absolute;top:0;left:0;display:flex;gap:12px;font-size:10.5px;color:var(--dim);pointer-events:none}.tcard .tleg i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:-1px}.tcard .tleg i.ln{height:2px;border-radius:1px;vertical-align:2px}
-.tcard .tmk{flex:none;position:relative;height:20px;font-size:15px;font-weight:700;line-height:20px}.tcard .tmk span{position:absolute;transform:translateX(-50%)}
-.tcard .tax{flex:none;position:relative;height:14px;color:var(--dim);font-size:10.5px}.tcard .tax span{position:absolute;transform:translateX(-50%);white-space:nowrap}.tcard .tax span:first-child{transform:none}.tcard .tax span:last-child{transform:translateX(-100%)}
-.tcard .tcur{position:absolute;top:0;bottom:0;width:1px;background:#ffffff55;pointer-events:none;display:none}
-.tcard .ttip{position:absolute;top:-6px;z-index:2;pointer-events:none;background:#0d1117f0;border:1px solid var(--line);border-radius:8px;padding:3px 8px;font-size:11.5px;color:var(--text);white-space:nowrap;display:none}
-.tcard .tside{display:grid;align-content:start;gap:8px;min-height:0;overflow:hidden;font-size:13px;color:var(--dim);padding-top:2px}.tcard .tside>div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.tcard .tside b{color:var(--text);font-weight:650}.tcard .tside .k{display:inline-block;width:42px;color:var(--dim);font-size:11px;letter-spacing:.08em}
-.tcard .tside .gg{display:inline-block;position:relative;width:100px;height:6px;margin:0 8px 0 0;border-radius:3px;background:#262d37;vertical-align:middle;overflow:hidden}.tcard .tside .gg i{position:absolute;left:0;top:0;bottom:0;border-radius:3px}
-.tcard .tside .tbar{display:inline-flex;width:100px;margin-right:8px;vertical-align:middle}
-.tcard .tside .live{color:var(--green)}.tcard .tside .wf{color:var(--purple)}
-/* A narrow card (a phone, the side of a vertical monitor): its figures go under the chart, as a row that wraps. */
-@container (max-width:720px){.tcard .tbody{grid-template-columns:minmax(0,1fr)}.tcard .tside{display:flex;flex-wrap:wrap;gap:3px 18px;font-size:12px;padding:0}.tcard .tside .k{width:auto;margin-right:6px}.tcard .tside .gg,.tcard .tside .tbar{width:60px}}
-@container (max-width:520px){.tcard .tn{font-size:16px;letter-spacing:.1em}.tcard .th{flex-wrap:wrap;gap:0 10px}.tcard .tsub{font-size:14px}}
-/* The ladder: what a card gives up as it gets shorter, first to last, so the chart keeps a height worth reading. The
-   figures go least wanted first (CPU, then use, then tasks, then context and agents), sooner on a narrow card, whose
-   figures cost height. */
-@container (max-height:380px){.tcard .tsub{-webkit-line-clamp:1}}
-@container (max-height:330px){.tcard .tleg,.tcard .tside .p4{display:none}}
-@container (max-width:720px) and (max-height:330px){.tcard .tside .p3{display:none}}
-@container (max-height:290px){.tcard .tpl,.tcard .tax span:nth-child(2),.tcard .tax span:nth-child(3){display:none}}
-@container (max-height:250px){.tcard .tside .p3{display:none}}
-@container (max-width:720px) and (max-height:250px){.tcard .tside .p2{display:none}}
-@container (max-height:215px){.tcard .tax{display:none}}
-@container (max-height:185px){.tcard .tside .p2{display:none}}
-@container (max-width:720px) and (max-height:185px){.tcard .tside{display:none}}
-@container (max-height:170px){.tcard .twrap{height:44px}.tcard .tring svg{width:40px;height:40px}.tcard .tring div{display:none}}
-@container (max-height:155px){.tcard .tside{gap:3px;font-size:12px}}
-@container (max-height:140px){.tcard .twrap{height:30px}}
-@container (max-height:125px){.tcard .tmk{display:none}.tcard .tsub{margin:3px 0 4px}}
-/* A card's detail, in the height it has left (never more): a line each, down and then across in columns, so a line is
-   never cut in two; what does not fit is left out, least useful last. Hidden when not even a line fits (the script). */
-.tcard .tinfo{flex:1 1 0;min-height:0;overflow:hidden;margin-top:4px;padding-top:4px;border-top:1px solid #222a35;column-width:330px;column-gap:28px;column-fill:auto;font-size:12.5px;color:var(--dim)}
-.tcard .ti{display:flex;gap:7px;align-items:baseline;height:20px;line-height:20px;break-inside:avoid;white-space:nowrap}.tcard .ti .g{flex:none;width:1.1em;text-align:center}.tcard .ti .w{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;color:var(--text)}.tcard .ti .rt{flex:none;font-size:11px;color:var(--dim)}
-.tcard .ti b{color:var(--white);font-weight:600}.tcard .ti .tool{color:var(--cyan)}.tcard .ti.child{padding-left:14px}.tcard .ti.todo .w{color:var(--dim)}.tcard .ti.bad .w{color:#f3a19c}.tcard .ti .blk{margin-left:6px}
-.tcard .ti .ph.done{color:var(--dim)}.tcard .ti .ph.now{color:var(--white);font-weight:700}.tcard .ti .ph.next,.tcard .ti .ph:not(.done):not(.now){color:#4a515c}
+/* Timeline: spine rows, a cross of Compact and Lanes. A Compact row a session, its middle also its lane on the one time
+   axis every row shares; one row height and one tier for the whole board (data-tier), so rows line up. */
+body.timeline #cards{display:flex;flex-direction:column;gap:4px;position:relative;overflow:hidden;--nw:220px;--tw:150px}
+body.timeline #cards>*{flex:none}
+@media (max-width:1099.98px){body.timeline #cards{--nw:180px;--tw:110px}}
+@media (min-width:1100px){body.timeline #cards[data-tier=roomy],body.timeline #cards[data-tier=full]{--tw:176px}}
+.srow,.sphead{display:grid;grid-template-columns:10px var(--nw) minmax(0,1fr) var(--tw);column-gap:14px;align-items:center;padding:0 12px 0 10px;border:1px solid transparent;border-left:4px solid transparent;border-radius:10px}
+.srow{height:var(--rh);overflow:hidden;background:var(--card);border-color:var(--line);border-left-color:var(--c);cursor:pointer}
+.srow:hover{border-color:#3a4658;border-left-color:var(--c)}
+.srow.needs{background:#2a2108;border-color:#5a4512;border-left-color:var(--c)}
+.srow .sdot{width:8px;height:8px;border-radius:50%;background:var(--c)}.srow.needs .sdot{animation:sdot 2s ease-in-out infinite}
+@keyframes sdot{50%{box-shadow:0 0 0 4px #e5b54455}}
+.srow .sname{min-width:0;display:flex;flex-direction:column;line-height:1.2}
+.srow .sname b{color:var(--white);font-size:14px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.srow.receded .sname b{color:var(--text)}
+.srow .sname small{color:var(--dim);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.srow .sag .live{color:var(--green)}.srow .sag .wf{color:var(--purple)}
+.srow .smid{min-width:0;height:100%;display:flex;flex-direction:column;justify-content:center;gap:3px;padding:4px 0}
+.srow .sdo{color:var(--text);font-size:13px;line-height:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.srow .sdo .you{color:var(--blue)}.srow .sdo .cl{color:var(--cyan)}
+.srow.needs .sdo{color:var(--amber);font-weight:600}
+.srow .sstrip{position:relative;width:100%;flex:none;height:calc(var(--rh) - 30px)}.srow.receded .sstrip{opacity:.6}
+.srow .sstrip svg{position:absolute;inset:0;width:100%;height:100%}
+.srow .snow{position:absolute;right:0;top:0;bottom:0;width:2px;background:var(--white);opacity:.9}
+.srow .lm{position:absolute;top:50%;transform:translate(-50%,-50%);font-size:11px;font-weight:800;text-shadow:0 0 4px #0d1117,0 0 2px #0d1117;pointer-events:auto}
+.srow .stk{position:absolute;bottom:0;width:2px;height:7px;transform:translateX(-50%);pointer-events:auto}
+.srow .sx{position:absolute;top:-2px;bottom:-2px;width:1px;background:#f5f7fa99;left:calc(var(--hx) * 100%);display:none;pointer-events:none}#cards.sx-on .srow .sx{display:block}
+.srow .sdet{color:var(--dim);font-size:12px;line-height:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.srow .sdet b{color:var(--text);font-weight:600}.srow .sdet .wf{color:var(--purple)}.srow .sdet .tool{color:var(--cyan)}.srow .sdet .now{color:var(--white)}.srow .sdet .dn{color:var(--dim)}
+.srow .sdet .ph.done{color:var(--dim)}.srow .sdet .ph.now{color:var(--white);font-weight:700}.srow .sdet .ph.next{color:#4a515c}.srow .sdet .blk{margin-left:6px}
+.srow .stail{min-width:0;display:flex;align-items:center;justify-content:flex-end;gap:8px;text-align:right;white-space:nowrap}
+.srow .stail svg{flex:none;width:26px;height:26px}.srow .sring0{width:26px;height:26px;flex:none}
+.srow .stl{min-width:0;overflow:hidden}
+.srow .st1{font-size:11.5px;overflow:hidden;text-overflow:ellipsis}.srow .st1 .sw{color:var(--c);font-weight:700;letter-spacing:.06em}.srow .st1 .stime{color:var(--dim)}
+.srow .st2{font-size:11px;color:var(--dim);overflow:hidden;text-overflow:ellipsis}.srow .st2 b{color:var(--text)}.srow .st2 .rw{color:var(--amber)}
+.sphead{height:20px;color:var(--dim);font-size:11px;cursor:default}.sphead .shw{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.sphead em{font-style:normal;color:var(--amber);font-weight:650}
+.sphead .sax{position:relative;height:14px}.sphead .sax span{position:absolute;transform:translateX(-50%);white-space:nowrap}.sphead .sax span:first-child{transform:none}.sphead .sax span:last-child{transform:translateX(-100%)}
+.sphead .sht{text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stip{position:fixed;z-index:40;pointer-events:none;background:#0d1117f0;border:1px solid var(--line);border-radius:8px;padding:3px 8px;font-size:11.5px;color:var(--text);white-space:nowrap}
+.spill{position:fixed;z-index:40;pointer-events:none;background:var(--white);color:#0d1117;font-size:10.5px;font-weight:700;border-radius:8px;padding:0 6px;white-space:nowrap}
+.stip[hidden],.spill[hidden]{display:none}
+/* The ladder: one rule a tier. Tight is one line, the lane an underline; mid adds the place and a lane with marks;
+   roomy the output line, ring and runway; full an agents line and a line of detail. */
+#cards[data-tier=tight] .srow .sname small{display:none}#cards[data-tier=tight] .srow .sname b{font-size:13.5px}
+#cards[data-tier=tight] .srow .smid{padding:0;position:relative}
+#cards[data-tier=tight] .srow .sstrip{position:absolute;left:0;right:0;bottom:3px;height:5px}
+#cards[data-tier=mid] .srow .sstrip{height:clamp(10px,calc(var(--rh) - 30px),24px)}
+@media (min-width:700px){
+  #cards[data-tier=roomy] .srow .sname b,#cards[data-tier=full] .srow .sname b{font-size:15px}
+  #cards[data-tier=roomy] .srow .sdo,#cards[data-tier=full] .srow .sdo{font-size:14px;line-height:19px}
+}
+#cards[data-tier=roomy] .srow .sstrip{height:min(calc(var(--rh) - 34px),36px)}
+#cards[data-tier=full] .srow .sstrip{height:clamp(18px,calc(var(--rh) - 56px),36px)}
+#cards[data-tier=roomy] .srow .lm,#cards[data-tier=full] .srow .lm{font-size:13px}
+/* Narrow (a phone, a tall thin monitor): the name and tail on a line, then what it is doing, then the lane, full width. */
+/* A narrow row: 2 (borders) + 8 (padding) + 17 (the name line) + 2 + 16 (what it is doing) + 3, so its lane gets the
+   height less 48; on the tallest rows, less 19 more for the line of detail. */
+@media (max-width:699.98px){
+  .srow{grid-template-columns:8px minmax(0,1fr) auto;grid-template-areas:"dot name tail" "mid mid mid";column-gap:8px;row-gap:2px;padding:4px 10px;align-content:start}
+  .srow .sdot{grid-area:dot}.srow .sname{grid-area:name}.srow .stail{grid-area:tail}.srow .smid{grid-area:mid;height:auto;padding:0;justify-content:flex-start}
+  .srow .sname small{display:none}.srow .sdo{font-size:12.5px;line-height:16px}
+  .srow .sname b{font-size:14px;line-height:17px}
+  .srow .sstrip{height:clamp(2px,calc(var(--rh) - 48px),14px)}
+  #cards[data-tier=roomy] .srow .sstrip{height:clamp(4px,calc(var(--rh) - 48px),28px)}
+  #cards[data-tier=full] .srow .sstrip{height:clamp(4px,calc(var(--rh) - 67px),28px)}
+  #cards[data-tier=roomy] .srow .lm,#cards[data-tier=full] .srow .lm{font-size:12px}
+  .sphead{grid-template-columns:minmax(0,1fr);padding:0 10px}.sphead>span,.sphead .shw,.sphead .sht{display:none}
+  .sphead .sax span:nth-child(2),.sphead .sax span:nth-child(3),.sphead .sax span:nth-child(5),.sphead .sax span:nth-child(6){display:none}
+}
+@media (max-width:380px){.srow .st1 .stime{display:none}}
+/* A phone (narrow and short) has no screen left to fit once the panels are above: the timeline scrolls there. */
+body.timeline.onescreen.tscroll{height:auto;overflow:visible}body.timeline.tscroll #cards{flex:none;overflow:visible}
+body.timeline .tmore{height:22px;line-height:22px;align-self:stretch;padding:0 10px}
 /* The sessions that do not fit: one line, at the bottom. */
 .tmore{align-self:center;color:var(--dim);font-size:13px;padding:2px 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.tmore b{color:var(--text)}.tmore em{font-style:normal;color:var(--amber);font-weight:650}.tmore .nd{color:var(--amber)}
 /* The fleet's pulse: tool calls across every machine, a bar a minute for the last hour, as the CLI's header draws it. */
@@ -204,7 +220,7 @@ body.onescreen .foot{margin-top:6px}
 .empty{color:var(--dim);text-align:center;margin:40px 0}
 #pair .ask{background:#14263d;border:1px solid #2c4f7a;border-radius:14px;padding:11px 14px;margin:0 0 14px;color:var(--white);font-size:14.5px}#pair .ask b{letter-spacing:.12em;color:var(--cyan)}
 #pair .ask div{display:flex;gap:8px;margin-top:9px}#pair button{flex:1;border:0;border-radius:10px;padding:9px;font:600 14px -apple-system,system-ui,sans-serif}#pair .yes{background:var(--cyan);color:#0d1117}#pair .no{background:#262d37;color:var(--text)}
-.card.done,.crow.done,.tcard.done{touch-action:pan-y;user-select:none;-webkit-user-select:none}.crow.gone,.tcard.gone{opacity:.62}.crow .putback{grid-column:1/-1;justify-self:end;margin:2px 0 0}.swipe-hint{color:var(--dim);font-size:11.5px;margin-top:8px;text-align:right}
+.card.done,.crow.done,.srow.done{touch-action:pan-y;user-select:none;-webkit-user-select:none}.crow.gone,.srow.gone{opacity:.62}.crow .putback{grid-column:1/-1;justify-self:end;margin:2px 0 0}.swipe-hint{color:var(--dim);font-size:11.5px;margin-top:8px;text-align:right}
 .shelf{display:block;margin:6px auto 12px;background:transparent;color:var(--text);border:1px solid var(--line);border-radius:999px;padding:9px 16px;font:600 13.5px -apple-system,system-ui,sans-serif}
 .card.gone{opacity:.62}.putback{display:block;margin-left:auto !important;background:transparent;color:var(--cyan);border:1px solid #2f3946;border-radius:999px;padding:4px 11px;font:600 12.5px -apple-system,system-ui,sans-serif;margin:-2px 0 6px 8px}
 .send{display:flex;gap:6px;margin-top:6px;align-items:flex-end}.send textarea{flex:1;height:38px;max-height:40vh;resize:none;overflow-y:hidden;background:var(--bg);color:var(--white);border:1px solid var(--line);border-radius:10px;padding:9px 10px;font:15px/1.3 -apple-system,system-ui,sans-serif}.send textarea:focus{outline:none;border-color:var(--cyan)}

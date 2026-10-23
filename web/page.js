@@ -360,7 +360,7 @@ const shapeOf = (n) => n.nodeType === 3 ? "#" : n.nodeType !== 1 ? "?" : n.tagNa
 function patch(a, b) {
   if (a.nodeType === 3) { if (a.nodeValue !== b.nodeValue) a.nodeValue = b.nodeValue; return; }
   if (a.nodeType !== 1) return;
-  const own = (name) => (a.tagName === "TEXTAREA" || a.classList.contains("tinfo")) && name === "style"; // a text box's height is its own, from what you typed; a card's detail, whether it fits
+  const own = (name) => a.tagName === "TEXTAREA" && name === "style"; // a text box's height is its own, from what you typed
   for (const { name, value } of [...b.attributes]) if (!own(name) && a.getAttribute(name) !== value) a.setAttribute(name, value);
   for (const { name } of [...a.attributes]) if (!own(name) && !b.hasAttribute(name)) a.removeAttribute(name);
   for (let i = 0; i < a.childNodes.length; i++) patch(a.childNodes[i], b.childNodes[i]);
@@ -495,16 +495,24 @@ function apply(text, force) {
   for (const det of cards.querySelectorAll("details")) open.set(det.closest(".card")?.dataset.sid + det.className, det.open);
   if (swiping || (!force && Date.now() < touchedUntil)) return void (lastText = ""); // nor under a card being swiped, or a finger scrolling
   timelineScale(d);
-  const build = (s) => { const c = view === "compact" ? compactRow(s) : view === "timeline" ? timelineCard(s) : card(s); c.dataset.sid = s.sid; for (const det of c.querySelectorAll("details")) { const k = s.sid + det.className; if (open.has(k)) det.open = open.get(k); } return c; };
+  const build = (s) => { const c = view === "compact" ? compactRow(s) : view === "timeline" ? spineRow(s, spLast.tier) : card(s); c.dataset.sid = s.sid; for (const det of c.querySelectorAll("details")) { const k = s.sid + det.className; if (open.has(k)) det.open = open.get(k); } return c; };
   // Finished sessions swiped away stay away (on this phone) until they start again; a button at the bottom shows them.
   const away = putAway();
   for (const sid of Object.keys(away)) { const s = d.sessions.find((x) => x.sid === sid); if (!s || !isDone(s)) delete away[sid]; }
   savePutAway(away);
-  const shown = d.sessions.filter((s) => !away[s.sid]), gone = d.sessions.filter((s) => away[s.sid]);
-  // The timeline is one screen: as many cards as fit at their least, most pressing first, and the rest named on a line.
-  // The lanes are one board, every session on one axis; the other views a card or row a session.
-  const fit = view === "timeline" ? timelineFit(shown.length) : shown.length;
+  let shown = d.sessions.filter((s) => !away[s.sid]);
+  const gone = d.sessions.filter((s) => away[s.sid]);
+  // The timeline is one screen: as many rows as fit, those waiting on you never the ones left out, and the rest named
+  // on a line. The lanes are one board, every session on one axis; the other views a card or row a session.
+  let fit = shown.length;
+  if (view === "timeline") {
+    shown = [...shown].sort((a, b) => (b.state === "needs") - (a.state === "needs"));
+    const sf = spineFit(shown.length);
+    document.body.classList.toggle("tscroll", !!sf.scroll);
+    fit = sf.fit; cards.dataset.tier = sf.tier; cards.style.setProperty("--rh", sf.h + "px");
+  } else { delete cards.dataset.tier; document.body.classList.remove("tscroll"); spineHover(null); }
   const list = view === "lanes" ? [lanesBoard(shown)] : view === "orbit" ? [orbitHost(d)] : shown.slice(0, fit).map(build);
+  if (view === "timeline" && shown.length) list.unshift(spineHead(shown, spLast.tier));
   if (fit < shown.length) list.push(moreLine(shown.slice(fit)));
   if (!shown.length) list.push(el("div", "empty", gone.length ? "Nothing else here: everything left has finished." : "No sessions working and nothing waiting on you."));
   if (gone.length && !ONE_SCREEN.includes(view)) {
@@ -536,6 +544,7 @@ function apply(text, force) {
   next.forEach((n, i) => { if (cards.children[i] !== n) cards.insertBefore(n, cards.children[i] || null); });
   settleLogs();
   layoutCards();
+  if (view === "timeline" && sHoverAt) spineHover(sHoverAt);
   renderFocus();
   document.getElementById("clock").textContent = new Date(d.now).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const awayN = ONE_SCREEN.includes(view) ? d.sessions.filter((s) => putAway()[s.sid]).length : 0; // the one-screen views have no shelf: they say how many
@@ -1028,163 +1037,163 @@ function timelineScale(d) {
 const kfmt = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e4 ? Math.round(n / 1e3) + "k" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n));
 const agoText = (min) => (min >= 120 ? Math.round(min / 60) + "h" : min >= 60 ? (min / 60).toFixed(1).replace(".0", "") + "h" : Math.round(min) + "m");
 const MARKS = { "▸": "you typed to it", "⇡": "it linked a pull request", "≡": "a workflow started", "◇": "a workflow started", "✓": "a task finished" };
-// How many cards fit on the screen at their least height (what is left under the header, between the gaps), keeping a
-// line for the rest when not all do. Worked out again when that room changes size.
-const TL_MIN = () => (innerWidth < 600 ? 104 : 116), TL_GAP = 10, TL_MORE = 26;
-let tlFit = -1, tlCount = 0, tlCols = 1;
-function timelineFit(n) {
-  tlCount = n;
-  const box = $("cards"), room = box.clientHeight, min = TL_MIN();
-  // Two columns on a wide screen when one would make the cards short: each chart keeps a height worth reading.
-  tlCols = box.clientWidth >= 1400 && n > 1 && (room - (n - 1) * TL_GAP) / n < 220 ? 2 : 1;
-  const rows = (k) => Math.ceil(k / tlCols);
-  const fits = (k, more) => rows(k) * min + (rows(k) - 1) * TL_GAP + (more ? TL_MORE + TL_GAP : 0) <= room;
+// ── Timeline: spine rows, a cross of Compact and Lanes ──
+// A Compact row a session (its dot, name, what it is doing or asking, state · time · context) whose middle is also its
+// lane: under the words, its tool calls on the one time axis and one scale every row shares. Every row is one height,
+// chosen from the room, and the whole board is one tier, so rows line up and update in place; a taller tier shows
+// more (the place, tools and output, the output line, the context ring, the runway, then an agents line and one line
+// of detail). What does not fit is named on a line.
+const SP = { GAP: 4, MORE: 26, MAX: 96 };
+let spLast = { n: 0, fit: -1, h: 0, tier: "" };
+const spNarrow = () => matchMedia("(max-width:699.98px)").matches; // the same breakpoint as the narrow CSS
+// The room under the panels for rows, measured from where the rows begin, so it means the same whether the page is
+// fitted or scrolling. Too little for three rows (a phone, a small laptop with every panel showing): the rows scroll,
+// every one shown. A tall thin monitor, or a desktop, has the room: one screen.
+const spRoom = () => innerHeight - $("cards").getBoundingClientRect().top - 24 - 40; // the header, the footer and padding
+const spScroll = (n) => { const MIN = spNarrow() ? 50 : 30; return spRoom() < Math.min(n, 3) * (MIN + SP.GAP); };
+function spineFit(n) {
+  const narrow = spNarrow(), MIN = narrow ? 50 : 30, room = spRoom();
+  if (spScroll(n)) { spLast = { n, fit: n, h: 70, tier: "roomy", scroll: true }; return spLast; } // every row, at a roomy height
   let fit = n;
-  if (room && !fits(n, false)) for (fit = 1; fit + 1 < n && fits(fit + 1, true); ) fit++;
-  box.style.setProperty("--cols", tlCols);
-  box.style.gridTemplateRows = "repeat(" + Math.max(1, rows(fit)) + ",minmax(0,1fr))" + (fit < n ? " auto" : "");
-  return (tlFit = fit);
+  if (room > 0 && n * MIN + (n - 1) * SP.GAP > room) fit = Math.max(1, Math.floor((room - SP.MORE + SP.GAP) / (MIN + SP.GAP)));
+  const h = Math.max(MIN, Math.min(SP.MAX, Math.floor((room - (fit < n ? SP.MORE : 0) - (fit - 1) * SP.GAP) / Math.max(1, fit)) || MIN));
+  // The tier from the row height, kept unless the height is more than 3 px past a boundary (no flicker as the
+  // Needs strip above grows by a row).
+  const ladder = narrow ? [["compact", 50], ["roomy", 64], ["full", 88]] : [["tight", 30], ["mid", 42], ["roomy", 60], ["full", 80]];
+  let tier = ladder[0][0];
+  for (const [name, at] of ladder) if (h >= at) tier = name;
+  const was = ladder.findIndex(([name]) => name === spLast.tier);
+  if (was >= 0 && tier !== spLast.tier) {
+    const lo = ladder[was][1], hi = ladder[was + 1] ? ladder[was + 1][1] : Infinity;
+    if (h >= lo - 3 && h < hi + 3) tier = spLast.tier;
+  }
+  spLast = { n, fit, h, tier };
+  return spLast;
 }
+// Laid out again when the room changes, on the next frame (laying out inside the observer would loop).
+let spRefit = 0;
 new ResizeObserver(() => {
-  if (view === "lanes" && latestText) return void apply(latestText, true); // its rows are cut to the room it has
-  if (view !== "timeline" || !latestText) return;
-  const was = [tlFit, tlCols];
-  if (timelineFit(tlCount) !== was[0] || tlCols !== was[1]) apply(latestText, true);
+  if (spRefit) return;
+  spRefit = requestAnimationFrame(() => {
+    spRefit = 0;
+    if (!latestText) return;
+    if (view === "lanes") return void apply(latestText, true); // its rows are cut to the room it has
+    if (view !== "timeline") return;
+    const was = spLast, now = spineFit(was.n);
+    if (now.fit !== was.fit || now.tier !== was.tier || now.h !== was.h) apply(latestText, true);
+  });
 }).observe($("cards"));
-function timelineChart(s) {
-  const t = s.timeline, n = t.tools.length || 1, BW = 10, H = 100, top = 84; // bars rise to 84%, leaving the legend room
-  const colour = s.state === "needs" ? "#e5b544" : s.state === "stalled" ? "#f0625c" : "#61aaff";
-  const svg = svgEl("svg", { class: "tch", viewBox: "0 0 " + n * BW + " " + H, preserveAspectRatio: "none" });
-  for (const y of [H - top, H - top / 2]) svg.append(svgEl("line", { x1: 0, x2: n * BW, y1: y, y2: y, stroke: "#262d37", "stroke-width": "1", "stroke-dasharray": "3 4", "vector-effect": "non-scaling-stroke" }));
-  // Tool calls a bar each, the bar still filling brightest; every bar drawn, so a card updates in place.
-  t.tools.forEach((v, i) => {
-    const h = v ? Math.max(2, (v / tl.tools) * top) : 0;
-    svg.append(svgEl("rect", { x: i * BW + 1, y: H - h, width: BW - 2, height: h, rx: "1.5", fill: colour, "fill-opacity": i === n - 1 ? "1" : ".62" }));
-  });
-  // Output tokens as a line over them, on its own scale.
-  const pts = t.out.map((v, i) => [i * BW + BW / 2, H - 1 - (v / tl.out) * top]);
-  svg.append(svgEl("path", { d: pts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" "), fill: "none", stroke: "#be94ff", "stroke-width": "1.5", "stroke-opacity": ".9", "stroke-linejoin": "round", "vector-effect": "non-scaling-stroke" }));
-  const wrap = el("div", "twrap");
-  const leg = el("div", "tleg");
-  const k1 = el("span"); const i1 = el("i"); i1.style.background = colour; k1.append(i1, "tool calls");
-  const k2 = el("span"); const i2 = el("i", "ln"); i2.style.background = "#be94ff"; k2.append(i2, "output tokens");
-  leg.append(k1, k2);
-  const cur = el("div", "tcur"), tip = el("div", "ttip");
-  wrap.append(svg, leg, cur, tip);
-  // Hovering a bar says when it was and what happened in it, from the latest figures (the card is patched in place).
-  wrap.addEventListener("mousemove", (e) => {
-    const now = tl.data.get(s.sid), ax = tl.axis;
-    if (!now || !ax) return;
-    const r = svg.getBoundingClientRect(), N = now.tools.length, i = Math.max(0, Math.min(N - 1, Math.floor(((e.clientX - r.left) / r.width) * N)));
-    const barMs = (ax.end - ax.start) / N, at = new Date(ax.start + i * barMs);
-    const when = at.toLocaleTimeString([], barMs < 60000 ? { hour: "2-digit", minute: "2-digit", second: "2-digit" } : { hour: "2-digit", minute: "2-digit" });
-    tip.textContent = when + " · " + now.tools[i] + " tool call" + (now.tools[i] === 1 ? "" : "s") + " · " + kfmt(now.out[i]) + " out";
-    const x = ((i + 0.5) / N) * r.width;
-    cur.style.left = x + "px"; cur.style.display = "block";
-    tip.style.display = "block"; tip.style.left = Math.max(0, Math.min(r.width - tip.offsetWidth, x - tip.offsetWidth / 2)) + "px";
-  });
-  wrap.addEventListener("mouseleave", () => { cur.style.display = tip.style.display = "none"; });
-  // Under the chart, what happened when.
-  const marks = el("div", "tmk");
-  for (const m of t.marks) { const g = el("span", "", m.g); g.style.left = ((m.i + 0.5) / n) * 100 + "%"; g.style.color = m.c; g.title = MARKS[m.g] || ""; marks.append(g); }
-  const axis = el("div", "tax"), min = (tl.axis && tl.axis.minutes) || 30;
-  for (const f of [0, 1 / 3, 2 / 3, 1]) { const a = el("span", "", f === 1 ? "now" : agoText(min * (1 - f)) + (f ? "" : " ago")); a.style.left = f * 100 + "%"; axis.append(a); }
-  const box = el("div", "tchart"); box.append(wrap, marks, axis);
-  return box;
+// The context's split, for its ring.
+function ctxParts(s) {
+  const c = s.ctx, total = (c.split || []).reduce((n, p) => n + p.tokens, 0);
+  return total ? c.split.map((p) => ({ frac: (p.tokens / total) * (c.pct / 100), color: p.color })) : [{ frac: c.pct / 100, color: tone(c.pct) }];
 }
-function timelineCard(s) {
+// One line of detail, the most useful first: failures, the workflow under way (its phases), the task in hand, else what
+// the main thread is on. Never the question again: the doing line has it.
+function detailParts(s) {
+  const parts = [], R = s.roster || { workflows: [] };
+  if (s.fails) { const f = el("span"); const x = el("span", "", "✗ "); x.style.color = "#f0625c"; const b = el("b", "", s.fails.n + " failed"); const l = el("span", "", " · " + s.fails.last); l.style.color = "#f3a19c"; f.append(x, b, l); parts.push(f); }
+  const w = (R.workflows || []).find((x) => x.outcome === "running");
+  if (w) {
+    const f = el("span"), g = el("span", "wf", "≡ "), b = el("b", "wf", w.name); f.append(g, b);
+    for (const ph of w.phases || []) f.append(" ", el("span", "ph " + ph.state, (ph.state === "done" ? "✓ " : ph.state === "now" ? "◐ " : "○ ") + ph.name));
+    f.append(el("span", "dn", "  " + w.done + "/" + w.total)); parts.push(f);
+  }
+  const t = s.tasks && (s.tasks.open || []).find((x) => x.status === "in_progress");
+  if (t) { const f = el("span"); f.append(el("span", "now", "◐ "), t.text, el("span", "dn", "  " + s.tasks.done + "/" + s.tasks.total)); if (t.blocked) f.append(el("span", "blk", "blocked")); parts.push(f); }
+  if (!w && !t && R.main && (R.main.tool || R.main.doing)) { const f = el("span"); if (R.main.tool) f.append(el("span", "tool", R.main.tool), " "); f.append(R.main.doing || ""); parts.push(f); }
+  return parts;
+}
+const SAX = [0, 1 / 6, 2 / 6, 3 / 6, 4 / 6, 5 / 6, 1];
+function spineHead(shown, tier) {
+  const h = el("div", "sphead"), min = (tl.axis && tl.axis.minutes) || 30, waiting = shown.filter((x) => x.state === "needs").length;
+  const who = el("div", "shw"); who.append(shown.length + " session" + (shown.length === 1 ? "" : "s"));
+  if (waiting) who.append(" · ", el("em", "", waiting + " need" + (waiting === 1 ? "s" : "") + " you"));
+  const ax = el("div", "sax");
+  for (const f of SAX) { const a = el("span", "", f === 1 ? "now" : agoText(min * (1 - f)) + (f ? "" : " ago")); a.style.left = f * 100 + "%"; ax.append(a); }
+  h.append(el("span"), who, ax, el("div", "sht", tier === "tight" ? "state · ctx" : "state · ctx · tools·out"));
+  return h;
+}
+function spineRow(s, tier) {
+  const narrow = spNarrow(), big = tier === "roomy" || tier === "full", ticks = tier === "tight" || tier === "compact";
   const receded = s.state === "yourTurn" || s.state === "idle" || s.state === "finished";
-  const c = el("section", "tcard" + (s.state === "needs" ? " needs" : "") + (receded ? " receded" : "")); c.style.setProperty("--c", s.color);
-  c.title = "Open " + s.name + (isDone(s) ? " · swipe to put away" : "");
-  c.addEventListener("click", tapped(() => openFocus(s.sid)));
-  if (isDone(s) && !putAway()[s.sid]) { c.classList.add("done"); swipeAway(c, s.sid); }
-  // The head: the name in letter-spaced capitals and the state, its glyph first; where it is; what it is doing or asking
-  // (the question, your prompt ▸ or Claude's reply ◆, as the CLI's subheading). Its context as a ring on the right.
-  const head = el("div", "thead"), left = el("div", "thl");
-  const th = el("div", "th"), st = el("div", "tst", (s.glyph ? s.glyph + " " : "") + s.word);
-  if (s.time) st.append(el("small", "", s.time));
-  th.append(el("div", "tn", s.name), st);
-  left.append(th);
-  if (s.place) left.append(el("div", "tpl", s.place));
-  const sub = el("div", "tsub");
-  if (s.sub.source === "prompt") sub.append(el("span", "you", "▸ ")); else if (s.sub.source === "reply") sub.append(el("span", "cl", "◆ "));
-  sub.append(s.sub.text || "");
-  left.append(sub);
-  head.append(left);
-  if (s.ctx) {
-    const total = s.ctx.split.reduce((n, p) => n + p.tokens, 0) || 1;
-    const parts = s.ctx.split.map((p) => ({ frac: (p.tokens / total) * (s.ctx.pct / 100), color: p.color }));
-    const box = el("div", "tring"); box.title = "Context: " + s.ctx.used + " of " + s.ctx.max + (s.ctx.runway ? ", " + s.ctx.runway : "");
-    box.append(ring(52, 6, parts.length ? parts : [{ frac: s.ctx.pct / 100, color: tone(s.ctx.pct) }], s.ctx.pct + "%"), el("div", "", "of " + s.ctx.max));
-    if (s.ctx.runway) box.append(el("div", "rw", s.ctx.runway));
-    head.append(box);
+  const r = el("div", "srow" + (s.state === "needs" ? " needs" : "") + (receded ? " receded" : "")); r.style.setProperty("--c", s.color);
+  r.title = "Open " + s.name + (isDone(s) ? " · swipe to put away" : "");
+  r.addEventListener("click", tapped(() => openFocus(r.dataset.sid)));
+  if (isDone(s) && !putAway()[s.sid]) { r.classList.add("done"); swipeAway(r, s.sid); }
+  // The dot and the name (with its place, and on the tallest rows its agents and workflows).
+  const name = el("div", "sname"); name.append(el("b", "", s.name), el("small", "", s.place || ""));
+  if (tier === "full" && !narrow) {
+    const nA = (s.agents || []).length, nW = (s.workflows || []).length, ag = el("small", "sag");
+    const a = el("span", nA ? "live" : "", (nA ? "● " : "○ ") + nA + " agent" + (nA === 1 ? "" : "s")); ag.append(a);
+    if (nW) ag.append("  ", el("span", "wf", "≡ " + nW));
+    name.append(ag);
   }
-  c.append(head);
-  if (!s.timeline) return c;
-  // The chart, no taller than 64 px, with its figures beside it (under it, on a narrow card).
-  const t = s.timeline, body = el("div", "tbody"), side = el("div", "tside");
-  // One fact a row, each with its priority: a short card gives up p4 first, then p3, p2 (see the ladder in the stylesheet).
-  const line = (p, ...parts) => { const r = el("div", p); r.append(...parts); side.append(r); return r; };
-  const nA = s.agents.length, nW = s.workflows.length;
-  const ag = el("span", nA ? "live" : "", (nA ? "● " : "○ ") + nA + " agent" + (nA === 1 ? "" : "s"));
-  line("p1", ag, ...(nW ? ["   ", el("span", "wf", "≡ " + nW + " workflow" + (nW === 1 ? "" : "s"))] : []));
-  if (s.tasks && s.tasks.total) {
-    const T = s.tasks, doing = T.open.filter((x) => x.status === "in_progress").length, n = Math.min(20, T.total), bar = el("span", "tbar");
-    // One pip a task (scaled to 20 at most): done in green, in progress in white.
-    const dn = Math.round((T.done / T.total) * n), dg = Math.min(n - dn, Math.ceil((doing / T.total) * n));
-    for (let i = 0; i < n; i++) bar.append(el("i", i < dn ? "d" : i < dn + dg ? "n" : ""));
-    line("p2", el("span", "k", "TASKS"), bar, el("b", "", T.done + "/" + T.total));
+  // The middle: what it is doing or asking, its lane under it, and on the tallest rows a line of detail.
+  const mid = el("div", "smid"), dl = el("div", "sdo");
+  if (s.sub && s.sub.source === "prompt") dl.append(el("span", "you", "▸ ")); else if (s.sub && s.sub.source === "reply") dl.append(el("span", "cl", "◆ "));
+  dl.append((s.sub && s.sub.text) || s.word);
+  const strip = el("div", "sstrip"), t = s.timeline;
+  if (t) {
+    const n = t.tools.length || 1, svg = svgEl("svg", { viewBox: "0 0 " + n + " 1", preserveAspectRatio: "none" });
+    for (const x of [n / 3, (2 * n) / 3]) svg.append(svgEl("line", { x1: x, x2: x, y1: 0, y2: 1, stroke: "#262d37", "stroke-width": "1", "stroke-dasharray": "2 3", "vector-effect": "non-scaling-stroke" }));
+    t.tools.forEach((v, i) => svg.append(svgEl("rect", { x: i + 0.08, y: 0, width: 0.84, height: 1, rx: "0.15", fill: s.color, "fill-opacity": v ? (0.28 + 0.72 * Math.sqrt(v / tl.tools)).toFixed(2) : "0.06" })));
+    if (big) svg.append(svgEl("path", { class: "sout", d: t.out.map((v, i) => (i ? "L" : "M") + (i + 0.5) + " " + (0.94 - (v / tl.out) * 0.88).toFixed(3)).join(" "), fill: "none", stroke: "#be94ff", "stroke-width": "1.5", "stroke-opacity": ".85", "stroke-linejoin": "round", "vector-effect": "non-scaling-stroke" }));
+    strip.append(svg, el("i", "snow"));
+    for (const m of t.marks) {
+      const g = ticks ? el("i", "stk") : el("span", "lm", m.g);
+      g.style.left = ((m.i + 0.5) / n) * 100 + "%";
+      if (ticks) g.style.background = m.c; else g.style.color = m.c;
+      g.title = MARKS[m.g] || ""; strip.append(g);
+    }
+    strip.append(el("i", "sx"));
   }
-  const tools = t.tools.reduce((a, b) => a + b, 0), out = t.out.reduce((a, b) => a + b, 0);
-  line("p3", el("span", "k", "USE"), el("b", "", kfmt(tools)), " tool calls · ", el("b", "", kfmt(out)), " out" + (tl.axis ? " / " + agoText(tl.axis.minutes) : ""));
-  line("p4", el("span", "k", "CPU"), el("b", "", t.cpu + "%"), t.mem ? " · " + t.mem : "");
-  body.append(timelineChart(s), side);
-  c.append(body);
-  // Under it, in whatever height the card has left (never more: the timeline is one screen), what it is doing in
-  // detail, most useful first, a line each, running down and then across in columns, cut where the room ends.
-  const info = timelineInfo(s);
-  if (info.childNodes.length) c.append(info);
-  return c;
-}
-// One line of a card's detail: a glyph in its colour, the words (a tool's name in cyan), and how long, on the right.
-function tiRow(cls, glyph, colour, words, right) {
-  const r = el("div", "ti" + (cls ? " " + cls : ""));
-  const g = el("span", "g", glyph); g.style.color = colour;
-  const w = el("span", "w"); for (const x of Array.isArray(words) ? words : [words]) w.append(x);
-  r.append(g, w);
-  if (right) r.append(el("span", "rt", right));
+  mid.append(dl, strip);
+  if (tier === "full") { const det = el("div", "sdet"), parts = detailParts(s).slice(0, narrow ? 1 : 3); parts.forEach((p, i) => { if (i) det.append("  ·  "); det.append(p); }); mid.append(det); }
+  // The tail: state · time (and on a short row, Compact's context %), then context · tools · output.
+  const tail = el("div", "stail"), lines = el("div", "stl");
+  if (big && !narrow && matchMedia("(min-width:1100px)").matches) tail.append(s.ctx ? ring(26, 4, ctxParts(s), "") : el("span", "sring0"));
+  const st1 = el("div", "st1"), word = el("span", "sw", (s.glyph ? s.glyph + " " : "") + s.word); st1.append(word);
+  if (s.time) st1.append(el("span", "stime", " · " + s.time));
+  if ((ticks || narrow) && s.ctx) { const pc = el("span", "", " · " + s.ctx.pct + "%"); pc.style.color = tone(s.ctx.pct); st1.append(pc); }
+  lines.append(st1);
+  if (!ticks && !narrow) {
+    const st2 = el("div", "st2");
+    if (s.ctx) { const pc = el("span", "", s.ctx.pct + "%"); pc.style.color = tone(s.ctx.pct); pc.style.fontWeight = "650"; st2.append(pc); if (big && s.ctx.runway) st2.append(el("span", "rw", " " + s.ctx.runway)); }
+    if (t) { if (s.ctx) st2.append(" · "); st2.append(el("b", "", kfmt(t.tools.reduce((a, b) => a + b, 0))), " · " + kfmt(t.out.reduce((a, b) => a + b, 0))); }
+    lines.append(st2);
+  }
+  tail.append(lines);
+  r.append(el("span", "sdot"), name, mid, tail);
   return r;
 }
-// Not even a line's height left: the detail is hidden rather than shown cut. Its style is its own (patch leaves it).
-const tinfoFits = new ResizeObserver((es) => { for (const e of es) { if (!e.target.isConnected) tinfoFits.unobserve(e.target); else e.target.style.visibility = e.contentRect.height < 19 ? "hidden" : ""; } });
-function timelineInfo(s) {
-  const box = el("div", "tinfo"), R = s.roster || { workflows: [], agents: [] };
-  tinfoFits.observe(box);
-  const doing = (a) => (a.tool ? [el("span", "tool", a.tool), " " + (a.doing || "")] : [a.doing || ""]);
-  const agent = (a, cls) => { const g = GLYPH[a.state] || GLYPH.quiet; return tiRow(cls, g[0], g[1], [el("b", "", a.label), " · ", ...doing(a)], a.ago); };
-  if (s.fails) box.append(tiRow("bad", "✗", "#f0625c", [el("b", "", s.fails.n + " failed"), " · " + s.fails.last], s.fails.ago));
-  if (R.main) box.append(agent(R.main, ""));
-  for (const w of R.workflows) {
-    // A workflow: its phases (✓ done, ◐ now, ○ next), how many of its agents are done; then each agent and what it is on.
-    const words = [el("b", "", w.name)];
-    if (w.outcome === "running") w.phases.forEach((p) => { const x = el("span", "ph " + p.state, " " + (p.state === "done" ? "✓" : p.state === "now" ? "◐" : "○") + " " + p.name); words.push(x); });
-    else words.push(" · " + (w.outcome === "completed" ? "completed" : w.status || "failed"));
-    box.append(tiRow("wfh", w.outcome === "running" ? "≡" : w.outcome === "completed" ? "✓" : "✗", w.outcome === "failed" ? "#f0625c" : "#be94ff", words, w.done + "/" + w.total + " · " + w.age));
-    for (const a of w.agents) box.append(agent(a, "child"));
-    if (w.more) box.append(tiRow("child", "+", "#6b7380", w.more + " more agents"));
-  }
-  for (const a of R.agents) box.append(agent(a, ""));
-  if (s.tasks && s.tasks.open.length) {
-    const open = [...s.tasks.open.filter((t) => t.status === "in_progress"), ...s.tasks.open.filter((t) => t.status !== "in_progress")];
-    box.append(tiRow("head", "☰", "#56cdd6", [el("b", "", "Tasks"), " · " + s.tasks.done + "/" + s.tasks.total + " done"]));
-    for (const t of open) box.append(tiRow("child" + (t.status === "in_progress" ? " now" : " todo"), t.status === "in_progress" ? "◐" : "○", t.status === "in_progress" ? "#f5f7fa" : "#6b7380", [t.text, ...(t.blocked ? [el("span", "blk", "blocked")] : [])], t.since));
-  }
-  for (const p of s.prs) box.append(tiRow("", "⇡", "#c6cdd7", segs(p)));
-  for (const b of s.bg) box.append(tiRow("", "↻", "#56cdd6", b.desc, b.ago));
-  if (s.changes) box.append(tiRow("", "±", "#6b7380", segs(s.changes)));
-  if (R.finished) box.append(tiRow("", "✓", "#3e805c", R.finished + " agent" + (R.finished === 1 ? "" : "s") + " finished in the window"));
-  return box;
+// Hovering a lane: one crosshair down every row at that moment, its time in a pill over the axis, and that bar's
+// figures for the row under the pointer. Never needed: the rows say it all.
+const sTip = el("div", "stip"), sPill = el("div", "spill");
+sTip.hidden = sPill.hidden = true; document.body.append(sTip, sPill);
+let sHoverAt = null;
+function spineHover(at) {
+  const cards = $("cards");
+  const clear = () => { cards.classList.remove("sx-on"); sTip.hidden = sPill.hidden = true; sHoverAt = null; };
+  if (view !== "timeline" || !tl.axis || !at) return clear();
+  const target = document.elementFromPoint(at[0], at[1]), r = target && target.closest(".srow"), strip = r && r.querySelector(".sstrip");
+  const data = r && tl.data.get(r.dataset.sid);
+  if (!strip || !data) return clear();
+  const b = strip.getBoundingClientRect();
+  if (at[0] < b.left || at[0] > b.right) return clear();
+  sHoverAt = at;
+  const N = data.tools.length, i = Math.max(0, Math.min(N - 1, Math.floor(((at[0] - b.left) / b.width) * N)));
+  cards.style.setProperty("--hx", ((i + 0.5) / N).toFixed(4)); cards.classList.add("sx-on");
+  const barMs = (tl.axis.end - tl.axis.start) / N, when = new Date(tl.axis.start + i * barMs).toLocaleTimeString([], barMs < 60000 ? { hour: "2-digit", minute: "2-digit", second: "2-digit" } : { hour: "2-digit", minute: "2-digit" });
+  sTip.textContent = when + " · " + data.tools[i] + " tool call" + (data.tools[i] === 1 ? "" : "s") + " · " + kfmt(data.out[i]) + " out";
+  const x = b.left + ((i + 0.5) / N) * b.width;
+  sTip.hidden = false;
+  sTip.style.left = Math.max(b.left, Math.min(b.right - sTip.offsetWidth, x - sTip.offsetWidth / 2)) + "px"; sTip.style.top = b.top - sTip.offsetHeight - 6 + "px";
+  const ax = cards.querySelector(".sphead .sax");
+  if (ax) { const a = ax.getBoundingClientRect(); sPill.textContent = when; sPill.hidden = false; sPill.style.left = x - sPill.offsetWidth / 2 + "px"; sPill.style.top = a.top + (a.height - sPill.offsetHeight) / 2 + "px"; }
 }
+$("cards").addEventListener("mousemove", (e) => spineHover([e.clientX, e.clientY]));
+$("cards").addEventListener("mouseleave", () => spineHover(null));
 // The sessions that do not fit a one-screen view, on one line: those waiting on you first, in amber.
 function moreLine(rest) {
   rest = [...rest].sort((a, b) => (b.state === "needs") - (a.state === "needs"));
