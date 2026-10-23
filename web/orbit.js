@@ -1,17 +1,17 @@
 // The orbit view: the whole fleet as a lit, glowing scene in Fleet's own colours, on three.js (vendor/, served at
 // /three.js) with its bloom (vendor/three-addons, at /three-addons/).
 //
-// A navy night, a glossy floor with faint lanes and drifting dust. At the centre, a monument to the five-hour limit:
-// Fleet's starburst, each ray a step along the logo's cyan, blue and violet, standing on a plinth, ringed by glowing
-// gauges for the five hours and the week, with holographic rings turning round it. Round it, every session is a system
-// of its own on a pedestal, in its state's colour (amber waiting, red stalled, green at work, blue your turn): a pool of
+// A navy night of stars and drifting dust. At the centre, Answertree's A, solid and bevelled, along the logo's cyan,
+// blue and violet, turning slowly; under it, glowing gauges for the five hours and the week, and holographic rings
+// turning round it. Round it, in a cloud through all three dimensions, every session is a system of its own on a
+// floating platform, in its state's colour (amber waiting, red stalled, green at work, blue your turn): a pool of
 // that light under it, a ring of light turning over it; its own starburst, its rays the bars of its recent activity, so
 // it breathes as it works; its context as a ring; its activity as a 3D bar chart round the rim, graded cyan to violet by
 // height; its tasks as a tower of blocks; each workflow a violet prism with its phases as beads and its agents wired
 // to it, light running down the wires while they work. A session waiting on you lifts, beats, and sends a beacon of
-// light up into the sky. Physics keeps it all apart: a system's parts push each other off and spring back to what
-// they belong to; the pedestals grow to hold them and push each other off, those waiting on you drawn to the centre.
-// Tool calls fly into the monument as comets with tails; it flares as they land. Hover anything to see what it is;
+// light up into the sky. Physics keeps it all apart, in 3D: a system's parts push each other off and spring back to
+// what they belong to; the platforms grow to hold them and push each other off, above, below and beside, those
+// waiting on you drawn to the centre. Tool calls fly into the A as comets with tails; it flares as they land. Hover anything to see what it is;
 // click a session to open it; drag to turn, scroll or pinch to come closer. Motion is springs; less for those who ask.
 import * as THREE from "/three.js";
 import { EffectComposer } from "/three-addons/EffectComposer.js";
@@ -27,7 +27,26 @@ const AGENT_COLOUR = { active: P.cyan, tool: P.white, quiet: "#3d6f78", done: "#
 // The logo's gradient, at f from 0 to 1: cyan, blue, violet.
 const GRAD = [new THREE.Color(P.g1), new THREE.Color(P.g2), new THREE.Color(P.g3)];
 const brand = (f, out = new THREE.Color()) => (f < 0.5 ? out.copy(GRAD[0]).lerp(GRAD[1], f * 2) : out.copy(GRAD[1]).lerp(GRAD[2], (f - 0.5) * 2));
-const RAYS = 12, BARS = 24, MONUMENT = 5.2; // rays a burst, bars round a rim, the room the monument keeps
+const RAYS = 12, BARS = 24, MONUMENT = 6.6; // rays a burst, bars round a rim, the room the monument keeps
+// Answertree's A, from the logo (packages/ui-leaves answertree-logo.svelte, viewBox 24 x 20): a tall leaning bar and
+// the foot beside it. Its path is made only of M, H, L, C and Z, read here into shapes, y up, centred.
+const LOGO_PATH = "M9.10254 0.586914H15.1533L12.0068 8.31738L11.9883 8.27148L11.4463 9.61621L7.99316 18.1709C7.80568 18.6353 7.35557 18.9395 6.85645 18.9395H0.869141L7.96582 1.35449C8.15326 0.890228 8.60299 0.58696 9.10254 0.586914ZM18.3066 10.3164C19.107 10.3164 19.8283 10.8024 20.1299 11.5459L23.1289 18.9395H17.6406C16.8402 18.9395 16.1189 18.4531 15.8174 17.71L12.8174 10.3164H18.3066Z";
+export function logoShapes(d = LOGO_PATH, scale = 0.42) {
+  const shapes = [], tok = d.match(/[MHLCZ]|-?\d*\.?\d+/g) || [];
+  let sh = null, cmd = "", i = 0, x = 0, y = 0;
+  const X = (v) => (v - 12) * scale, Y = (v) => -(v - 9.76) * scale; // centred, y up
+  const num = () => Number(tok[i++]);
+  while (i < tok.length) {
+    if (/[MHLCZ]/.test(tok[i])) cmd = tok[i++];
+    if (cmd === "M") { x = num(); y = num(); sh = new THREE.Shape(); sh.moveTo(X(x), Y(y)); shapes.push(sh); cmd = "L"; }
+    else if (cmd === "L") { x = num(); y = num(); sh.lineTo(X(x), Y(y)); }
+    else if (cmd === "H") { x = num(); sh.lineTo(X(x), Y(y)); }
+    else if (cmd === "C") { const a = num(), b = num(), c = num(), e = num(); x = num(); y = num(); sh.bezierCurveTo(X(a), Y(b), X(c), Y(e), X(x), Y(y)); }
+    else if (cmd === "Z") { sh.closePath(); cmd = ""; }
+    else i++;
+  }
+  return shapes;
+}
 const MAX = { rays: 12 * 64, bars: 24 * 64, tiles: 20 * 64, agents: 600, beads: 400, prisms: 160, pellets: 300, trail: 5, links: 1600, flow: 1200, hud: 14 * 64, dust: 700 };
 const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const motion = () => (still || document.body.classList.contains("calm") ? 0.3 : 1);
@@ -96,7 +115,7 @@ export function mount(box, hooks) {
   }
   renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
   renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 0.95;
-  renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.shadowMap.enabled = false; // a cloud in space: nothing for shadows to fall on
   renderer.setClearColor(P.bg);
   box.append(renderer.domElement);
   const labels = document.createElement("div"); labels.className = "olabels"; box.append(labels);
@@ -108,7 +127,7 @@ export function mount(box, hooks) {
   scene.fog = new THREE.Fog("#0a0f1a", 70, 180);
   const camera = new THREE.PerspectiveCamera(40, box.clientWidth && box.clientHeight ? box.clientWidth / box.clientHeight : 1, 0.1, 600); // its shape from the start: the first state is laid out for it
   S = { box, hooks, renderer, scene, camera, labels, core, tip, sessions: new Map(), t: 0, last: performance.now(), raf: 0, maxAct: 1, limit: [-1, -1], pellets: [], flare: 0,
-    view: { theta: 0.7, phi: 0.92, phiTo: 0.92, r: 40, fit: 40, zoom: 1, dragging: false, idleSince: 0, tilted: false, framed: false }, extent: 12, layoutAt: 0, portrait: camera.aspect < 0.8, beacons: new Map() };
+    view: { theta: 0.7, phi: 1.12, phiTo: 1.12, r: 40, fit: 40, zoom: 1, dragging: false, idleSince: 0, tilted: false, framed: false }, extent: 12, layoutAt: 0, portrait: camera.aspect < 0.8, beacons: new Map() };
   // Bloom: what glows, glows; the shapes stay solid.
   S.composer = new EffectComposer(renderer);
   S.composer.addPass(new RenderPass(scene, camera));
@@ -120,23 +139,18 @@ export function mount(box, hooks) {
   // own cyan light on everything near it.
   scene.add(new THREE.HemisphereLight("#9fc7ff", "#0b111a", 0.75));
   const key = new THREE.DirectionalLight("#e3ecff", 2.4);
-  key.position.set(18, 34, 12); key.castShadow = true; key.shadow.mapSize.set(2048, 2048); key.shadow.radius = 5; key.shadow.bias = -0.0004;
+  key.position.set(18, 34, 12); key.castShadow = false; key.shadow.mapSize.set(2048, 2048); key.shadow.radius = 5; key.shadow.bias = -0.0004;
   scene.add(key); scene.add(key.target); S.key = key;
   const rim = new THREE.DirectionalLight(P.g3, 0.6); rim.position.set(-20, 12, -24); scene.add(rim);
-  S.monoLight = new THREE.PointLight(P.g1, 14, 22, 2); S.monoLight.position.set(0, 4, 0); scene.add(S.monoLight);
-  // The floor: deep navy, glossy, taking the shadows; a faint grid, and the lanes round the centre glowing a little.
-  const floor = new THREE.Mesh(new THREE.PlaneGeometry(600, 600), new THREE.MeshStandardMaterial({ color: P.floor, roughness: 0.62, metalness: 0.25 }));
-  floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; scene.add(floor);
-  const grid = [];
-  for (let v = -80; v <= 80; v += 4) grid.push(-80, 0.01, v, 80, 0.01, v, v, 0.01, -80, v, 0.01, 80);
-  const gg = new THREE.BufferGeometry(); gg.setAttribute("position", new THREE.Float32BufferAttribute(grid, 3));
-  scene.add(new THREE.LineSegments(gg, new THREE.LineBasicMaterial({ color: "#132238", transparent: true, opacity: 0.55 })));
-  for (const [r, c] of [[MONUMENT + 2.5, P.g1], [MONUMENT + 9, P.g2], [MONUMENT + 16, P.g3]]) {
-    const lane = arc(r, 0.022, 1, c, 0.02, 0.5); lane.castShadow = false; lane.material.transparent = true; lane.material.opacity = 0.3; scene.add(lane);
-  }
+  S.monoLight = new THREE.PointLight(P.g1, 14, 22, 2); S.monoLight.position.set(0, 0, 0); scene.add(S.monoLight);
+  // Stars, far off all round.
+  const stars = [];
+  for (let k = 0; k < 1600; k++) { const u = Math.random() * 2 - 1, a = Math.random() * Math.PI * 2, q = Math.sqrt(1 - u * u), r = 120 + Math.random() * 120; stars.push(r * q * Math.cos(a), r * u, r * q * Math.sin(a)); }
+  const sg = new THREE.BufferGeometry(); sg.setAttribute("position", new THREE.Float32BufferAttribute(stars, 3));
+  scene.add(new THREE.Points(sg, new THREE.PointsMaterial({ color: "#8fa3c7", size: 0.6, sizeAttenuation: true, transparent: true, opacity: 0.7, depthWrite: false })));
   // Dust: motes in the logo's colours, drifting up and round.
   const dn = MAX.dust, dp = new Float32Array(dn * 3), dc = new Float32Array(dn * 3), dtmp = new THREE.Color();
-  for (let i = 0; i < dn; i++) { const a = Math.random() * Math.PI * 2, r = 3 + Math.random() * 40; dp.set([Math.cos(a) * r, Math.random() * 14, Math.sin(a) * r], i * 3); brand(Math.random(), dtmp); dc.set([dtmp.r, dtmp.g, dtmp.b], i * 3); }
+  for (let i = 0; i < dn; i++) { const a = Math.random() * Math.PI * 2, r = 3 + Math.random() * 36; dp.set([Math.cos(a) * r, (Math.random() - 0.5) * 30, Math.sin(a) * r], i * 3); brand(Math.random(), dtmp); dc.set([dtmp.r, dtmp.g, dtmp.b], i * 3); }
   const dgeo = new THREE.BufferGeometry(); dgeo.setAttribute("position", new THREE.BufferAttribute(dp, 3)); dgeo.setAttribute("color", new THREE.BufferAttribute(dc, 3));
   S.dust = new THREE.Points(dgeo, new THREE.PointsMaterial({ size: 0.16, map: radialTexture(), vertexColors: true, transparent: true, opacity: 0.8, depthWrite: false, blending: THREE.AdditiveBlending }));
   scene.add(S.dust);
@@ -172,25 +186,28 @@ export function mount(box, hooks) {
   const lg = new THREE.BufferGeometry(); lg.setAttribute("position", new THREE.BufferAttribute(S.linkPos, 3)); lg.setAttribute("color", new THREE.BufferAttribute(S.linkCol, 3));
   S.links = new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false })); S.links.frustumCulled = false; scene.add(S.links);
 
-  // The monument: Fleet's starburst on a plinth, each ray a step along the logo's gradient, glowing; the gauges on the
-  // floor round it, and two holographic rings turning, tilted, about it.
+  // The centre: Answertree's A, extruded and bevelled, coloured across the logo's gradient, its edges lit, turning
+  // slowly; under it the gauges, floating; round it two holographic rings, tilted, turning.
   S.mono = new THREE.Group(); scene.add(S.mono);
-  const plinth = new THREE.Mesh(disc, solid({ color: P.panel, roughness: 0.25, metalness: 0.6 })); plinth.scale.set(2.6, 0.35, 2.6); plinth.castShadow = plinth.receiveShadow = true; S.mono.add(plinth);
-  const plinthRim = arc(2.6, 0.05, 1, P.g1, 0.36, 0.9); plinthRim.castShadow = false; S.mono.add(plinthRim);
-  S.monoRays = []; S.monoMats = [];
-  S.monoSpark = new THREE.Group(); S.monoSpark.position.y = 2.9; S.mono.add(S.monoSpark);
-  for (let i = 0; i < RAYS; i++) {
-    const c = brand(i / (RAYS - 1)), mat = solid({ color: c, roughness: 0.3, emissive: c, emissiveIntensity: 0.3 });
-    const m = new THREE.Mesh(rayGeo, mat); m.rotation.z = (i / RAYS) * Math.PI * 2; m.castShadow = true; m.scale.set(1.8, 2.1, 1.8); S.monoSpark.add(m); S.monoRays.push(m); S.monoMats.push(mat);
-  }
-  const heart = new THREE.Mesh(ball, solid({ color: P.white, emissive: P.white, emissiveIntensity: 1.0 })); heart.scale.setScalar(0.26); S.monoSpark.add(heart);
-  S.mono.add(arc(3.7, 0.16, 1, P.line, 0.17), arc(4.35, 0.07, 1, P.line, 0.08));
+  const aGeo = new THREE.ExtrudeGeometry(logoShapes(), { depth: 1.2, bevelEnabled: true, bevelThickness: 0.18, bevelSize: 0.12, bevelSegments: 4, curveSegments: 16 });
+  aGeo.center();
+  aGeo.computeBoundingBox();
+  { const pos = aGeo.attributes.position, bb = aGeo.boundingBox, cols = new Float32Array(pos.count * 3), c = new THREE.Color();
+    for (let k = 0; k < pos.count; k++) { brand(((pos.getX(k) - bb.min.x) / (bb.max.x - bb.min.x)) * 0.7 + ((pos.getY(k) - bb.min.y) / (bb.max.y - bb.min.y)) * 0.3, c); cols.set([c.r, c.g, c.b], k * 3); }
+    aGeo.setAttribute("color", new THREE.BufferAttribute(cols, 3)); }
+  S.aMat = glowing(new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.22, metalness: 0.3, emissive: "#ffffff", emissiveIntensity: 0 }), 0.85);
+  S.logo = new THREE.Group(); S.mono.add(S.logo);
+  S.logo.add(new THREE.Mesh(aGeo, S.aMat));
+  S.logo.add(new THREE.LineSegments(new THREE.EdgesGeometry(aGeo, 35), new THREE.LineBasicMaterial({ color: "#bdf6ff", transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false })));
+  S.geos.push(aGeo);
+  S.gaugeY = -3.4; // the gauges float under the A
+  S.mono.add(arc(3.7, 0.16, 1, P.line, S.gaugeY), arc(4.35, 0.07, 1, P.line, S.gaugeY - 0.12));
   S.holo = [];
   for (const [r, c, tilt] of [[5.6, P.g1, 0.35], [6.3, P.g3, -0.25]]) {
     const ring = new THREE.Group();
     const mat = solid({ color: c, emissive: c, emissiveIntensity: 0.9 });
     for (let k = 0; k < 30; k++) { const m = new THREE.Mesh(dash, mat); m.scale.setScalar(r); m.rotation.y = (k / 30) * Math.PI * 2; ring.add(m); }
-    ring.rotation.x = tilt; ring.position.y = 2.6; S.mono.add(ring); S.holo.push(ring);
+    ring.rotation.x = tilt; ring.position.y = 0; S.mono.add(ring); S.holo.push(ring);
   }
 
   // Turning, coming closer, hovering, clicking.
@@ -245,11 +262,11 @@ function refit() {
   const { camera, view } = S;
   const halfV = THREE.MathUtils.degToRad(camera.fov / 2), halfH = Math.atan(Math.tan(halfV) * camera.aspect);
   S.portrait = camera.aspect < 0.8;
-  if (!view.tilted) view.phiTo = S.portrait ? 0.55 : camera.aspect < 1.2 ? 0.75 : 0.92;
+  if (!view.tilted) view.phiTo = S.portrait ? 1.2 : 1.12; // from a little above: the cloud's height shows
   // What has to fit: the scene's half-width across the screen, and its depth seen at the camera's tilt (with the
   // height of what stands on it), each against its own half-angle.
-  const across = S.across || S.extent, deep = S.deep || S.extent, phi = view.phiTo;
-  view.fit = Math.max(14, Math.max((across + 1) / Math.tan(halfH), (deep * Math.cos(phi) + 4.5 * Math.sin(phi) + 1) / Math.tan(halfV)) * 1.04);
+  const across = S.across || S.extent, deep = S.deep || S.extent, high = S.high || MONUMENT, phi = view.phiTo;
+  view.fit = Math.max(14, Math.max((across + 1) / Math.tan(halfH), (deep * Math.cos(phi) + high * Math.sin(phi) + 1) / Math.tan(halfV)) * 1.0);
   // In its first two seconds (the canvas's real shape and the first state arrive in either order) it snaps to the
   // framing; after that, it eases.
   if ((!view.framed || S.t < 2) && S.box.clientWidth) { view.r = view.fit * view.zoom; view.phi = view.phiTo; view.framed = true; }
@@ -294,8 +311,8 @@ export function update(d) {
     let x = S.sessions.get(s.sid);
     if (!x) {
       // A newcomer starts out on the edge, small, and grows into its place.
-      const a = S.sessions.size * 2.4 + Math.random() * 0.3, d0 = MONUMENT + 4 + Math.sqrt(S.sessions.size) * 3;
-      x = { sid: s.sid, pos: new THREE.Vector2(Math.cos(a) * d0, Math.sin(a) * d0), vel: new THREE.Vector2(), R: 0.2, Rto: 2.4, grow: 0, spin: Math.random() * 6, lift: 0, parts: new Map(), act: new Array(BARS).fill(0), rayLen: new Array(RAYS).fill(0.3), tools: -1, ctxKey: null, label: document.createElement("div"), seed: [...s.sid].reduce((a2, c) => a2 + c.charCodeAt(0), 0) };
+      const a = S.sessions.size * 2.4 + Math.random() * 0.3, d0 = MONUMENT + 4 + Math.sqrt(S.sessions.size) * 3, h0 = (((S.sessions.size * 0.618) % 1) - 0.5) * 12;
+      x = { sid: s.sid, pos: new THREE.Vector2(Math.cos(a) * d0, Math.sin(a) * d0), vel: new THREE.Vector2(), h: h0, vh: 0, R: 0.2, Rto: 2.4, grow: 0, spin: Math.random() * 6, lift: 0, parts: new Map(), act: new Array(BARS).fill(0), rayLen: new Array(RAYS).fill(0.3), tools: -1, ctxKey: null, label: document.createElement("div"), seed: [...s.sid].reduce((a2, c) => a2 + c.charCodeAt(0), 0) };
       x.label.className = "ol"; x.label.addEventListener("click", () => S.hooks.open(s.sid)); S.labels.append(x.label);
       x.group = new THREE.Group(); S.scene.add(x.group);
       S.sessions.set(s.sid, x); fresh = true;
@@ -352,7 +369,7 @@ export function update(d) {
     }
   }
   // Newcomers: let everything settle before it is seen, so the scene opens arranged, not flying into place.
-  if (fresh) { for (let k = 0; k < 360; k++) physics(1 / 60); for (const x of S.sessions.values()) { x.R = x.Rto; for (const p of x.parts.values()) p.v.set(0, 0); x.vel.set(0, 0); } S.extent = 0; S.across = 0; S.deep = 0; physics(1 / 60); if (!S.settled) { S.view.r = S.view.fit; S.settled = true; } }
+  if (fresh) { for (let k = 0; k < 360; k++) physics(1 / 60); for (const x of S.sessions.values()) { x.R = x.Rto; for (const p of x.parts.values()) p.v.set(0, 0); x.vel.set(0, 0); x.vh = 0; } S.extent = 0; S.across = 0; S.deep = 0; S.high = 0; physics(1 / 60); if (!S.settled) { S.view.r = S.view.fit; S.settled = true; } }
   for (const [sid, x] of S.sessions) if (!seen.has(sid)) { S.scene.remove(x.group); x.group.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); }); x.label.remove(); S.beacons.delete(sid); S.sessions.delete(sid); }
   // The monument's gauges: the five hours (thick) and the week (thin), rebuilt when they move.
   const lim = (re) => (d.account && d.account.limits ? d.account.limits.find((l) => re.test(l.label)) : undefined);
@@ -361,8 +378,8 @@ export function update(d) {
     for (const g of S.gauges || []) { S.mono.remove(g); g.geometry.dispose(); g.material.dispose(); }
     const tone = (v) => (v >= 80 ? P.red : v >= 60 ? P.white : P.cyan); // as the page's rings
     S.gauges = [];
-    if (pct[0] >= 0) S.gauges.push(arc(3.7, 0.2, pct[0] / 100, tone(pct[0]), 0.22, 1.1));
-    if (pct[1] >= 0) S.gauges.push(arc(4.35, 0.09, pct[1] / 100, P.violet, 0.1, 1.1));
+    if (pct[0] >= 0) S.gauges.push(arc(3.7, 0.2, pct[0] / 100, tone(pct[0]), S.gaugeY + 0.02, 1.1));
+    if (pct[1] >= 0) S.gauges.push(arc(4.35, 0.09, pct[1] / 100, P.violet, S.gaugeY - 0.1, 1.1));
     for (const g of S.gauges) S.mono.add(g);
     S.limit = pct;
   }
@@ -404,27 +421,35 @@ function physics(dt) {
   // On a tall screen the systems are drawn in harder across it than into it, so they spread into its height: along the
   // camera's own axes, so the oval always stands up the screen.
   const th = S.view.theta, rx = -Math.sin(th), rz = Math.cos(th), squash = S.portrait ? Math.min(2.4, 1 / Math.max(0.3, S.camera.aspect)) : 1;
+  // Up and down too: drawn in less steeply than across, so the cloud has height (more of it on a tall screen).
+  const lift = S.portrait ? 0.16 : 0.3;
   for (const x of xs) {
-    const d = x.pos.length() || 0.001, pull = PULL[x.s.state] ?? 0.2, k = (-pull * 1.6 * dt) / Math.max(1, d * 0.15);
+    const d = Math.hypot(x.pos.x, x.pos.y, x.h) || 0.001, pull = PULL[x.s.state] ?? 0.2, k = (-pull * 1.0 * dt) / Math.max(1, d * 0.15);
     const a = x.pos.x * rx + x.pos.y * rz, b = x.pos.x * rz - x.pos.y * rx; // across the screen, and into it
     x.vel.x += k * (a * squash * rx + (b / squash) * rz); x.vel.y += k * (a * squash * rz - (b / squash) * rx);
+    x.vh += k * x.h * lift;
+    // Off the A, in every direction.
     const minM = MONUMENT + x.R + 0.8;
-    if (d < minM) x.vel.addScaledVector(x.pos, ((minM - d) * 12 * dt) / d);
+    if (d < minM) { const f = ((minM - d) * 12 * dt) / d; x.vel.addScaledVector(x.pos, f); x.vh += x.h * f; }
   }
   for (let i = 0; i < xs.length; i++)
     for (let j = i + 1; j < xs.length; j++) {
-      const a = xs[i], b = xs[j], dx = b.pos.x - a.pos.x, dz = b.pos.y - a.pos.y, d = Math.hypot(dx, dz) || 0.001, min = a.R + b.R + 1.8;
-      const push = d < min ? (min - d) * 14 : 1.5 / (d * d);
+      // In 3D: a platform is flat, so one above another needs less room than one beside it.
+      const a = xs[i], b = xs[j], dx = b.pos.x - a.pos.x, dz = b.pos.y - a.pos.y, dy = (b.h - a.h) * 1.5, d = Math.hypot(dx, dz, dy) || 0.001, min = a.R + b.R + 2.4;
+      const push = d < min ? (min - d) * 14 : 5 / (d * d);
       a.vel.x -= (dx / d) * push * dt; a.vel.y -= (dz / d) * push * dt; b.vel.x += (dx / d) * push * dt; b.vel.y += (dz / d) * push * dt;
+      a.vh -= (dy / d) * push * dt; b.vh += (dy / d) * push * dt;
     }
-  let extent = MONUMENT + 3, across = MONUMENT + 1, deep = MONUMENT + 1;
+  let extent = MONUMENT + 3, across = MONUMENT + 1, deep = MONUMENT + 1, high = MONUMENT;
   for (const x of xs) {
     x.vel.multiplyScalar(Math.exp(-3.2 * dt)); x.pos.addScaledVector(x.vel, dt);
-    extent = Math.max(extent, x.pos.length() + x.R + 1);
+    x.vh *= Math.exp(-3.2 * dt); x.h += x.vh * dt;
+    extent = Math.max(extent, Math.hypot(x.pos.x, x.pos.y, x.h) + x.R + 1);
+    high = Math.max(high, Math.abs(x.h) + 4.5);
     across = Math.max(across, Math.abs(x.pos.x * rx + x.pos.y * rz) + x.R);
     deep = Math.max(deep, Math.abs(x.pos.x * rz - x.pos.y * rx) + x.R);
   }
-  if (Math.abs(extent - S.extent) > 1.2 || Math.abs(across - (S.across || 0)) > 1 || Math.abs(deep - (S.deep || 0)) > 1) { S.extent = extent; S.across = across; S.deep = deep; refit(); }
+  if (Math.abs(extent - S.extent) > 1.2 || Math.abs(across - (S.across || 0)) > 1 || Math.abs(deep - (S.deep || 0)) > 1 || Math.abs(high - (S.high || 0)) > 1) { S.extent = extent; S.across = across; S.deep = deep; S.high = high; refit(); }
 }
 
 // ── each frame ──
@@ -440,20 +465,19 @@ function frame(nowMs) {
   if (!view.dragging && !S.portrait && nowMs - view.idleSince > 4000) view.theta += dt * 0.04;
   view.r = spring(view.r, view.fit * view.zoom, 4, raw); view.phi = spring(view.phi, view.phiTo, 3, raw);
   camera.position.set(view.r * Math.sin(view.phi) * Math.cos(view.theta), view.r * Math.cos(view.phi), view.r * Math.sin(view.phi) * Math.sin(view.theta));
-  camera.lookAt(0, 1, 0);
+  camera.lookAt(0, 0, 0);
 
   // The monument breathes with the fleet's work, and warms as tool calls land in it.
   let fleet = 0; for (const x of S.sessions.values()) fleet += x.act.reduce((a, b) => a + b, 0) / BARS;
-  S.monoSpark.rotation.y = Math.atan2(camera.position.x, camera.position.z) + Math.sin(t * 0.3) * 0.35;
-  S.monoSpark.rotation.z = t * 0.12; // the gradient goes round
-  S.monoRays.forEach((m, i) => { const len = 2.0 + 0.4 * Math.min(1, fleet / 2) + 0.1 * Math.sin(t * 1.4 + i); m.scale.y = spring(m.scale.y, len, 3, raw); });
+  // The A turns slowly, bobs a little, and warms as tool calls land in it.
+  S.logo.rotation.y = t * 0.3; S.logo.position.y = Math.sin(t * 0.6) * 0.25;
   S.flare = Math.max(0, S.flare - raw * 0.8);
-  for (const m of S.monoMats) m.emissiveIntensity = 0.3 + S.flare * 0.6;
+  S.aMat.emissiveIntensity = S.flare * 0.35;
   S.monoLight.intensity = 12 + S.flare * 16 + 2 * Math.sin(t * 1.3);
   S.holo[0].rotation.y = t * 0.35; S.holo[1].rotation.y = -t * 0.22;
   // The dust drifts up and round, and comes back in at the floor.
   const dpos = S.dust.geometry.attributes.position;
-  for (let i = 0; i < dpos.count; i++) { let y = dpos.getY(i) + dt * 0.35; if (y > 14) y = 0; dpos.setY(i, y); }
+  for (let i = 0; i < dpos.count; i++) { let y = dpos.getY(i) + dt * 0.35; if (y > 15) y = -15; dpos.setY(i, y); }
   dpos.needsUpdate = true; S.dust.rotation.y = t * 0.01;
 
   let nr = 0, nb = 0, nt = 0, na = 0, nbd = 0, np = 0, nl = 0, ns = 0, nh = 0, nf = 0;
@@ -469,19 +493,19 @@ function frame(nowMs) {
     const info = { sid: s.sid, title: s.name, lines: [(s.glyph ? s.glyph + " " : "") + s.word + (s.time ? " · " + s.time : ""), (s.sub && s.sub.text) || "", s.ctx ? "context " + s.ctx.pct + "% of " + s.ctx.max : ""].filter(Boolean) };
     x.grow = spring(x.grow, 1, 2.5, raw);
     x.R = spring(x.R, x.Rto, 2.2, raw);
-    const R = x.R * x.grow, px = x.pos.x, pz = x.pos.y;
-    x.group.position.set(px, 0, pz);
+    const R = x.R * x.grow, px = x.pos.x, pz = x.pos.y, py = x.h; // its platform floats at its height
+    x.group.position.set(px, py, pz);
     // The pedestal, its rim in the state's colour; a waiting session's halo beating round it.
     if (ns < 64) {
-      put(S.pedestals, ns, px, 0, pz, R, 0.22, R); S.pedestals.setColorAt(ns, C.copy(PANEL).lerp(x.colour, 0.06)); of.pedestals[ns] = info;
-      put(S.rims, ns, px, 0.23, pz, R, 2.2, R); S.rims.setColorAt(ns, C.copy(x.colour).multiplyScalar(receded ? 0.4 : 1));
+      put(S.pedestals, ns, px, py, pz, R, 0.22, R); S.pedestals.setColorAt(ns, C.copy(PANEL).lerp(x.colour, 0.06)); of.pedestals[ns] = info;
+      put(S.rims, ns, px, py + 0.23, pz, R, 2.2, R); S.rims.setColorAt(ns, C.copy(x.colour).multiplyScalar(receded ? 0.4 : 1));
       // A pool of its light on the floor round it.
-      put(S.pools, ns, px, 0.015, pz, R * 3.2, 1, R * 3.2); S.pools.setColorAt(ns, C.copy(x.colour).multiplyScalar(receded ? 0.08 : 0.24));
+      put(S.pools, ns, px, py - 0.04, pz, R * 2.6, 1, R * 2.6); S.pools.setColorAt(ns, C.copy(x.colour).multiplyScalar(receded ? 0.08 : 0.24));
       ns++;
     }
     // A ring of light over it, turning: segments in its colour, more of them lit the busier it is.
     { const lit = receded ? 4 : 6 + Math.round(8 * Math.min(1, x.act.reduce((a, b) => a + b, 0) / BARS * 3));
-      for (let k = 0; k < 14 && nh < MAX.hud; k++) { if (k >= lit) continue; put(S.hud, nh, px, 0.7 + (x.lift || 0) * 0.3, pz, R + 0.3, R + 0.3, R + 0.3, (k / 14) * Math.PI * 2 + t * (receded ? 0.1 : 0.5)); S.hud.setColorAt(nh, C.copy(x.colour).multiplyScalar(receded ? 0.4 : 1)); nh++; } }
+      for (let k = 0; k < 14 && nh < MAX.hud; k++) { if (k >= lit) continue; put(S.hud, nh, px, py + 0.7 + (x.lift || 0) * 0.3, pz, R + 0.3, R + 0.3, R + 0.3, (k / 14) * Math.PI * 2 + t * (receded ? 0.1 : 0.5)); S.hud.setColorAt(nh, C.copy(x.colour).multiplyScalar(receded ? 0.4 : 1)); nh++; } }
     if (S.beacons.has(s.sid)) { const b = S.beacons.get(s.sid); b.material.opacity = 0.14 + 0.16 * Math.max(0, Math.sin(t * 4.2)) ** 4; }
     {
     }
@@ -489,7 +513,7 @@ function frame(nowMs) {
     x.halo.visible = needs; x.halo.scale.setScalar(R + 0.35 + beat * 0.4); x.halo.position.y = 0.1; x.halo.material.emissiveIntensity = 0.6 + beat * 1.2;
     // The burst: standing over its pedestal, turning; lifted while it waits; each ray a bar of recent activity.
     x.lift = spring(x.lift, needs ? 0.7 : 0, 3, raw);
-    const cy = 2.5 + x.lift + 0.12 * Math.sin(t * 0.9 + x.seed);
+    const cy = py + 2.5 + x.lift + 0.12 * Math.sin(t * 0.9 + x.seed);
     // It faces you, turning a little either way (more while it works), so it reads as Claude's spark, not a bundle.
     x.spin = Math.atan2(camera.position.x - px, camera.position.z - pz) + Math.sin(t * (s.state === "working" ? 0.9 : 0.4) + x.seed) * 0.45;
     const wob = stalled ? Math.sin(t * 9 + x.seed) * 0.05 : 0;
@@ -500,11 +524,11 @@ function frame(nowMs) {
       put(S.rays, nr, px, cy, pz, 1.3 * x.grow, 1.35 * x.rayLen[i] * x.grow, 1.3 * x.grow, x.spin, (i / RAYS) * Math.PI * 2 + wob);
       S.rays.setColorAt(nr, C.copy(x.colour).multiplyScalar(receded ? 0.45 : 1)); of.rays[nr] = info; nr++;
     }
-    x.ctx.position.set(0, cy, 0); x.ctx.rotation.y = t * 0.15; x.ctx.scale.setScalar(x.grow);
+    x.ctx.position.set(0, cy - py, 0); x.ctx.rotation.y = t * 0.15; x.ctx.scale.setScalar(x.grow);
     // The activity, as a ring of 3D bars round the rim: oldest to newest, the newest brightest.
     for (let i = 0; i < BARS && nb < MAX.bars; i++) {
       const a = x.act[i] || 0, ang = (i / BARS) * Math.PI * 1.7 + Math.PI * 0.65, h = 0.06 + 1.3 * Math.sqrt(a) * x.grow;
-      put(S.bars, nb, px + Math.cos(ang) * (R - 0.32), 0.22, pz + Math.sin(ang) * (R - 0.32), 0.17, h, 0.17, -ang);
+      put(S.bars, nb, px + Math.cos(ang) * (R - 0.32), py + 0.22, pz + Math.sin(ang) * (R - 0.32), 0.17, h, 0.17, -ang);
       brand(Math.min(1, Math.sqrt(a)), C).multiplyScalar((receded ? 0.35 : 0.6) + 0.4 * (i / BARS)); // cyan low, violet high, the newest brightest
       S.bars.setColorAt(nb, C);
       of.bars[nb] = { sid: s.sid, title: s.name + " · activity", lines: ["tool calls across the window, a bar each, round the rim to the newest"] }; nb++;
@@ -516,7 +540,7 @@ function frame(nowMs) {
       const parent = p.parent === "core" ? null : x.parts.get(p.parent);
       if (p.kind === "wf" && np < MAX.prisms) {
         const live = p.w.outcome === "running";
-        put(S.prisms, np, wx, 0.22, wz, 0.62 * sc, 0.42 * sc, 0.62 * sc, t * 0.2);
+        put(S.prisms, np, wx, py + 0.22, wz, 0.62 * sc, 0.42 * sc, 0.62 * sc, t * 0.2);
         S.prisms.setColorAt(np, C.copy(VIOLET).multiplyScalar(live ? 1 : 0.45)); of.prisms[np] = { title: p.title, lines: p.lines }; np++;
         // Its phases: beads in an arc over it, done in lilac, the one under way lit and beating, the rest dark.
         const ph = (p.w.phases || []).slice(0, 10);
@@ -524,27 +548,27 @@ function frame(nowMs) {
           if (nbd >= MAX.beads) return;
           const ang = (k / Math.max(1, ph.length - 1) - 0.5) * 2.2;
           const lit = q.state === "now" ? 0.14 + 0.05 * Math.sin(t * 6) : 0.11;
-          put(S.beads, nbd, wx + Math.sin(ang) * 0.75 * sc, 0.95 + Math.cos(ang) * 0.35, wz, lit * sc, lit * sc, lit * sc);
+          put(S.beads, nbd, wx + Math.sin(ang) * 0.75 * sc, py + 0.95 + Math.cos(ang) * 0.35, wz, lit * sc, lit * sc, lit * sc);
           S.beads.setColorAt(nbd, C.set(q.state === "done" ? P.violet : q.state === "now" ? P.white : "#2c2845")); nbd++;
         });
-        link(px, cy - 0.6, pz, wx, 0.64 * sc + 0.22, wz, C2.copy(VIOLET).multiplyScalar(0.8), live);
+        link(px, cy - 0.6, pz, wx, py + 0.64 * sc + 0.22, wz, C2.copy(VIOLET).multiplyScalar(0.8), live);
       } else if (p.kind === "agent" && na < MAX.agents) {
         const st = p.a.state, r = (st === "done" ? 0.2 : 0.3) * sc;
-        const bob = st === "active" ? Math.abs(Math.sin(t * 3 + p.key.length)) * 0.18 : 0, ay = 0.22 + r + 0.15 + bob;
+        const bob = st === "active" ? Math.abs(Math.sin(t * 3 + p.key.length)) * 0.18 : 0, ay = py + 0.22 + r + 0.15 + bob;
         put(S.agents, na, wx, ay, wz, r, r, r);
         S.agents.setColorAt(na, C.set(AGENT_COLOUR[st] || P.dim)); of.agents[na] = { title: (st === "active" ? "● " : st === "tool" ? "◐ " : st === "done" ? "✓ " : "○ ") + p.title, lines: p.lines }; na++;
         const wire = C2.set(AGENT_COLOUR[st] || P.dim).multiplyScalar(0.8), live = st === "active" || st === "tool";
-        if (parent) link(px + parent.p.x, 0.5, pz + parent.p.y, wx, ay, wz, wire, live);
+        if (parent) link(px + parent.p.x, py + 0.5, pz + parent.p.y, wx, ay, wz, wire, live);
         else link(px, cy - 0.6, pz, wx, ay, wz, wire, live);
       } else if (p.kind === "tasks") {
         // A tower of blocks, a task each (twenty at most): done in sage, under way lit and beating, to do dark.
         const T = p.t, n = Math.min(20, T.total), doing = T.open.filter((q) => q.status === "in_progress").length;
         const dn = Math.round((T.done / T.total) * n), dg = Math.min(n - dn, Math.ceil((doing / T.total) * n));
         for (let k = 0; k < n && nt < MAX.tiles; k++) {
-          put(S.tiles, nt, wx, 0.22 + k * 0.16 * sc, wz, 0.62 * sc, 0.13 * sc, 0.62 * sc, 0.4);
+          put(S.tiles, nt, wx, py + 0.22 + k * 0.16 * sc, wz, 0.62 * sc, 0.13 * sc, 0.62 * sc, 0.4);
           S.tiles.setColorAt(nt, k < dn ? GREEN : k < dn + dg ? C2.copy(WHITE).multiplyScalar(0.75 + 0.25 * Math.sin(t * 5)) : NAVY); of.tiles[nt] = { title: p.title, lines: p.lines }; nt++;
         }
-        link(px, cy - 0.6, pz, wx, 0.22 + n * 0.16 * sc, wz, C2.copy(GREEN).multiplyScalar(0.7));
+        link(px, cy - 0.6, pz, wx, py + 0.22 + n * 0.16 * sc, wz, C2.copy(GREEN).multiplyScalar(0.7));
       }
     }
     // Pellets, now and then, as often as it is busy, between those each new state brings.
@@ -563,7 +587,7 @@ function frame(nowMs) {
     if (q.p < 0) continue;
     for (let k = 0; k < MAX.trail && npl < MAX.pellets * MAX.trail; k++) {
       const p = Math.max(0, q.p - k * 0.025), a = q.x.pos, e = Math.sin(Math.PI * p), u = 1 - p, sz = 0.13 * (1 - k / MAX.trail);
-      put(S.pelletMesh, npl, a.x * u, (2.5 + q.x.lift) * u + 3 * p + e * (2.5 + q.x.R * 0.4), a.y * u, sz, sz, sz);
+      put(S.pelletMesh, npl, a.x * u, (q.x.h + 2.5 + q.x.lift) * u + e * (2.5 + q.x.R * 0.4), a.y * u, sz, sz, sz);
       S.pelletMesh.setColorAt(npl, C.copy(q.x.colour).lerp(CYAN, p).multiplyScalar(1 - k / (MAX.trail + 1))); npl++;
     }
   }
@@ -584,16 +608,20 @@ function labelsFrame(nowMs) {
   if (relayout) S.layoutAt = nowMs;
   const busy = (x) => x.act.reduce((a, b) => a + b, 0);
   const order = [...S.sessions.values()].map((x) => {
-    tmp.set(x.pos.x, 4.3 + x.lift, x.pos.y);
+    tmp.set(x.pos.x, x.h + 4.3 + x.lift, x.pos.y);
     const dist = tmp2.copy(tmp).sub(camera.position).length();
     tmp.project(camera);
     return { x, dist, on: tmp.z < 1 && Math.abs(tmp.x) < 1.2 && Math.abs(tmp.y) < 1.2, sx: (tmp.x * 0.5 + 0.5) * w, sy: (-tmp.y * 0.5 + 0.5) * h };
   }).sort((a, b) => (b.x.s.state === "needs") - (a.x.s.state === "needs") || busy(b.x) - busy(a.x) || a.dist - b.dist);
   const toward = Math.atan2(camera.position.x, camera.position.z);
-  tmp.set(Math.sin(toward) * 4.9, 0.2, Math.cos(toward) * 4.9).project(camera);
+  tmp.set(Math.sin(toward) * 4.9, S.gaugeY, Math.cos(toward) * 4.9).project(camera);
   const cx = (tmp.x * 0.5 + 0.5) * w, cy = (-tmp.y * 0.5 + 0.5) * h;
   S.core.style.left = cx.toFixed(1) + "px"; S.core.style.top = (cy + 8).toFixed(1) + "px";
   const placed = [{ x: cx, y: cy + 8, w: 280, h: 34 }];
+  // The A's own room, as the screen sees it: no label lands on it.
+  { let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (const [ax, ay] of [[-4.2, -3.2], [4.2, -3.2], [-4.2, 3.2], [4.2, 3.2]]) { tmp.set(ax * Math.cos(toward), ay, -ax * Math.sin(toward)).project(camera); const sx = (tmp.x * 0.5 + 0.5) * w, sy = (-tmp.y * 0.5 + 0.5) * h; x0 = Math.min(x0, sx); x1 = Math.max(x1, sx); y0 = Math.min(y0, sy); y1 = Math.max(y1, sy); }
+    placed.push({ x: (x0 + x1) / 2, y: y0, w: x1 - x0, h: y1 - y0 }); }
   let full = 0;
   for (const o of order) {
     const L = o.x.label, needs = o.x.s.state === "needs";
